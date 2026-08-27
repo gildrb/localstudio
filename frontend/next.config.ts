@@ -51,7 +51,7 @@ const nextConfig: NextConfig = {
       "../tsconfig*.json",
     ],
   },
-  transpilePackages: ["@local-studio/contracts", "@local-studio/agent-runtime"],
+  transpilePackages: ["@local-studio/agent-runtime"],
   webpack: (config, { nextRuntime }) => {
     config.resolve.modules = [
       ...(config.resolve.modules ?? ["node_modules"]),

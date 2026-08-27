@@ -54,10 +54,6 @@ export const AutomationsResponseSchema = Schema.Struct({
   automations: Schema.Array(AutomationSchema),
 });
 
-export const AutomationResponseSchema = Schema.Struct({
-  automation: AutomationSchema,
-});
-
 export type AutomationSchedule = typeof AutomationScheduleSchema.Type;
 export type AutomationRun = typeof AutomationRunSchema.Type;
 export type Automation = typeof AutomationSchema.Type;

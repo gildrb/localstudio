@@ -146,11 +146,3 @@ export function sanitizeBrowserPaneUrl(
   if (hostClass === "public" || hostClass === "loopback") return url.toString();
   return hostClass === "private" && options?.allowPrivate ? url.toString() : null;
 }
-
-export function sanitizeLocalFileUrl(raw: string): string | null {
-  const url = parseUrl(raw);
-  if (!url || url.protocol !== "file:") return null;
-  const host = url.hostname.toLowerCase();
-  if (host && host !== "localhost") return null;
-  return url.toString();
-}

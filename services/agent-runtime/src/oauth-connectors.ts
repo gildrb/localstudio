@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
 import { resolveDataDir } from "./data-dir";
 import {
   listConnectors,
@@ -103,16 +104,7 @@ async function readStore(): Promise<Store> {
 function writeStore(store: Store): Promise<void> {
   return writePrivateJson(resolveOAuthTokensFilePath(), store);
 }
-let storeAccess = Promise.resolve();
-
-function withStoreAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = storeAccess.then(operation);
-  storeAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withStoreAccess = createSerialAccess();
 
 function updateStore(mutate: (store: Store) => Store): Promise<Store> {
   return withStoreAccess(async () => {

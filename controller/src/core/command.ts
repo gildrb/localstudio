@@ -125,9 +125,7 @@ export const runCommandAsyncEffect = (
       ? Math.max(0, requestedOutputBytes)
       : DEFAULT_MAX_OUTPUT_BYTES;
     const baseSpawnOptions: SpawnOptions = { env: options.env ?? process.env };
-    const spawnOptions = options.cwd
-      ? { ...baseSpawnOptions, cwd: options.cwd }
-      : baseSpawnOptions;
+    const spawnOptions = options.cwd ? { ...baseSpawnOptions, cwd: options.cwd } : baseSpawnOptions;
     const child = spawn(command, args, spawnOptions);
     options.onSpawn?.(child);
     if (options.stdin !== undefined) {

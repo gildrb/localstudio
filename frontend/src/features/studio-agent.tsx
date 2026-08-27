@@ -5,19 +5,16 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import {
-  ErrorText,
-  JsonView,
-  Page,
+  jsonRequest,
   jsonText,
-  Tabs,
   records,
   requestRecord,
   useJson,
   type Json,
   type RecordJson,
-} from "./studio-core";
+} from "./studio-api";
+import { ErrorText, JsonView, Page, Tabs } from "./studio-ui";
 import { WorkspaceTools } from "./studio-tools";
-import { jsonRequest } from "./studio-request";
 import {
   acceptRuntimePayload,
   decodeCanonicalSession,
@@ -182,7 +179,7 @@ export function Workbench({ quick = false }: { quick?: boolean }) {
   const sessionsState = useJson(sessionListPath(sessionFilter));
   const [sessionId, setSessionId] = useState("");
   const [piSessionId, setPiSessionId] = useState<string | null>(null);
-  const cursor = useRef<RuntimeCursor>({ received: 0, committed: 0, unsequenced: 0 });
+  const cursor = useRef<RuntimeCursor>({ received: 0, unsequenced: 0 });
   const sessionLoadGeneration = useRef(0);
   const [streamVersion, setStreamVersion] = useState(0);
   const [messages, setMessages] = useState<FoldedMessage[]>([]);
@@ -285,7 +282,7 @@ export function Workbench({ quick = false }: { quick?: boolean }) {
     sessionLoadGeneration.current += 1;
     setSessionId(nextSessionId);
     setPiSessionId(null);
-    cursor.current = { received: 0, committed: 0, unsequenced: 0 };
+    cursor.current = { received: 0, unsequenced: 0 };
     setMessages([]);
     setQueued([]);
     setPrompt("");
@@ -368,14 +365,14 @@ export function Workbench({ quick = false }: { quick?: boolean }) {
         `/api/agent/sessions/${encodeURIComponent(id)}?cwd=${encodeURIComponent(projectPath)}`,
       );
       const canonical = decodeCanonicalSession(data);
-      const canonicalPiSessionId = canonical.meta?.piSessionId ?? null;
+      const canonicalPiSessionId = canonical.piSessionId;
       const runtimeData = await requestRecord(
         `/api/agent/runtime/status?sessionId=${encodeURIComponent(id)}${canonicalPiSessionId ? `&piSessionId=${encodeURIComponent(canonicalPiSessionId)}` : ""}`,
       );
       const runtime = decodeRuntimeSnapshot(runtimeData);
       if (sessionLoadGeneration.current !== generation) return;
       setPiSessionId(canonicalPiSessionId);
-      cursor.current = { received: runtime.cursor, committed: runtime.cursor, unsequenced: 0 };
+      cursor.current = { received: runtime.cursor, unsequenced: 0 };
       setMessages(foldSessionEvents(mergeCanonicalRuntimeEvents(canonical.events, runtime.events)));
       setQueued([]);
       setTaskStatus("Session ready");
@@ -512,7 +509,7 @@ export function Workbench({ quick = false }: { quick?: boolean }) {
       }
       if (outcome === "accepted") {
         setTaskStatus("Agent is working");
-        cursor.current = { received: 0, committed: 0, unsequenced: 0 };
+        cursor.current = { received: 0, unsequenced: 0 };
         setQueued([]);
         setStreamVersion((value) => value + 1);
       }

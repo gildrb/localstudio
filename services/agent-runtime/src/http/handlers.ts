@@ -3,7 +3,6 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { Schema } from "effect";
 import {
-  controlTargetHasActiveTurn,
   isAgentThinkingLevel,
   parseAgentTurnRequest,
   type AgentThinkingLevel,
@@ -53,7 +52,7 @@ function resolveTurnSession(turn: AgentTurnRequest): ResolvedTurnSession | null 
       : piRuntimeManager.findSessionForLookup(turn.sessionId, turn.piSessionId);
   if (!resolved) return null;
   const status = resolved.session.status;
-  const controlTargetActive = controlTargetHasActiveTurn(status);
+  const controlTargetActive = status.active === true;
   return {
     effectivePiSessionId: effectivePiSessionId(turn, status, controlTargetActive),
     effectiveStreamingBehavior: effectiveStreamingBehavior(turn, status),

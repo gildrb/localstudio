@@ -32,10 +32,10 @@ function targetSessionPatch(value: UnparsedValue): { targetSessionId: string | n
 
 export async function create(request: Request): Promise<Response> {
   const body = await readJsonBody(request);
-  const name = Option.getOrUndefined(decodeString(body?.name)) ?? "";
-  const prompt = Option.getOrUndefined(decodeString(body?.prompt)) ?? "";
-  const modelId = Option.getOrUndefined(decodeString(body?.modelId)) ?? "";
-  const cwd = Option.getOrUndefined(decodeString(body?.cwd)) ?? "";
+  const name = Option.getOrElse(decodeString(body?.name), () => "");
+  const prompt = Option.getOrElse(decodeString(body?.prompt), () => "");
+  const modelId = Option.getOrElse(decodeString(body?.modelId), () => "");
+  const cwd = Option.getOrElse(decodeString(body?.cwd), () => "");
   const schedule = Option.getOrElse(
     Schema.decodeUnknownOption(AutomationScheduleSchema)(body?.schedule),
     () => ({ kind: "daily", time: "08:00" }),

@@ -2,10 +2,9 @@
 
 import { Schema } from "effect";
 import Link from "next/link";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useState, type FormEvent } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
-import { ErrorText, JsonView } from "./studio-ui";
-export { ErrorText, JsonView } from "./studio-ui";
+import { ErrorText, JsonView, Page, Tabs } from "./studio-ui";
 import { DesktopManager, MachineManager, NormalizedUsage, RecipeManager } from "./studio-admin";
 
 import {
@@ -17,9 +16,6 @@ import {
   type Json,
   type RecordJson,
 } from "./studio-api";
-export { jsonText, records, request, requestRecord, useJson } from "./studio-api";
-export type { Json, RecordJson } from "./studio-api";
-
 const isNumber = Schema.is(Schema.Number);
 
 type SettingsUpdate = { backendUrl: Json; apiKey?: string };
@@ -71,40 +67,6 @@ function loadSavedControllerMetadata(): SavedController[] {
   } catch {
     return [];
   }
-}
-
-export function Page({
-  title,
-  actions,
-  children,
-}: {
-  title: string;
-  actions?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="page">
-      <header>
-        <div>
-          <h1>{title}</h1>
-          <p>Private by default. Local services keep custody of your data.</p>
-        </div>
-        {actions}
-      </header>
-      {children}
-    </section>
-  );
-}
-export function Tabs({ items }: { items: ReadonlyArray<readonly [string, string]> }) {
-  return (
-    <div className="tabs">
-      {items.map(([href, label]) => (
-        <Link key={href} href={href}>
-          {label}
-        </Link>
-      ))}
-    </div>
-  );
 }
 
 export function Dashboard() {

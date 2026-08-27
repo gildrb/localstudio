@@ -138,6 +138,13 @@ type AgentTurnOptionalStrings = {
   browserSessionId?: string;
 };
 
+function parseThinkingLevel(value: UnparsedValue): ParseResult<AgentThinkingLevel | undefined> {
+  if (value == null) return { ok: true, value: undefined };
+  return isAgentThinkingLevel(value)
+    ? { ok: true, value }
+    : { ok: false, error: "thinkingLevel must be a supported reasoning level" };
+}
+
 function parseRequiredTurnStrings(body: UnknownRecord): ParseResult<AgentTurnRequiredStrings> {
   const message = stringField(body, "message", true);
   if (!message.ok) return message;
@@ -188,16 +195,14 @@ function parseQueueFields(body: UnknownRecord): ParseResult<AgentTurnQueueFields
   return { ok: true, value: fields };
 }
 
-function addOptionalTurnFields(
-  request: AgentTurnRequest,
-  queue: AgentTurnQueueFields,
-  thinkingLevel: AgentThinkingLevel | null | undefined,
+function optionalTurnFields(
+  thinkingLevel: AgentThinkingLevel | undefined,
   streamingBehavior: AgentStreamingBehavior | undefined,
-): void {
-  if (thinkingLevel) request.thinkingLevel = thinkingLevel;
-  if (queue.queueAction) request.queueAction = queue.queueAction;
-  if (queue.queueReplacement) request.queueReplacement = queue.queueReplacement;
-  if (streamingBehavior) request.streamingBehavior = streamingBehavior;
+): Partial<Pick<AgentTurnRequest, "thinkingLevel" | "streamingBehavior">> {
+  const fields: Partial<Pick<AgentTurnRequest, "thinkingLevel" | "streamingBehavior">> = {};
+  if (thinkingLevel) fields.thinkingLevel = thinkingLevel;
+  if (streamingBehavior) fields.streamingBehavior = streamingBehavior;
+  return fields;
 }
 
 export function parseAgentTurnRequest(input: UnparsedValue): ParseResult<AgentTurnRequest> {
@@ -205,10 +210,8 @@ export function parseAgentTurnRequest(input: UnparsedValue): ParseResult<AgentTu
   if (!body) return { ok: false, error: "Invalid JSON body" };
   const requiredStrings = parseRequiredTurnStrings(body);
   if (!requiredStrings.ok) return requiredStrings;
-  const thinkingLevel = body["thinkingLevel"];
-  if (thinkingLevel != null && !isAgentThinkingLevel(thinkingLevel)) {
-    return { ok: false, error: "thinkingLevel must be a supported reasoning level" };
-  }
+  const thinkingLevel = parseThinkingLevel(body["thinkingLevel"]);
+  if (!thinkingLevel.ok) return thinkingLevel;
   const optionalStrings = parseOptionalTurnStrings(body);
   if (!optionalStrings.ok) return optionalStrings;
   const queue = parseQueueFields(body);
@@ -237,8 +240,9 @@ export function parseAgentTurnRequest(input: UnparsedValue): ParseResult<AgentTu
     skills: sanitizeComposerSkills(body["skills"]),
     promptTemplates: sanitizeComposerPromptTemplates(body["promptTemplates"]),
     mode,
+    ...queue.value,
+    ...optionalTurnFields(thinkingLevel.value, streamingBehavior),
   };
-  addOptionalTurnFields(request, queue.value, thinkingLevel, streamingBehavior);
   return { ok: true, value: request };
 }
 
@@ -264,10 +268,4 @@ function parseImages(value: UnparsedValue): ParseResult<AgentImageInput[]> {
   }
   const error = agentImageLimitError(images);
   return error ? { ok: false, error } : { ok: true, value: images };
-}
-
-export function controlTargetHasActiveTurn(
-  status: { active?: boolean; running?: boolean } | null | undefined,
-): boolean {
-  return status?.active === true;
 }

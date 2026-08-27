@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { ErrorText, JsonView } from "./studio-ui";
 import {
+  jsonRequest,
   jsonText,
   records,
   requestRecord,
@@ -16,10 +17,6 @@ const isNumber = Schema.is(Schema.Number);
 function numberText(value: Json | undefined, fallback = ""): string {
   return isNumber(value) ? String(value) : fallback;
 }
-function jsonBody(value: RecordJson, method = "POST"): RequestInit {
-  return { method, headers: { "content-type": "application/json" }, body: JSON.stringify(value) };
-}
-
 function useFields<T extends Record<string, string>>(initial: T) {
   const [fields, setFields] = useState(initial);
   const input = (key: keyof T) => ({
@@ -100,7 +97,7 @@ export function RecipeManager() {
           onClick={() =>
             run(
               id ? `/api/proxy/recipes/${encodeURIComponent(id)}` : "/api/proxy/recipes",
-              jsonBody(draft, id ? "PUT" : "POST"),
+              jsonRequest(draft, id ? "PUT" : "POST"),
             )
           }
         >
@@ -274,7 +271,7 @@ export function MachineManager() {
               rigId
                 ? `/api/proxy/studio/rigs/${encodeURIComponent(rigId)}`
                 : "/api/proxy/studio/rigs",
-              jsonBody({ name, description: description || null }, rigId ? "PUT" : "POST"),
+              jsonRequest({ name, description: description || null }, rigId ? "PUT" : "POST"),
             )
           }
         >
@@ -343,7 +340,7 @@ export function MachineManager() {
               nodeId
                 ? `/api/proxy/studio/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeId)}`
                 : `/api/proxy/studio/rigs/${encodeURIComponent(rigId)}/nodes`,
-              jsonBody(nodeBody(), nodeId ? "PUT" : "POST"),
+              jsonRequest(nodeBody(), nodeId ? "PUT" : "POST"),
             )
           }
         >
@@ -449,7 +446,7 @@ export function DesktopManager() {
         return { ok: false, error: "Deployment omitted credentials" };
       await requestRecord(
         "/api/settings",
-        jsonBody({ backendUrl: result.url, apiKey: result.apiKey }),
+        jsonRequest({ backendUrl: result.url, apiKey: result.apiKey }),
       );
       return { ok: true, url: result.url, credentialStored: true };
     });

@@ -119,6 +119,25 @@ async function planFor(
   };
 }
 
+async function readAgentConfig(
+  configPath: string,
+  format: AgentAttachPlan["format"],
+): Promise<AgentConfigFile> {
+  if (format === "json") return readJsonFile(configPath);
+  const file = await readYamlFile(configPath);
+  if (file.error) return { exists: file.exists, error: file.error };
+  const decoded = Option.map(decodeLocalAgentConfig(file.document?.toJS()), (config) => ({
+    ...config,
+  }));
+  if (file.exists && Option.isNone(decoded)) {
+    return {
+      exists: true,
+      error: `${configPath} does not contain a YAML object`,
+    };
+  }
+  return { exists: file.exists, config: Option.getOrUndefined(decoded) };
+}
+
 async function attachToAgent(
   agent: LocalAgentId,
   home: string,
@@ -135,28 +154,7 @@ async function attachToAgent(
     };
   }
 
-  let file: AgentConfigFile;
-  if (format === "yaml") {
-    const yamlFile = await readYamlFile(configPath);
-    if (yamlFile.error) {
-      return { agent, ok: false, configPath, error: yamlFile.error };
-    }
-    const decodedConfig = Option.map(
-      decodeLocalAgentConfig(yamlFile.document?.toJS()),
-      (config) => ({ ...config }),
-    );
-    if (yamlFile.exists && Option.isNone(decodedConfig)) {
-      return {
-        agent,
-        ok: false,
-        configPath,
-        error: `${configPath} does not contain a YAML object`,
-      };
-    }
-    file = { exists: yamlFile.exists, config: Option.getOrUndefined(decodedConfig) };
-  } else {
-    file = await readJsonFile(configPath);
-  }
+  const file = await readAgentConfig(configPath, format);
   if (file.error) {
     return { agent, ok: false, configPath, error: file.error };
   }

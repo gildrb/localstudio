@@ -25,9 +25,5 @@ export const GoogleAccountViewSchema = Schema.Struct({
   accounts: Schema.Array(GoogleAccountEntryViewSchema),
 });
 
-export const GoogleAccountResponseSchema = Schema.Struct({ account: GoogleAccountViewSchema });
-export const GoogleAuthorizationResponseSchema = Schema.Struct({ authorizationUrl: Schema.String });
-
 export type GoogleConnectionView = typeof GoogleConnectionViewSchema.Type;
-export type GoogleAccountEntryView = typeof GoogleAccountEntryViewSchema.Type;
 export type GoogleAccountView = typeof GoogleAccountViewSchema.Type;

@@ -243,10 +243,14 @@ async function readSessionSummary(
     return summaryFromCore(cached.core, stats.mtime);
   }
   const { header, firstUserMessage } = await scanSessionSummary(filepath);
+  if (!header) {
+    rememberSummary(filepath, { mtimeMs: stats.mtimeMs, core: null });
+    return null;
+  }
 
   let lastUserPromptText: string | undefined;
   let lastUserPromptAt: string | undefined;
-  if (header && firstUserMessage) {
+  if (firstUserMessage) {
     const lastTurn = await readLastUserTurn(filepath);
     if (lastTurn) {
       const visible = sessionTitleFromUserPrompt(lastTurn.text);
@@ -255,20 +259,17 @@ async function readSessionSummary(
     }
   }
 
-  let core: SummaryCacheEntry["core"] = null;
-  if (header) {
-    core = {
-      id: isString(header.id) ? header.id : "",
-      filename,
-      cwd: isString(header.cwd) ? header.cwd : "",
-      startedAt: isString(header.timestamp) ? header.timestamp : stats.birthtime.toISOString(),
-      modelId: isString(header.modelId) ? header.modelId : null,
-      provider: isString(header.provider) ? header.provider : null,
-      firstUserMessage,
-    };
-    if (lastUserPromptText !== undefined) core.lastUserPromptText = lastUserPromptText;
-    if (lastUserPromptAt !== undefined) core.lastUserPromptAt = lastUserPromptAt;
-  }
+  const core: NonNullable<SummaryCacheEntry["core"]> = {
+    id: isString(header.id) ? header.id : "",
+    filename,
+    cwd: isString(header.cwd) ? header.cwd : "",
+    startedAt: isString(header.timestamp) ? header.timestamp : stats.birthtime.toISOString(),
+    modelId: isString(header.modelId) ? header.modelId : null,
+    provider: isString(header.provider) ? header.provider : null,
+    firstUserMessage,
+  };
+  if (lastUserPromptText !== undefined) core.lastUserPromptText = lastUserPromptText;
+  if (lastUserPromptAt !== undefined) core.lastUserPromptAt = lastUserPromptAt;
   rememberSummary(filepath, { mtimeMs: stats.mtimeMs, core });
   return summaryFromCore(core, stats.mtime);
 }

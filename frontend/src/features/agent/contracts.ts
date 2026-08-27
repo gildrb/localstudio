@@ -58,6 +58,7 @@ export type GitAction =
 type AgentContractInput = typeof Schema.Unknown.Encoded;
 
 const isString = Schema.is(Schema.String);
+const isSimpleGitAction = Schema.is(Schema.Literals(["init", "push"]));
 type AgentContractBody = NonNullable<ReturnType<typeof objectRecord>>;
 
 function parseAddWorktree(body: AgentContractBody): ParseResult<GitAction> {
@@ -76,8 +77,7 @@ export function parseGitAction(input: AgentContractInput): ParseResult<GitAction
   if (!body || !isString(body.action)) {
     return { ok: false, error: "action is required" };
   }
-  if (body.action === "init") return { ok: true, value: { action: "init" } };
-  if (body.action === "push") return { ok: true, value: { action: "push" } };
+  if (isSimpleGitAction(body.action)) return { ok: true, value: { action: body.action } };
   if (body.action === "checkout") {
     const ref = stringField(body, "ref", true);
     return ref.ok ? { ok: true, value: { action: "checkout", ref: ref.value! } } : ref;

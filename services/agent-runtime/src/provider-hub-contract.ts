@@ -12,8 +12,6 @@ export type ProviderView = {
   modelCount: number;
 };
 
-export type ProvidersResponse = { providers: ProviderView[] };
-
 export type ProviderLoginPrompt = {
   id: number;
   type: "text" | "secret" | "select" | "manual_code";
@@ -47,5 +45,3 @@ export type ProviderLoginJobView = {
   events: ProviderLoginEvent[];
   pendingPrompt?: ProviderLoginPrompt;
 };
-
-export type ProviderLoginStartResponse = { jobId: string };

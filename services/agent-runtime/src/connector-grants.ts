@@ -3,6 +3,7 @@ import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
 import { resolveDataDir } from "./data-dir";
 import { enabledConnectors } from "./connectors-service";
 import {
@@ -20,16 +21,7 @@ export {
 
 type GrantsFile = typeof ConnectorGrantsFileSchema.Type;
 
-let grantsAccess = Promise.resolve();
-
-function withGrantsAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = grantsAccess.then(operation);
-  grantsAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withGrantsAccess = createSerialAccess();
 
 export function resolveConnectorGrantsFilePath(): string {
   return join(resolveDataDir(), "connector-grants.json");

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { chmodSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { frontendDir, git, repoRoot, run } from "./lib.mjs";
+import { git, repoRoot } from "./lib.mjs";
 
 function parsedVersion(value) {
   const match = value.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
@@ -37,38 +37,6 @@ export function doctor() {
   ])
     requireTool(label, command, ["--version"], minimum);
   console.log("Toolchain check passed");
-}
-
-export function setupRepository() {
-  doctor();
-  for (const directory of ["controller", "shared", "services/agent-runtime"]) {
-    run("bun", ["install", "--frozen-lockfile"], path.join(repoRoot, directory));
-  }
-  run("npm", ["ci", "--legacy-peer-deps"], frontendDir);
-  console.log("Repository setup complete");
-}
-
-export function linkServices() {
-  const servicesDir = path.join(repoRoot, "services");
-  const linkPath = path.join(servicesDir, "node_modules");
-  mkdirSync(servicesDir, { recursive: true });
-
-  let kind = "missing";
-  try {
-    const stat = lstatSync(linkPath);
-    kind = stat.isSymbolicLink() ? "link" : stat.isDirectory() ? "directory" : "file";
-  } catch {}
-  if (kind === "directory") {
-    console.error(`[link-services] ${linkPath} is a real directory; leaving it alone.`);
-    process.exit(0);
-  }
-  if (kind !== "missing") rmSync(linkPath, { recursive: true, force: true });
-
-  if (process.platform === "win32") {
-    symlinkSync(path.join(frontendDir, "node_modules"), linkPath, "junction");
-  } else {
-    symlinkSync(path.join("..", "frontend", "node_modules"), linkPath, "dir");
-  }
 }
 
 export function setupHooks() {

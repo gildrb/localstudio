@@ -43,9 +43,6 @@ export const ConnectorViewSchema = Schema.Struct({
 export const ConnectorsFileSchema = Schema.Struct({
   connectors: Schema.optional(Schema.Array(ConnectorConfigSchema)),
 });
-export const ConnectorsResponseSchema = Schema.Struct({
-  connectors: Schema.Array(ConnectorViewSchema),
-});
 const {
   auth: _auth,
   origin: _origin,
@@ -58,15 +55,6 @@ export const ConnectorUpsertInputSchema = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean),
 });
 export const ConnectorTestInputSchema = Schema.Struct({ id: Schema.String });
-export const ConnectorTestResponseSchema = Schema.Struct({
-  ok: Schema.Boolean,
-  tool_count: Schema.Number,
-  tool_names: Schema.Array(Schema.String),
-  error: Schema.optional(Schema.String),
-});
-export const ConnectorSshPathResponseSchema = Schema.Struct({
-  path: Schema.NullOr(Schema.String),
-});
 
 export type ConnectorOrigin = typeof ConnectorOriginSchema.Type;
 export type ConnectorAuthReference = typeof ConnectorAuthReferenceSchema.Type;

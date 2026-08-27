@@ -260,8 +260,3 @@ export function closePtySession(id: string): void {
     session.pty.kill();
   } catch {}
 }
-
-export function closePtySessionByOwner(ownerKey: string): void {
-  const session = ownedSession(ownerKey);
-  if (session) closePtySession(session.id);
-}

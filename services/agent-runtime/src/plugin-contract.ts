@@ -14,16 +14,6 @@ const PluginFields = {
 
 export const PluginRowSchema = Schema.Struct(PluginFields);
 
-export const PluginsResponseSchema = Schema.Struct({
-  directory: Schema.String,
-  plugins: Schema.Array(PluginRowSchema),
-});
-
-export const PluginSourceResponseSchema = Schema.Struct({
-  plugin: PluginRowSchema,
-  source: Schema.String,
-});
-
 export const PluginUpsertInputSchema = Schema.Struct({
   id: Schema.String,
   source: Schema.optional(Schema.String),

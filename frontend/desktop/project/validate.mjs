@@ -117,7 +117,6 @@ export function validatePackage() {
 }
 
 export function validateStructure() {
-  const siblingAllowlist = new Set([]);
   const scanRoots = ["frontend/src", "controller/src"];
   const findings = [];
   const walk = (dir) => {
@@ -136,7 +135,6 @@ export function validateStructure() {
       const match = entry.name.match(/^(.+)\.tsx?$/);
       if (!match || !directoryNames.has(match[1])) continue;
       const rel = path.relative(repoRoot, full);
-      if (siblingAllowlist.has(rel)) continue;
       findings.push(
         `${rel} sits next to directory ${path.relative(repoRoot, path.join(dir, match[1]))}/`,
       );
@@ -155,8 +153,6 @@ export function validateStructure() {
 
 export function validateUi() {
   const srcRoot = path.join(repoRoot, "frontend", "src");
-  const legacyPrimitivePurityFiles = new Set([]);
-  const sharedLayerAllowlist = new Set([]);
   const retiredUiFeatureDirs = new Set([
     "recipes",
     "discover",
@@ -252,7 +248,7 @@ export function validateUi() {
         `Import "@/components/${match[1]}" is retired; use "@/features/..." or "@/ui/...".`,
       );
     }
-    if (segments[0] === "ui" && !legacyPrimitivePurityFiles.has(rel)) {
+    if (segments[0] === "ui") {
       for (const match of source.matchAll(/from\s+["']@\/(features|app)\/([^"']+)["']/g)) {
         report(
           "primitive-purity",
@@ -285,7 +281,6 @@ export function validateUi() {
     for (const [rel, importers] of [...sharedModuleImporters.entries()].sort(([a], [b]) =>
       a.localeCompare(b),
     )) {
-      if (sharedLayerAllowlist.has(rel)) continue;
       if (importers.size === 0) {
         report(
           "shared-layer-consumers",
@@ -333,7 +328,6 @@ export function controllerStandards() {
   const SRC_DIR = path.resolve(process.cwd(), "src");
   const MAX_FILES_PER_DIR = Number.parseInt(process.env.MAX_FILES_PER_DIR ?? "20", 10);
   const MAX_SUBDIRS_PER_DIR = Number.parseInt(process.env.MAX_SUBDIRS_PER_DIR ?? "8", 10);
-  const STRUCTURE_COUNT_EXCLUDED_DIRS = new Set();
   const findings = [];
   const stats = { directories: 0, files: 0 };
   const modulesRoot = path.join(SRC_DIR, "modules");
@@ -467,10 +461,7 @@ export function controllerStandards() {
     const entries = readdirSync(dir, { withFileTypes: true });
     const directFiles = entries.filter((entry) => entry.isFile());
     const directDirectories = entries.filter(
-      (entry) =>
-        entry.isDirectory() &&
-        !entry.name.startsWith(".") &&
-        !STRUCTURE_COUNT_EXCLUDED_DIRS.has(entry.name),
+      (entry) => entry.isDirectory() && !entry.name.startsWith("."),
     );
     stats.directories += 1;
     stats.files += directFiles.length;

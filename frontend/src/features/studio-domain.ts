@@ -4,16 +4,11 @@ import { JsonRecordSchema, isRecordJson, type Json, type RecordJson } from "./st
 const isString = Schema.is(Schema.String);
 const isNumber = Schema.is(Schema.Number);
 
-const CanonicalMetaSchema = Schema.Struct({
-  title: Schema.optional(Schema.NullOr(Schema.String)),
-  modelId: Schema.optional(Schema.NullOr(Schema.String)),
-  startedAt: Schema.optional(Schema.NullOr(Schema.String)),
-  piSessionId: Schema.optional(Schema.NullOr(Schema.String)),
-});
 const CanonicalSessionSchema = Schema.Struct({
   events: Schema.optional(Schema.Array(JsonRecordSchema)),
-  cursor: Schema.optional(Schema.NullOr(Schema.Number)),
-  meta: Schema.optional(Schema.NullOr(CanonicalMetaSchema)),
+  meta: Schema.optional(
+    Schema.NullOr(Schema.Struct({ piSessionId: Schema.optional(Schema.NullOr(Schema.String)) })),
+  ),
 });
 const RuntimePayloadSchema = Schema.Union([
   Schema.Struct({
@@ -47,13 +42,7 @@ const RuntimeSnapshotSchema = Schema.Struct({
 
 export type CanonicalSession = {
   events: RecordJson[];
-  cursor: number | null;
-  meta: {
-    title: string | null;
-    modelId: string | null;
-    startedAt: string | null;
-    piSessionId: string | null;
-  } | null;
+  piSessionId: string | null;
 };
 export type RuntimeSnapshot = {
   cursor: number;
@@ -82,18 +71,9 @@ export type RuntimePayload =
 export function decodeCanonicalSession(value: Json): CanonicalSession {
   const decoded = Schema.decodeUnknownOption(CanonicalSessionSchema)(value);
   if (decoded._tag === "None") throw new Error("Invalid canonical session response");
-  const meta = decoded.value.meta;
   return {
     events: [...(decoded.value.events ?? [])],
-    cursor: decoded.value.cursor ?? null,
-    meta: meta
-      ? {
-          title: meta.title ?? null,
-          modelId: meta.modelId ?? null,
-          startedAt: meta.startedAt ?? null,
-          piSessionId: meta.piSessionId ?? null,
-        }
-      : null,
+    piSessionId: decoded.value.meta?.piSessionId ?? null,
   };
 }
 export function decodeRuntimePayload(value: Json): RuntimePayload | null {
@@ -226,7 +206,7 @@ export function foldSessionEvents(events: RecordJson[]): FoldedMessage[] {
   }, initial);
 }
 
-export type RuntimeCursor = { received: number; committed: number; unsequenced: number };
+export type RuntimeCursor = { received: number; unsequenced: number };
 export type RuntimeDecision = { cursor: RuntimeCursor; event: RecordJson | null; identity: string };
 export function acceptRuntimePayload(
   cursor: RuntimeCursor,
@@ -246,7 +226,7 @@ export function acceptRuntimePayload(
     };
   }
   return {
-    cursor: { received: seq, committed: seq, unsequenced: cursor.unsequenced },
+    cursor: { received: seq, unsequenced: cursor.unsequenced },
     event: payload.event,
     identity: `runtime-${seq}`,
   };

@@ -64,12 +64,6 @@ export function sanitizeComposerPromptTemplates(value: UnparsedValue): ComposerP
   });
 }
 
-export function selectedContextPrompt(text: string, skills: ComposerSkillRef[] = []): string {
-  const lines = selectedContextLines(skills);
-  if (!lines.length) return text;
-  return [`Composer context:\n${lines.join("\n")}`, "User prompt:", text].join("\n\n");
-}
-
 export function selectedContextInstructions(skills: ComposerSkillRef[] = []): string | undefined {
   const lines = selectedContextLines(skills);
   if (!lines.length) return undefined;
@@ -77,10 +71,6 @@ export function selectedContextInstructions(skills: ComposerSkillRef[] = []): st
 }
 
 function selectedContextLines(skills: ComposerSkillRef[] = []): string[] {
-  return selectedSkillContextLines(skills);
-}
-
-function selectedSkillContextLines(skills: ComposerSkillRef[] = []): string[] {
   if (!skills.length) return [];
   return ["Loaded skills:", ...skills.map(skillContextLine)];
 }

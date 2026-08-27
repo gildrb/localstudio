@@ -106,6 +106,16 @@ export function mergeOpencodeConfig(config: JsonRecord, model: LocalAgentModel):
   return "added";
 }
 
+function nextModelIndex(models: JsonValue[]): number {
+  let highest = -1;
+  for (const entry of models) {
+    if (!isRecord(entry)) continue;
+    const index = Schema.decodeUnknownOption(Schema.Number)(entry["index"]);
+    if (index._tag === "Some") highest = Math.max(highest, index.value);
+  }
+  return highest + 1;
+}
+
 export function mergeDroidConfig(config: JsonRecord, model: LocalAgentModel): AttachAction {
   const customModelValue = config["customModels"];
   const customModels: JsonValue[] = Array.isArray(customModelValue) ? customModelValue : [];
@@ -128,13 +138,7 @@ export function mergeDroidConfig(config: JsonRecord, model: LocalAgentModel): At
     return "updated";
   }
 
-  const indexes: number[] = [];
-  for (const entry of customModels) {
-    if (!isRecord(entry)) continue;
-    const parsedIndex = Schema.decodeUnknownOption(Schema.Number)(entry["index"]);
-    if (parsedIndex._tag === "Some") indexes.push(parsedIndex.value);
-  }
-  const index = indexes.length > 0 ? Math.max(...indexes) + 1 : 0;
+  const index = nextModelIndex(customModels);
   customModels.push({
     model: model.modelId,
     id: `custom:${slugify(model.displayName)}-${index}`,
@@ -181,13 +185,7 @@ export function mergeHermesConfig(config: JsonRecord, model: LocalAgentModel): A
     return "updated";
   }
 
-  const indexes: number[] = [];
-  for (const entry of customModels) {
-    if (!isRecord(entry)) continue;
-    const parsedIndex = Schema.decodeUnknownOption(Schema.Number)(entry["index"]);
-    if (parsedIndex._tag === "Some") indexes.push(parsedIndex.value);
-  }
-  const index = indexes.length > 0 ? Math.max(...indexes) + 1 : 0;
+  const index = nextModelIndex(customModels);
   const entry: JsonRecord = {
     name: model.displayName,
     model: model.modelId,

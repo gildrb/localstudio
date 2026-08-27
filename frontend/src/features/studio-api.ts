@@ -3,25 +3,21 @@
 import { Schema } from "effect";
 import { useState } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
+import { JsonRecordSchema, JsonSchema, type Json, type RecordJson } from "@/lib/json";
 
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export type RecordJson = { [key: string]: Json };
-
-export const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
-  Schema.Union([
-    Schema.Null,
-    Schema.Boolean,
-    Schema.Number,
-    Schema.String,
-    Schema.mutable(Schema.Array(JsonSchema)),
-    Schema.Record(Schema.String, JsonSchema),
-  ]),
-);
-export const JsonRecordSchema = Schema.Record(Schema.String, JsonSchema);
+export { JsonRecordSchema, JsonSchema };
+export type { Json, RecordJson };
 const decodeJson = Schema.decodeUnknownSync(JsonSchema);
 export const isRecordJson = Schema.is(JsonRecordSchema);
 const isString = Schema.is(Schema.String);
 
+export function jsonRequest(body: Json, method = "POST"): RequestInit {
+  return {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
 export async function request(path: `/api/${string}`, init?: RequestInit): Promise<Json> {
   const response = await fetch(path, { cache: "no-store", ...init });
   const body = decodeJson(await response.json().catch(() => null));

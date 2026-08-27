@@ -2,8 +2,8 @@
 import { Schema } from "effect";
 import { useRef, useState } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
-import { ErrorText, request, requestRecord, type Json, type RecordJson } from "./studio-core";
-import { jsonRequest } from "./studio-request";
+import { jsonRequest, request, requestRecord, type Json, type RecordJson } from "./studio-api";
+import { ErrorText } from "./studio-ui";
 
 const GitStateSchema = Schema.Struct({
   isRepo: Schema.Boolean,

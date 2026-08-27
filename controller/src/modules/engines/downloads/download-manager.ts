@@ -46,6 +46,8 @@ const fillUnknownFileSize = (
 const failedDownloadResponse = (response: Response): boolean =>
   !response.ok && response.status !== 206 && response.status !== 200;
 
+const STOPPED_DOWNLOAD_STATUSES = new Set<DownloadStatus>(["paused", "canceled"]);
+
 const sumDownloadedBytes = (files: DownloadFileInfo[]): number =>
   files.reduce((total, file) => total + (file.downloaded_bytes || 0), 0);
 
@@ -462,14 +464,14 @@ export class DownloadManager {
         );
         for (const file of current.files) {
           if (controller.signal.aborted) break;
-          if (current.status === "paused" || current.status === "canceled") break;
+          if (STOPPED_DOWNLOAD_STATUSES.has(current.status)) break;
           if (file.status === "completed") continue;
           yield* this.downloadFile(current, file, controller, hfToken);
           current = (yield* this.store.get(id)) ?? current;
         }
         if (!stillOwner()) return;
         current = (yield* this.store.get(id)) ?? current;
-        if (current.status === "paused" || current.status === "canceled") return;
+        if (STOPPED_DOWNLOAD_STATUSES.has(current.status)) return;
         const allComplete = current.files.every((file) => file.status === "completed");
         current.status = allComplete ? "completed" : "failed";
         current.completed_at = allComplete ? toTimestamp() : null;
@@ -595,7 +597,7 @@ export class DownloadManager {
       }
       const shouldAppend = shouldAppendDownload(existing, response.status);
       const baseExisting = shouldAppend ? existing : 0;
-      const contentLength = Number(response.headers.get("content-length") ?? 0);
+      const contentLength = Number(response.headers.get("content-length"));
       fillUnknownFileSize(file, contentLength, baseExisting);
       if (!shouldAppend && existing > 0) {
         file.downloaded_bytes = 0;

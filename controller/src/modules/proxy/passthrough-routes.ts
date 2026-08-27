@@ -257,10 +257,9 @@ export const registerPassthroughRoutes = defineRoutes((app, context) => {
       const clientSignal = ctx.req.raw.signal;
       const sessionId = extractSessionId(parsed, (name) => ctx.req.header(name));
       const sourceHeader =
-        ctx.req.header("x-vllm-source") ??
-        ctx.req.header("x-source") ??
-        ctx.req.header("user-agent") ??
-        null;
+        ["x-vllm-source", "x-source", "user-agent"]
+          .map((name) => ctx.req.header(name))
+          .find((value) => value !== undefined) ?? null;
       const { matchedRecipe, requestedModel } = yield* resolveRequestModel(parsed);
       const { upstreamUrl, auth, requestProvider, providerRouting } = resolveUpstreamForModel(
         requestedModel,

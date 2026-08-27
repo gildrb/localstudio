@@ -132,31 +132,32 @@ const buildUsageMetrics = (
 const buildPeakMetrics = (
   peak: PeakMetric | null,
   best: ReturnType<AppContext["stores"]["peakMetricsStore"]["getBestSession"]>,
-): EventData => ({
-  best_session_peak_id: best?.session_id ?? null,
-  best_session_prefill_tps: best?.peak_prefill_tps ?? null,
-  best_session_generation_tps: best?.peak_generation_tps ?? null,
-  best_session_ttft_ms: best?.best_ttft_ms ?? null,
-  peak_prefill_tps: peak?.prefill_tps ?? null,
-  peak_generation_tps: peak?.generation_tps ?? null,
-  peak_ttft_ms: peak?.ttft_ms ?? null,
-});
+): EventData => {
+  const { session_id, peak_prefill_tps, peak_generation_tps, best_ttft_ms } = best ?? {};
+  const { prefill_tps, generation_tps, ttft_ms } = peak ?? {};
+  return {
+    best_session_peak_id: session_id ?? null,
+    best_session_prefill_tps: peak_prefill_tps ?? null,
+    best_session_generation_tps: peak_generation_tps ?? null,
+    best_session_ttft_ms: best_ttft_ms ?? null,
+    peak_prefill_tps: prefill_tps ?? null,
+    peak_generation_tps: generation_tps ?? null,
+    peak_ttft_ms: ttft_ms ?? null,
+  };
+};
 
 type ObservedProcess = Effect.Success<ReturnType<typeof findObservedInferenceProcess>>;
 type EngineScrape = Effect.Success<ReturnType<typeof scrapeEngineMetrics>>;
 
 const resolveActiveEngine = (current: ObservedProcess, scrape: EngineScrape): ActiveEngine => {
-  const isSglang = current?.backend === "sglang" || (!current && scrape.hasSglang);
-  const modelId =
-    current?.served_model_name ??
-    current?.model_path?.split("/").pop() ??
-    scrape.modelName ??
-    "active";
+  const { backend, model_path, served_model_name } = current ?? {};
+  const isSglang = backend === "sglang" || (!current && scrape.hasSglang);
+  const modelId = served_model_name ?? model_path?.split("/").pop() ?? scrape.modelName ?? "active";
   return {
     isSglang,
     modelId,
-    modelPath: current?.model_path ?? null,
-    servedModelName: current?.served_model_name ?? scrape.modelName ?? null,
+    modelPath: model_path ?? null,
+    servedModelName: served_model_name ?? scrape.modelName ?? null,
   };
 };
 

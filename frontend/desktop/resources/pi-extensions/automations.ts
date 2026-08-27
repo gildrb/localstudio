@@ -80,6 +80,11 @@ const WEEKDAY_NAMES = [
   "Saturday",
 ];
 
+function normalizedScheduleTime(value: ScheduleArg["time"]): string | null {
+  const decoded = Schema.decodeUnknownOption(TimeSchema)(value);
+  return decoded._tag === "Some" ? decoded.value.trim() : null;
+}
+
 export function normalizeScheduleArg(
   input: ScheduleArg | undefined,
 ): { ok: true; schedule: NormalizedSchedule } | { ok: false; error: string } {
@@ -96,8 +101,7 @@ export function normalizeScheduleArg(
     return { ok: true, schedule: { kind: "interval", minutes } };
   }
   if (kind === "daily") {
-    const parsedTime = Schema.decodeUnknownOption(TimeSchema)(input.time);
-    const time = parsedTime._tag === "Some" ? parsedTime.value.trim() : null;
+    const time = normalizedScheduleTime(input.time);
     if (!time) {
       return { ok: false, error: "daily schedule needs 'time' as 'HH:MM' (24h)." };
     }
@@ -111,8 +115,7 @@ export function normalizeScheduleArg(
     if (![0, 1, 2, 3, 4, 5, 6].includes(day)) {
       return { ok: false, error: "weekly schedule needs 'day' 0-6 (0 = Sunday)." };
     }
-    const parsedTime = Schema.decodeUnknownOption(TimeSchema)(input.time);
-    const time = parsedTime._tag === "Some" ? parsedTime.value.trim() : null;
+    const time = normalizedScheduleTime(input.time);
     if (!time) {
       return { ok: false, error: "weekly schedule needs 'time' as 'HH:MM' (24h)." };
     }

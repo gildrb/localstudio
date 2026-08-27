@@ -130,16 +130,19 @@ const rocmSmiPowerField = (label: string): "power_draw_w" | "power_limit_w" | nu
 const shouldUpdateRocmName = (entry: RocmSmiParsed, label: string): boolean =>
   label.includes("card model") || (entry.name === "AMD GPU" && label.includes("card series"));
 
+const ROCM_MEMORY_FIELDS: ReadonlyArray<
+  readonly [string, "memory_total_bytes" | "memory_used_bytes"]
+> = [
+  ["total vram", "memory_total_bytes"],
+  ["used vram", "memory_used_bytes"],
+];
+
 const updateRocmSmiEntry = (entry: RocmSmiParsed, label: string, valueText: string): void => {
   if (shouldUpdateRocmName(entry, label)) {
     entry.name = valueText;
     return;
   }
-  const memoryField = label.includes("total vram")
-    ? "memory_total_bytes"
-    : label.includes("used vram")
-      ? "memory_used_bytes"
-      : null;
+  const memoryField = ROCM_MEMORY_FIELDS.find(([text]) => label.includes(text))?.[1];
   if (memoryField) {
     entry[memoryField] = rocmSmiToBytes(enrichUnitFromLabel(parseRocmSmiValue(valueText), label));
     return;
@@ -193,29 +196,25 @@ const amdMetricToGpuInfo = (
 ): GpuInfo | null => {
   const index = metric.gpu;
   if (index === undefined) return null;
-  const name = staticByGpu.get(index)?.asic?.market_name ?? "AMD GPU";
-  const totalMb = Number(readAmdSmiValueMb(metric.mem_usage?.total_vram));
-  const usedMb = Number(readAmdSmiValueMb(metric.mem_usage?.used_vram));
-  const freeMb = readAmdSmiValueMb(metric.mem_usage?.free_vram) ?? Math.max(0, totalMb - usedMb);
+  const { asic: { market_name: name = "AMD GPU" } = {} } = staticByGpu.get(index) ?? {};
+  const { mem_usage = {}, usage = {}, temperature = {}, power = {} } = metric;
+  const totalMb = Number(readAmdSmiValueMb(mem_usage.total_vram));
+  const usedMb = Number(readAmdSmiValueMb(mem_usage.used_vram));
+  const freeMb = readAmdSmiValueMb(mem_usage.free_vram) ?? Math.max(0, totalMb - usedMb);
   return {
     index,
     name,
     memory_total_mb: Math.max(0, Math.round(totalMb)),
     memory_used_mb: Math.max(0, Math.round(usedMb)),
     memory_free_mb: Math.max(0, Math.round(freeMb)),
-    utilization_pct: Math.max(
-      0,
-      Math.round(Number(readAmdSmiValueNumber(metric.usage?.gfx_activity))),
-    ),
+    utilization_pct: Math.max(0, Math.round(Number(readAmdSmiValueNumber(usage.gfx_activity)))),
     temp_c: Math.max(
       0,
       Math.round(
-        readAmdSmiValueNumber(metric.temperature?.hotspot) ??
-          readAmdSmiValueNumber(metric.temperature?.edge) ??
-          0,
+        readAmdSmiValueNumber(temperature.hotspot) ?? readAmdSmiValueNumber(temperature.edge) ?? 0,
       ),
     ),
-    power_draw: Math.max(0, Number(readAmdSmiValueNumber(metric.power?.socket_power))),
+    power_draw: Math.max(0, Number(readAmdSmiValueNumber(power.socket_power))),
     power_limit: 0,
   };
 };

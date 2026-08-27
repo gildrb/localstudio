@@ -22,10 +22,7 @@
     ],
     "paths": {
       "@/*": ["./src/*"],
-      "@local-studio/agent-runtime": ["../services/agent-runtime/src/index.ts"],
       "@local-studio/agent-runtime/*": ["../services/agent-runtime/src/*.ts"],
-      "@local-studio/contracts/*": ["../controller/contracts/*.ts"],
-      "@shared/agent/*": ["../shared/agent/*.ts"],
       "@shared/*": ["../shared/*"]
     }
   },
@@ -36,8 +33,6 @@
     ".next/types/**/*.ts",
     "**/*.mts",
     ".next/dev/types/**/*.ts",
-    "./.next/types/**/*.ts",
-    "./.next/dev/types/**/*.ts",
     ".next-dev/types/**/*.ts",
     ".next-dev/dev/types/**/*.ts"
   ],

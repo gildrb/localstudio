@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { resolveDataDir } from "./data-dir";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
 import type { PersistedValue } from "./session-json-store";
 import {
   ConnectorsFileSchema,
@@ -37,16 +38,7 @@ export const isSecretConnectorKey = (
   key: string,
   flags: Readonly<Record<string, boolean>> | undefined,
 ): boolean => flags?.[key] ?? SECRET_KEY_PATTERN.test(key);
-let connectorAccess = Promise.resolve();
-
-function withConnectorAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = connectorAccess.then(operation);
-  connectorAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withConnectorAccess = createSerialAccess();
 
 function claimsGoogleWorkspace(connector: ConnectorConfig): boolean {
   return (

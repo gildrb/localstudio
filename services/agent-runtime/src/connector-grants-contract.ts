@@ -24,11 +24,6 @@ export const ConnectorGrantTargetSchema = Schema.Struct({
   tools: Schema.Array(Schema.String),
 });
 
-export const ConnectorGrantsResponseSchema = Schema.Struct({
-  grants: Schema.Array(ConnectorGrantSchema),
-  connectors: Schema.Array(ConnectorGrantTargetSchema),
-});
-
 export const ConnectorGrantInputSchema = Schema.Struct({
   modelId: Schema.String,
   connectorId: Schema.String,

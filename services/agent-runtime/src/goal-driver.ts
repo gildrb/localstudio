@@ -1,11 +1,19 @@
 import { isAgentSettledEvent } from "../../../shared/agent/pi-events";
-import { goalContinuationPrompt, goalOutcomeFromText } from "../../../shared/agent/goal-protocol";
+import {
+  goalContinuationPrompt,
+  goalOutcomeFromText,
+  type GoalOutcome,
+} from "../../../shared/agent/goal-protocol";
 import { Schema } from "effect";
 import type { LoggedPiEvent, PiAgentSession } from "./pi-runtime-types";
-import { readGoal, writeGoal, type GoalWritePatch } from "./goals-store";
+import { readGoal, writeGoal, type GoalStatus, type GoalWritePatch } from "./goals-store";
 import { assistantMessageText } from "./session-text";
 
 const CONTINUATION_GRACE_MS = 2000;
+const goalStatusByOutcome = {
+  complete: "complete",
+  blocked: "blocked",
+} as const satisfies Record<GoalOutcome["kind"], GoalStatus>;
 const AssistantEventSchema = Schema.Struct({
   type: Schema.Literals(["message", "message_end"]),
   message: Schema.Struct({ role: Schema.Literal("assistant"), content: Schema.Unknown }),
@@ -87,7 +95,7 @@ async function settleGoalAfterTurn(
   }
   if (turn.aborted || lastError) return settle({ status: "paused" });
   const outcome = goalOutcomeFromText(turn.text);
-  if (outcome) return settle({ status: outcome.kind === "complete" ? "complete" : "blocked" });
+  if (outcome) return settle({ status: goalStatusByOutcome[outcome.kind] });
 
   const turnsUsed = goal.turnsUsed + 1;
   if (goal.turnBudget !== null && turnsUsed >= goal.turnBudget) {

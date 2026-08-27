@@ -3,21 +3,14 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import YAML from "yaml";
 import { Schema } from "effect";
+import {
+  JsonRecordSchema,
+  type Json as JsonValue,
+  type RecordJson as JsonRecord,
+} from "@/lib/json";
 
-export type JsonValue = null | boolean | number | string | JsonValue[] | JsonRecord;
-export type JsonRecord = { [key: string]: JsonValue };
-
-const JsonValueSchema: Schema.Codec<JsonValue, JsonValue> = Schema.suspend(() =>
-  Schema.Union([
-    Schema.Null,
-    Schema.Boolean,
-    Schema.Number,
-    Schema.String,
-    Schema.mutable(Schema.Array(JsonValueSchema)),
-    Schema.Record(Schema.String, JsonValueSchema),
-  ]),
-);
-export const JsonRecordSchema = Schema.Record(Schema.String, JsonValueSchema);
+export { JsonRecordSchema };
+export type { JsonValue, JsonRecord };
 const decodeJsonRecord = Schema.decodeUnknownOption(JsonRecordSchema);
 const isString = Schema.is(Schema.String);
 

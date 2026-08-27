@@ -86,21 +86,44 @@ export async function list(request: Request): Promise<Response> {
   return Response.json({ sessions });
 }
 
+type ArchivedSessionMetadata = ReturnType<typeof listArchivedSessionMetadata>[number];
+
+function aggregatedArchivedSession(metadata: ArchivedSessionMetadata): AggregatedSession {
+  return {
+    id: metadata.id,
+    filename: "",
+    cwd: metadata.cwd ?? "",
+    startedAt: metadata.sessionUpdatedAt ?? metadata.archivedAt ?? metadata.updatedAt ?? "",
+    updatedAt: metadata.sessionUpdatedAt ?? metadata.updatedAt ?? metadata.archivedAt ?? "",
+    modelId: null,
+    provider: null,
+    firstUserMessage: metadata.title,
+    archived: true,
+    archivedAt: metadata.archivedAt,
+    parentSessionId: null,
+    subagentName: null,
+    projectId: metadata.projectId ?? "",
+    projectName: metadata.projectName ?? "Unknown project",
+    projectPath: metadata.cwd ?? "",
+  };
+}
+
 export async function listAll(request: Request): Promise<Response> {
   const searchParams = new URL(request.url).searchParams;
-  const since = parseRelativeSince(searchParams.get("since")) ?? undefined;
   const archive = archiveOptions(searchParams);
+  const parsedSince = parseRelativeSince(searchParams.get("since"));
+  const since = archive.archivedOnly ? undefined : (parsedSince ?? undefined);
+  const options: SessionListOptions = {
+    ids: idsFrom(searchParams),
+    since,
+    ...archive,
+  };
   const aggregated: AggregatedSession[] = [];
   const seenIds = new Set<string>();
   await Promise.all(
     listProjectsFromStore().map(async (project) => {
       try {
         const cwd = resolveAllowedWorkspace(project.path);
-        const options: SessionListOptions = {
-          ids: idsFrom(searchParams),
-          ...archive,
-        };
-        if (since && !archive.archivedOnly) options.since = since;
         const sessions = await listSessions(cwd, options);
         for (const summary of sessions) {
           seenIds.add(summary.id);
@@ -119,23 +142,7 @@ export async function listAll(request: Request): Promise<Response> {
   if (archive.archivedOnly) {
     for (const metadata of listArchivedSessionMetadata()) {
       if (seenIds.has(metadata.id)) continue;
-      aggregated.push({
-        id: metadata.id,
-        filename: "",
-        cwd: metadata.cwd ?? "",
-        startedAt: metadata.sessionUpdatedAt ?? metadata.archivedAt ?? metadata.updatedAt ?? "",
-        updatedAt: metadata.sessionUpdatedAt ?? metadata.updatedAt ?? metadata.archivedAt ?? "",
-        modelId: null,
-        provider: null,
-        firstUserMessage: metadata.title,
-        archived: true,
-        archivedAt: metadata.archivedAt,
-        parentSessionId: null,
-        subagentName: null,
-        projectId: metadata.projectId ?? "",
-        projectName: metadata.projectName ?? "Unknown project",
-        projectPath: metadata.cwd ?? "",
-      });
+      aggregated.push(aggregatedArchivedSession(metadata));
     }
   }
   aggregated.sort(

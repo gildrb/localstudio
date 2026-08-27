@@ -311,14 +311,13 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
           limit: String(requestLimit),
           full: "false",
         });
-        if (hfSort) {
-          params.set("sort", hfSort);
-        }
-        if (search) {
-          params.set("search", search);
-        }
-        if (filter) {
-          params.set("filter", filter);
+        const queryEntries: ReadonlyArray<readonly [string, string | undefined]> = [
+          ["sort", hfSort],
+          ["search", search],
+          ["filter", filter],
+        ];
+        for (const [name, value] of queryEntries) {
+          if (value) params.set(name, value);
         }
 
         const normalize = (model: HuggingFaceModel): HuggingFaceModel => {
