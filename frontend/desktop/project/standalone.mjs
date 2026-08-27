@@ -177,22 +177,6 @@ function requireRuntimeRoot() {
   return runtimeRoots.find((root) => existsSync(path.resolve(root, "server.js")));
 }
 
-function assertRuntimeLinks(runtimeRoot) {
-  const unsafe = symlinksUnder(runtimeRoot).filter((link) => {
-    if (path.isAbsolute(readlinkSync(link)) || !existsSync(link)) return true;
-    const target = path.relative(runtimeRoot, realpathSync(link));
-    return target === ".." || target.startsWith(`..${path.sep}`) || path.isAbsolute(target);
-  });
-  if (unsafe.length > 0) throw Error(`Unsafe standalone runtime links: ${unsafe.join(", ")}`);
-  const traced = path.resolve(runtimeRoot, ".next/node_modules/@earendil-works");
-  const dangling = existsSync(traced)
-    ? readdirSync(traced)
-        .map((entry) => path.resolve(traced, entry))
-        .filter((entry) => lstatSync(entry).isSymbolicLink() && !existsSync(entry))
-    : [];
-  if (dangling.length > 0) throw Error(`Dangling traced runtime packages: ${dangling.join(", ")}`);
-}
-
 function resolvablePackageDirectory(resolver, packageName) {
   try {
     return packageDirectoryFor(resolver, packageName);
@@ -202,8 +186,7 @@ function resolvablePackageDirectory(resolver, packageName) {
 }
 
 function assertContainedPackage(runtimeRoot, packageName, packageDirectory) {
-  const relative = path.relative(runtimeRoot, realpathSync(packageDirectory));
-  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (!isContained(runtimeRoot, realpathSync(packageDirectory))) {
     throw Error(`Pi dependency escaped standalone runtime: ${packageName}`);
   }
 }
@@ -252,15 +235,7 @@ function assertPiRuntime(runtimeRoot) {
   if (entries.some((entry) => !existsSync(entry)))
     throw Error("Missing packaged Pi runtime entrypoints");
   for (const entry of entries) {
-    const result = spawnSync(
-      process.execPath,
-      ["--input-type=module", "--eval", `import(${JSON.stringify(pathToFileURL(entry).href)})`],
-      { cwd: runtimeRoot, encoding: "utf8" },
-    );
-    if (result.status !== 0)
-      throw Error(
-        `Standalone Pi runtime entrypoint is not importable: ${result.stderr || result.stdout}`,
-      );
+    assertImportable(entry, runtimeRoot, "Standalone Pi runtime entrypoint");
   }
   const sourceResolver = createRequire(path.resolve(frontendDir, "package.json"));
   const runtimeResolver = createRequire(path.resolve(runtimeRoot, "package.json"));
@@ -277,7 +252,7 @@ function assertPiRuntime(runtimeRoot) {
 
 export function assertStandalone() {
   const runtimeRoot = requireRuntimeRoot();
-  assertRuntimeLinks(runtimeRoot);
+  assertContainedLinks(standaloneBase, "standalone runtime");
   assertPiRuntime(runtimeRoot);
   const unexpected = filesUnder(standaloneBase).filter((file) => !isRuntimeFile(file));
   if (unexpected.length > 0)
@@ -293,8 +268,140 @@ function resolveResourcesDir(appOutDir, productFilename, electronPlatformName) {
   return path.join(appOutDir, "resources");
 }
 
+function isContained(root, target) {
+  const relative = path.relative(root, target);
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function assertContainedLinks(directory, label) {
+  const canonicalDirectory = realpathSync(directory);
+  const unsafe = symlinksUnder(directory).filter((link) => {
+    if (path.isAbsolute(readlinkSync(link)) || !existsSync(link)) return true;
+    return !isContained(canonicalDirectory, realpathSync(link));
+  });
+  if (unsafe.length > 0) throw Error(`Unsafe ${label} links: ${unsafe.join(", ")}`);
+}
+
+function assertImportable(entry, cwd, label, timeout) {
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", `import(${JSON.stringify(pathToFileURL(entry).href)})`],
+    { cwd, encoding: "utf8", timeout },
+  );
+  if (result.status !== 0) {
+    throw Error(`${label} is not importable: ${result.stderr || result.stdout || result.error}`);
+  }
+}
+
+const isRuntimeArtifact = (source) =>
+  !lstatSync(source).isFile() || !/\.(?:map|[cm]?ts)$/.test(path.basename(source));
+
+function assertMatchingTree(sourceRoot, copyRoot, label, filter = isRuntimeArtifact) {
+  assertContainedLinks(sourceRoot, `${label} source`);
+  assertContainedLinks(copyRoot, label);
+  const entries = (root, filter) =>
+    [
+      ...filesUnder(root)
+        .filter(filter)
+        .map((file) => ["file", path.relative(root, file)]),
+      ...symlinksUnder(root)
+        .filter(filter)
+        .map((link) => ["link", path.relative(root, link)]),
+    ].sort((a, b) => a[1].localeCompare(b[1]));
+  const source = entries(sourceRoot, filter);
+  const copy = entries(copyRoot, () => true);
+  if (
+    source.length !== copy.length ||
+    source.some((entry, index) => entry[0] !== copy[index][0] || entry[1] !== copy[index][1])
+  ) {
+    throw Error(`${label} inventory differs from its source`);
+  }
+  for (const [kind, relative] of source) {
+    const original = path.join(sourceRoot, relative);
+    const copied = path.join(copyRoot, relative);
+    const matches =
+      kind === "link"
+        ? readlinkSync(original) === readlinkSync(copied)
+        : (statSync(original).mode & 0o777) === (statSync(copied).mode & 0o777) &&
+          readFileSync(original).equals(readFileSync(copied));
+    if (!matches) throw Error(`${label} provenance mismatch: ${relative}`);
+  }
+}
+
+function assertFiles(root, label, files) {
+  const missing = files.map((file) => path.join(root, file)).find((file) => !existsSync(file));
+  if (missing) throw Error(`${label}: ${missing}`);
+}
+
+function materializeStandaloneRootDependencies(packagedStandaloneBase, standaloneServer) {
+  const sourceRoot = path.join(standaloneBase, "node_modules");
+  const packagedRoot = path.join(packagedStandaloneBase, "node_modules");
+  if (!existsSync(path.join(sourceRoot, "next", "package.json"))) {
+    throw Error(`Standalone root dependency closure is missing next: ${sourceRoot}`);
+  }
+  assertContainedLinks(sourceRoot, "standalone root dependency");
+
+  rmSync(packagedRoot, { recursive: true, force: true });
+  cpSync(sourceRoot, packagedRoot, {
+    recursive: true,
+    dereference: false,
+    filter: isRuntimeArtifact,
+  });
+  assertMatchingTree(sourceRoot, packagedRoot, "Next dependency");
+
+  const packagedResolver = createRequire(standaloneServer);
+  const nextEntry = realpathSync(packagedResolver.resolve("next"));
+  if (!isContained(packagedRoot, nextEntry)) {
+    throw Error(`Packaged Next resolved outside its standalone dependency closure: ${nextEntry}`);
+  }
+  assertImportable(nextEntry, path.dirname(standaloneServer), "Packaged Next", 30_000);
+}
+
+function materializeAgentRuntime(resourcesDir) {
+  const sourceRoot = path.join(repoRoot, "services", "agent-runtime", "dist");
+  const packagedRoot = path.join(resourcesDir, "app", "agent-runtime");
+  rmSync(packagedRoot, { recursive: true, force: true });
+  cpSync(sourceRoot, packagedRoot, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: true,
+    filter: isRuntimeArtifact,
+  });
+  assertMatchingTree(sourceRoot, packagedRoot, "Agent runtime");
+  return packagedRoot;
+}
+
+function packageArch(arch) {
+  const names = ["ia32", "x64", "armv7l", "arm64", "universal"];
+  const name = names[arch];
+  if (!name) throw Error(`Unsupported Electron package architecture: ${arch}`);
+  return name;
+}
+
+function materializeDesktopRuntime(resourcesDir, electronPlatformName, arch) {
+  const platform = electronPlatformName === "mas" ? "darwin" : electronPlatformName;
+  const arches = packageArch(arch) === "universal" ? ["x64", "arm64"] : [packageArch(arch)];
+  const packageNames = [
+    "@lydell/node-pty",
+    ...arches.map((targetArch) => `@lydell/node-pty-${platform}-${targetArch}`),
+  ];
+  const resolver = createRequire(path.resolve(frontendDir, "package.json"));
+  const runtimeRoot = path.join(resourcesDir, "desktop-runtime", "node_modules");
+  rmSync(runtimeRoot, { recursive: true, force: true });
+  for (const packageName of packageNames) {
+    const source = packageDirectoryFor(resolver, packageName);
+    const destination = path.join(runtimeRoot, ...packageName.split("/"));
+    const packageArtifact = (file) =>
+      isRuntimeArtifact(file) && !isContained(path.join(source, "node_modules"), file);
+    cpSync(source, destination, { recursive: true, dereference: false, filter: packageArtifact });
+    assertMatchingTree(source, destination, `Desktop runtime ${packageName}`, packageArtifact);
+  }
+  assertContainedLinks(runtimeRoot, "desktop runtime");
+  return { runtimeRoot, platform, arches };
+}
+
 export async function afterPack(context) {
-  const { appOutDir, packager, electronPlatformName } = context;
+  const { appOutDir, arch, packager, electronPlatformName } = context;
   const productFilename = packager.appInfo.productFilename;
   const resourcesDir = resolveResourcesDir(appOutDir, productFilename, electronPlatformName);
   const packagedStandaloneBase = path.join(resourcesDir, "app", "frontend", ".next", "standalone");
@@ -320,79 +427,52 @@ export async function afterPack(context) {
     );
   }
 
+  materializeStandaloneRootDependencies(packagedStandaloneBase, standaloneServer);
+
   const packagedRoot = path.dirname(standaloneServer);
-  const missingRuntimeFile = [
-    path.join(
-      packagedRoot,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "dist",
-      "index.js",
-    ),
-    path.join(
-      packagedRoot,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "node_modules",
-      "@earendil-works",
-      "pi-ai",
-      "package.json",
-    ),
-    path.join(
-      packagedRoot,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "node_modules",
-      "@earendil-works",
-      "pi-ai",
-      "dist",
-      "providers",
-      "data",
-      "amazon-bedrock.json",
-    ),
-  ].find((file) => !existsSync(file));
-  if (missingRuntimeFile) {
-    throw Error(`Packaged app is missing a Pi runtime dependency: ${missingRuntimeFile}`);
-  }
+  assertFiles(packagedRoot, "Missing Pi runtime dependency", [
+    "node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/package.json",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/providers/data/amazon-bedrock.json",
+  ]);
 
-  const agentRuntimeRoot = path.join(resourcesDir, "app", "agent-runtime");
+  const agentRuntimeRoot = materializeAgentRuntime(resourcesDir);
   const agentRuntime = path.join(agentRuntimeRoot, "standalone.mjs");
-  const missingAgentRuntimeFile = [
-    agentRuntime,
-    path.join(agentRuntimeRoot, "node_modules", "playwright-core", "package.json"),
-    path.join(agentRuntimeRoot, "node_modules", "chromium-bidi", "package.json"),
-    path.join(
-      agentRuntimeRoot,
-      "node_modules",
-      "chromium-bidi",
-      "node_modules",
-      "zod",
-      "package.json",
-    ),
-    path.join(agentRuntimeRoot, "node_modules", "mitt", "package.json"),
-    path.join(agentRuntimeRoot, "node_modules", "devtools-protocol", "package.json"),
-    path.join(agentRuntimeRoot, "node_modules", "@silvia-odwyer", "photon-node", "package.json"),
-    path.join(agentRuntimeRoot, "node_modules", "undici", "package.json"),
-  ].find((file) => !existsSync(file));
-  if (missingAgentRuntimeFile) {
-    throw Error(`Packaged app is missing an agent runtime dependency: ${missingAgentRuntimeFile}`);
-  }
 
-  const desktopRuntimeRoot = path.join(resourcesDir, "desktop-runtime", "node_modules", "@lydell");
-  const missingDesktopRuntimeFile = [
-    path.join(desktopRuntimeRoot, "node-pty", "package.json"),
-    path.join(desktopRuntimeRoot, `node-pty-${process.platform}-${process.arch}`, "package.json"),
-  ].find((file) => !existsSync(file));
-  if (missingDesktopRuntimeFile) {
-    throw Error(
-      `Packaged app is missing a desktop runtime dependency: ${missingDesktopRuntimeFile}`,
+  const {
+    runtimeRoot: desktopRuntimeRoot,
+    platform,
+    arches,
+  } = materializeDesktopRuntime(resourcesDir, electronPlatformName, arch);
+  assertFiles(desktopRuntimeRoot, "Missing desktop runtime dependency", [
+    "@lydell/node-pty/package.json",
+    "@lydell/node-pty/index.js",
+    ...arches.flatMap((targetArch) => {
+      const packageRoot = `@lydell/node-pty-${platform}-${targetArch}`;
+      const nativeRoot = `${packageRoot}/prebuilds/${platform}-${targetArch}`;
+      return [
+        `${packageRoot}/package.json`,
+        `${packageRoot}/lib/index.js`,
+        `${nativeRoot}/pty.node`,
+        ...(platform === "win32" ? [] : [`${nativeRoot}/spawn-helper`]),
+      ];
+    }),
+  ]);
+  if (platform === process.platform && arches.includes(process.arch)) {
+    const ptyEntry = createRequire(path.join(desktopRuntimeRoot, "package.json")).resolve(
+      "@lydell/node-pty",
     );
+    if (!isContained(desktopRuntimeRoot, realpathSync(ptyEntry))) {
+      throw Error(`Packaged node-pty resolved outside its runtime closure: ${ptyEntry}`);
+    }
+    assertImportable(ptyEntry, desktopRuntimeRoot, "Packaged node-pty", 30_000);
   }
 
-  const unwantedRuntimeFile = [packagedStandaloneBase, agentRuntimeRoot].flatMap((directory) =>
+  const unwantedRuntimeFile = [
+    packagedStandaloneBase,
+    agentRuntimeRoot,
+    desktopRuntimeRoot,
+  ].flatMap((directory) =>
     readdirSync(directory, { recursive: true, withFileTypes: true })
       .filter((entry) => entry.isFile() && /\.(?:map|[cm]?ts)$/.test(entry.name))
       .map((entry) => path.join(entry.parentPath, entry.name)),
@@ -401,9 +481,9 @@ export async function afterPack(context) {
     throw Error(`Packaged app contains a non-runtime source artifact: ${unwantedRuntimeFile}`);
   }
 
-  const agentRuntimeSource = readFileSync(agentRuntime, "utf8");
+  const agentRuntimeCode = readFileSync(agentRuntime, "utf8");
   if (
-    /["'](?:[A-Za-z]:\\|\/(?:Users|home|root)\/)[^"'\n]*node_modules[\\/]/.test(agentRuntimeSource)
+    /["'](?:[A-Za-z]:\\|\/(?:Users|home|root)\/)[^"'\n]*node_modules[\\/]/.test(agentRuntimeCode)
   ) {
     throw Error("Packaged agent runtime contains a build-machine dependency path");
   }
@@ -423,12 +503,7 @@ export async function afterPack(context) {
   }
 
   const packagedPiCli = path.join(
-    resourcesDir,
-    "app",
-    "frontend",
-    ".next",
-    "standalone",
-    "frontend",
+    packagedRoot,
     "node_modules",
     "@earendil-works",
     "pi-coding-agent",

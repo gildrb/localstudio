@@ -14,11 +14,6 @@ export async function isPortAvailable(port: number, host = "127.0.0.1"): Promise
   });
 }
 
-/**
- * Resolve a usable port, preferring `preferred` (a previously-persisted port)
- * so the embedded server keeps a stable origin across launches/restarts.
- * Falls back to an OS-allocated port only when the preferred one is taken.
- */
 export async function resolveStablePort(preferred?: number, host = "127.0.0.1"): Promise<number> {
   if (preferred && (await isPortAvailable(preferred, host))) return preferred;
   return allocatePort(host);

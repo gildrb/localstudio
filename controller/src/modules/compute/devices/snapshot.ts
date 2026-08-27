@@ -15,7 +15,6 @@ import type { DeviceProbe } from "./probe";
 export interface TelemetryOptions {
   readonly nodeId?: NodeId;
   readonly storagePaths?: readonly string[];
-  /** How long a sample stays fresh. Ten dashboard clients then cost one `nvidia-smi`. */
   readonly ttlMs?: number;
 }
 
@@ -54,7 +53,6 @@ const WSL_MARKER = /microsoft/i;
 export const isWsl = (): boolean =>
   hostPlatform() === "linux" && WSL_MARKER.test(process.env["WSL_DISTRO_NAME"] ?? "");
 
-/** A profile good enough to run probes with, before a full snapshot exists. */
 export const bootstrapProfile = (nodeId: NodeId): HostProfile => ({
   nodeId,
   platform: hostPlatform(),
@@ -71,9 +69,7 @@ const mergeCapabilities = (
   collected: readonly (readonly TelemetryField[])[],
 ): readonly TelemetryField[] => [...new Set(collected.flat())];
 
-export const collectSnapshot = (
-  options: TelemetryOptions = {},
-): Effect.Effect<DeviceSnapshot> =>
+export const collectSnapshot = (options: TelemetryOptions = {}): Effect.Effect<DeviceSnapshot> =>
   Effect.gen(function* () {
     const nodeId = options.nodeId ?? "self";
     const profile = bootstrapProfile(nodeId);
@@ -101,10 +97,6 @@ export interface Telemetry {
   readonly snapshot: () => Effect.Effect<DeviceSnapshot>;
 }
 
-/**
- * Cached sampler. Telemetry is strictly read-only — it never touches an instance record —
- * which is what makes it safe to poll from anywhere.
- */
 export const makeTelemetry = (options: TelemetryOptions = {}): Telemetry => {
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
   let cached: { readonly at: number; readonly value: DeviceSnapshot } | null = null;

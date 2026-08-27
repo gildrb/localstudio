@@ -1,5 +1,11 @@
-import { defineRule } from "@oxlint/plugins";
 import type { ESTree, Variable } from "@oxlint/plugins";
+import {
+  resolveVariable,
+  typeReferenceName,
+  unwrapParenthesizedExpression,
+  unwrapParenthesizedType,
+  type TypeAssertion,
+} from "../shared/ast.ts";
 
 type BroadTypeKind = "top" | "object" | "record";
 
@@ -15,29 +21,13 @@ const functionBoundaryTypes = new Set([
   "TSEmptyBodyFunctionExpression",
 ]);
 
-function unwrapExpressionParentheses(expression: ESTree.Expression): ESTree.Expression {
-  let current = expression;
-  while (current.type === "ParenthesizedExpression") current = current.expression;
-  return current;
-}
-
-function unwrapTypeParentheses(type: ESTree.TSType): ESTree.TSType {
-  let current = type;
-  while (current.type === "TSParenthesizedType") current = current.typeAnnotation;
-  return current;
-}
-
-function typeReferenceName(type: ESTree.TSTypeReference): string | null {
-  return type.typeName.type === "Identifier" ? type.typeName.name : null;
-}
-
 function isUnknownOrAnyType(type: ESTree.TSType): boolean {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
   return unwrapped.type === "TSUnknownKeyword" || unwrapped.type === "TSAnyKeyword";
 }
 
 function isBroadRecordKeyType(type: ESTree.TSType): boolean {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
   if (
     unwrapped.type === "TSStringKeyword" ||
     unwrapped.type === "TSNumberKeyword" ||
@@ -50,7 +40,7 @@ function isBroadRecordKeyType(type: ESTree.TSType): boolean {
 }
 
 function isBroadRecordType(type: ESTree.TSType): boolean {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
 
   if (unwrapped.type === "TSTypeReference") {
     if (typeReferenceName(unwrapped) === "Readonly") {
@@ -82,22 +72,18 @@ function isBroadRecordType(type: ESTree.TSType): boolean {
 }
 
 function broadTypeKind(type: ESTree.TSType): BroadTypeKind | null {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
   if (unwrapped.type === "TSUnknownKeyword" || unwrapped.type === "TSAnyKeyword") return "top";
   if (unwrapped.type === "TSObjectKeyword") return "object";
   return isBroadRecordType(unwrapped) ? "record" : null;
 }
 
-function assertedExpression(
-  node: ESTree.TSAsExpression | ESTree.TSTypeAssertion,
-): ESTree.Expression {
-  return unwrapExpressionParentheses(node.expression);
+function assertedExpression(node: TypeAssertion): ESTree.Expression {
+  return unwrapParenthesizedExpression(node.expression);
 }
 
-function assertionFromExpression(
-  expression: ESTree.Expression,
-): ESTree.TSAsExpression | ESTree.TSTypeAssertion | null {
-  const unwrapped = unwrapExpressionParentheses(expression);
+function assertionFromExpression(expression: ESTree.Expression): TypeAssertion | null {
+  const unwrapped = unwrapParenthesizedExpression(expression);
   return unwrapped.type === "TSAsExpression" || unwrapped.type === "TSTypeAssertion"
     ? unwrapped
     : null;
@@ -114,13 +100,13 @@ function typesHaveSameSyntax(
 ): boolean {
   return (
     left !== null &&
-    normalizedTypeText(sourceText, unwrapTypeParentheses(left)) ===
-      normalizedTypeText(sourceText, unwrapTypeParentheses(right))
+    normalizedTypeText(sourceText, unwrapParenthesizedType(left)) ===
+      normalizedTypeText(sourceText, unwrapParenthesizedType(right))
   );
 }
 
 function isDefinitelyObjectType(type: ESTree.TSType): boolean {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
   switch (unwrapped.type) {
     case "TSArrayType":
     case "TSConstructorType":
@@ -141,7 +127,7 @@ function isDefinitelyObjectType(type: ESTree.TSType): boolean {
 }
 
 function isDefinitelyNarrowerRecordType(type: ESTree.TSType): boolean {
-  const unwrapped = unwrapTypeParentheses(type);
+  const unwrapped = unwrapParenthesizedType(type);
   if (unwrapped.type === "TSTypeLiteral") {
     return unwrapped.members.some((member) => member.type !== "TSIndexSignature");
   }
@@ -203,7 +189,7 @@ function knownValueEvidence(
   boundary: ESTree.Node | null,
   visitedVariables: ReadonlySet<Variable>,
 ): KnownValueEvidence | null {
-  const unwrapped = unwrapExpressionParentheses(expression);
+  const unwrapped = unwrapParenthesizedExpression(expression);
 
   if (unwrapped.type === "TSAsExpression" || unwrapped.type === "TSTypeAssertion") {
     if (broadTypeKind(unwrapped.typeAnnotation) !== null) return null;
@@ -311,23 +297,14 @@ function assertionIsNarrower(
   return isDefinitelyNarrowerRecordType(assertedType);
 }
 
-/** Detect immutable local bindings that erase a known type and are later asserted back to a narrower type. */
-export const noWidenThenAssertRule = defineRule({
-  meta: {
-    type: "problem",
-    docs: {
-      description:
-        "Disallow local const flows that explicitly widen a known value before asserting the widened binding to a narrower type.",
-    },
-    messages: {
-      widenThenAssert:
-        'Binding "{{name}}" discards type evidence and later recreates it with an assertion. Keep the precise type from initialization through use; parse boundary input once.',
-    },
-  },
-  createOnce(context) {
-    let scopes: Parameters<typeof resolvedVariableForIdentifier>[0] = [];
+import { antiSlopRule } from "../shared/rule.ts";
 
-    const checkAssertion = (node: ESTree.TSAsExpression | ESTree.TSTypeAssertion) => {
+export const noWidenThenAssertRule = antiSlopRule(
+  "widenThenAssert",
+  'Binding "{{name}}" discards type evidence and later recreates it with an assertion. Keep the precise type from initialization through use; parse boundary input once.',
+  (context) => {
+    let scopes: Parameters<typeof resolvedVariableForIdentifier>[0] = [];
+    const checkAssertion = (node: TypeAssertion) => {
       const expression = assertedExpression(node);
       if (expression.type !== "Identifier") return;
 
@@ -363,4 +340,4 @@ export const noWidenThenAssertRule = defineRule({
       TSTypeAssertion: checkAssertion,
     };
   },
-});
+);

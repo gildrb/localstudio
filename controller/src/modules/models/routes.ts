@@ -66,11 +66,10 @@ const stringValue = (value: RecipeExtraArgument | undefined): string =>
 
 const localModelInfo = (
   recipe: Recipe,
-  activeRecipe: Recipe | null,
-  activeMaxModelLength: number | undefined,
+  active: boolean,
+  maxModelLength: number,
   created: number,
 ): OpenAIModelInfo => {
-  const active = recipe === activeRecipe;
   const modelId = recipe.served_model_name ?? recipe.id;
   return {
     id: modelId,
@@ -78,7 +77,7 @@ const localModelInfo = (
     created,
     owned_by: "local-studio",
     active,
-    max_model_len: active && activeMaxModelLength ? activeMaxModelLength : recipe.max_model_len,
+    max_model_len: maxModelLength,
     metadata: resolvedRecipeMetadata(recipe, modelId),
   };
 };
@@ -107,7 +106,12 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
           : null;
 
         const models = recipes.map((recipe) =>
-          localModelInfo(recipe, activeRecipe, activeMaxLength, now),
+          localModelInfo(
+            recipe,
+            recipe === activeRecipe,
+            recipe === activeRecipe && activeMaxLength ? activeMaxLength : recipe.max_model_len,
+            now,
+          ),
         );
 
         if (models.length === 0 && current) {
@@ -167,9 +171,6 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
         const current = yield* findObservedInferenceProcess(context, "models.detail");
         let isActive = false;
         let maxModelLength = recipe.max_model_len;
-        // Same exclusive selection as the list route: a recipe is active
-        // only when it is THE best match for the running process, so the
-        // detail view can never contradict the list.
         if (
           current &&
           selectRunningRecipe(recipes, current, { allowEitherPathContains: true }) === recipe
@@ -178,17 +179,9 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
           maxModelLength = (yield* activeMaxModelLength()) ?? recipe.max_model_len;
         }
 
-        const payload: OpenAIModelInfo = {
-          id: recipe.served_model_name ?? recipe.id,
-          object: "model",
-          created: Math.floor(Date.now() / 1000),
-          owned_by: "local-studio",
-          active: isActive,
-          max_model_len: maxModelLength,
-          metadata: resolvedRecipeMetadata(recipe, recipe.served_model_name ?? recipe.id),
-        };
-
-        return ctx.json(payload);
+        return ctx.json(
+          localModelInfo(recipe, isActive, maxModelLength, Math.floor(Date.now() / 1000)),
+        );
       }),
     ),
 

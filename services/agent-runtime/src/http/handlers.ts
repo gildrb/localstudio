@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { Option, Schema } from "effect";
+import { Schema } from "effect";
 import {
   controlTargetHasActiveTurn,
   isAgentThinkingLevel,
@@ -27,7 +27,7 @@ import { piResourceDiagnostics, piRuntimeManager } from "../pi-runtime";
 import type { LoggedPiEvent, PiAgentSession, PiAgentStatus } from "../pi-runtime-types";
 import { listSessions } from "../sessions-store";
 import { sessionListChangedVersion, subscribeSessionListChanged } from "../session-list-changed";
-import { errorMessage, jsonError } from "./helpers";
+import { decodeJsonBody, errorMessage, jsonError } from "./helpers";
 import { sseResponse } from "./sse";
 
 function adoptRuntimePiSessionId(
@@ -121,7 +121,7 @@ function commandResult(
   return result;
 }
 
-export async function handleAgentTurn(request: Request): Promise<Response> {
+export async function turn(request: Request): Promise<Response> {
   const body = await readJsonRequestWithinLimit(request, AGENT_TURN_BODY_LIMIT_BYTES);
   if (!body.ok) return jsonError(body.error, body.status);
   const parsed = parseAgentTurnRequest(body.value);
@@ -197,9 +197,8 @@ const AgentAbortRequestSchema = Schema.Struct({
   sessionId: Schema.optional(Schema.String),
 });
 
-export async function handleAgentAbort(request: Request): Promise<Response> {
-  const rawBody = await request.json().catch(() => null);
-  const body = Option.getOrNull(Schema.decodeUnknownOption(AgentAbortRequestSchema)(rawBody));
+export async function abort(request: Request): Promise<Response> {
+  const body = await decodeJsonBody(request, AgentAbortRequestSchema);
   const sessionId = body?.sessionId?.trim() || "default";
   const session = piRuntimeManager.getSession(sessionId);
   markGoalTurnAborted(session);
@@ -221,9 +220,8 @@ type ExtensionUiResponse = {
   cancelled: boolean;
 };
 
-export async function handleExtensionUiResponse(request: Request): Promise<Response> {
-  const rawBody = await request.json().catch(() => null);
-  const body = Option.getOrNull(Schema.decodeUnknownOption(ExtensionUiRequestSchema)(rawBody));
+export async function extensionUiResponse(request: Request): Promise<Response> {
+  const body = await decodeJsonBody(request, ExtensionUiRequestSchema);
   if (!body) return jsonError("sessionId and requestId are required");
   const sessionId = body.sessionId?.trim() ?? "";
   const requestId = body.requestId?.trim() ?? "";
@@ -294,11 +292,8 @@ async function compactSession(
   return Response.json({ ok: true, result, status: session.status });
 }
 
-export async function handleAgentCompact(request: Request): Promise<Response> {
-  const rawBody = await request.json().catch(() => null);
-  const body: CompactRequest | null = Option.getOrNull(
-    Schema.decodeUnknownOption(CompactRequestSchema)(rawBody),
-  );
+export async function compact(request: Request): Promise<Response> {
+  const body: CompactRequest | null = await decodeJsonBody(request, CompactRequestSchema);
   if (!body) return jsonError("Invalid JSON body");
   const modelId = body.modelId?.trim();
   if (!modelId) return jsonError("modelId is required");
@@ -314,7 +309,7 @@ export async function handleAgentCompact(request: Request): Promise<Response> {
   }
 }
 
-export function handleRuntimeSessions(): Response {
+export function runtimeSessions(): Response {
   return Response.json({
     sessions: piRuntimeManager
       .listSessions()
@@ -346,7 +341,7 @@ function shouldSendTrailingIdleStatus({
   return !active && replayBacklogCount > 0 && !sentTerminalStatus;
 }
 
-export function handleRuntimeStatus(request: Request): Response {
+export function runtimeStatus(request: Request): Response {
   const searchParams = new URL(request.url).searchParams;
   const sessionId = searchParams.get("sessionId")?.trim() || "default";
   const piSessionId = searchParams.get("piSessionId")?.trim() || null;
@@ -380,7 +375,7 @@ function encode(payload: RuntimeStreamPayload, id?: number): string {
   return `${prefix}data: ${JSON.stringify(payload)}\n\n`;
 }
 
-export function handleRuntimeEvents(request: Request): Response {
+export function runtimeEvents(request: Request): Response {
   const searchParams = new URL(request.url).searchParams;
   const sessionId = searchParams.get("sessionId")?.trim() || "default";
   const piSessionId = searchParams.get("piSessionId")?.trim() || null;
@@ -477,7 +472,7 @@ export function handleRuntimeEvents(request: Request): Response {
 
 const SESSION_LIST_HEARTBEAT_MS = 45_000;
 
-export function handleSessionListChanged(request: Request): Response {
+export function sessionListChanged(request: Request): Response {
   return sseResponse({
     signal: request.signal,
     connectComment: `connected v${sessionListChangedVersion()}`,
@@ -490,7 +485,7 @@ export function handleSessionListChanged(request: Request): Response {
   });
 }
 
-export function handleSetupChecks(): Response {
+export function setupChecks(): Response {
   const codexDir = path.join(homedir(), ".codex");
   const piDir = path.join(homedir(), ".pi");
   const diagnostics = piResourceDiagnostics();

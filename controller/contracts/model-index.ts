@@ -68,38 +68,41 @@ export type ModelIndexResponse = Schema.Schema.Type<typeof ModelIndexSchema>;
 export type ModelIndexVariantFormat = ModelIndexVariant["format"];
 
 const NullableNumber = Schema.NullOr(Schema.Number);
-const CompactVariantSchema = Schema.Struct({
-  f: Schema.Literals(["bf16", "fp8", "nvfp4", "q4"]),
-  r: Schema.String,
-  o: Schema.Boolean,
-  s: Schema.optional(Schema.String),
-  a: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
-  z: NullableNumber,
-  c: Schema.NullOr(Schema.String),
-});
-const CompactModelSchema = Schema.Struct({
-  i: Schema.String,
-  n: Schema.String,
-  r: Schema.NullOr(Schema.Literals(["fast", "smart"])),
-  d: Schema.String,
-  p: Schema.String,
-  a: Schema.optional(Schema.NullOr(Schema.String)),
-  t: Schema.optional(NullableNumber),
-  v: NullableNumber,
-  c: Schema.Number,
-  l: Schema.String,
-  m: Schema.Boolean,
-  n0: Schema.Array(Schema.String),
-  x: Schema.optional(NullableNumber),
-  g: Schema.optional(NullableNumber),
-  q: Schema.Array(CompactVariantSchema),
-});
-const CompactTierSchema = Schema.Struct({
-  i: Schema.String,
-  l: Schema.String,
-  b: Schema.String,
-  m: Schema.Array(CompactModelSchema),
-});
+/** Ordered variant row: format, repo, official, source, patterns, size, caveat. */
+const CompactVariantSchema = Schema.Tuple([
+  Schema.Literals(["bf16", "fp8", "nvfp4", "q4"]),
+  Schema.String,
+  Schema.Boolean,
+  Schema.NullOr(Schema.String),
+  Schema.NullOr(Schema.mutable(Schema.Array(Schema.String))),
+  NullableNumber,
+  Schema.NullOr(Schema.String),
+]);
+/** Ordered catalog row. Its fields remain separate from launchable entries. */
+const CompactModelSchema = Schema.Tuple([
+  Schema.String,
+  Schema.String,
+  Schema.NullOr(Schema.Literals(["fast", "smart"])),
+  Schema.String,
+  Schema.String,
+  Schema.NullOr(Schema.String),
+  NullableNumber,
+  NullableNumber,
+  Schema.Number,
+  Schema.String,
+  Schema.Boolean,
+  Schema.Array(Schema.String),
+  NullableNumber,
+  NullableNumber,
+  Schema.Array(CompactVariantSchema),
+]);
+/** Ordered tier row: id, label, blurb, models. */
+const CompactTierSchema = Schema.Tuple([
+  Schema.String,
+  Schema.String,
+  Schema.String,
+  Schema.Array(CompactModelSchema),
+]);
 const CompactIndexSchema = Schema.Struct({
   v: Schema.Number,
   u: Schema.String,
@@ -115,32 +118,32 @@ export const bundledModelIndexSource: ModelIndexResponse = Schema.decodeUnknownS
   updated: compact.u,
   intelligence_source: compact.s,
   tiers: compact.t.map((tier) => ({
-    id: tier.i,
-    label: tier.l,
-    blurb: tier.b,
-    models: tier.m.map((model) => ({
-      id: model.i,
-      name: model.n,
-      role: model.r,
-      description: model.d,
-      params: model.p,
-      architecture: model.a,
-      total_params_b: model.t,
-      active_params_b: model.v,
-      context_tokens: model.c,
-      license: model.l,
-      multimodal: model.m,
-      notes: model.n0,
-      intelligence_index: model.x,
-      agentic_index: model.g,
-      variants: model.q.map((variant) => ({
-        format: variant.f,
-        repo: variant.r,
-        official: variant.o,
-        source: variant.s,
-        allow_patterns: variant.a,
-        size_gb: variant.z,
-        caveat: variant.c,
+    id: tier[0],
+    label: tier[1],
+    blurb: tier[2],
+    models: tier[3].map((model) => ({
+      id: model[0],
+      name: model[1],
+      role: model[2],
+      description: model[3],
+      params: model[4],
+      architecture: model[5],
+      total_params_b: model[6],
+      active_params_b: model[7],
+      context_tokens: model[8],
+      license: model[9],
+      multimodal: model[10],
+      notes: model[11],
+      intelligence_index: model[12],
+      agentic_index: model[13],
+      variants: model[14].map((variant) => ({
+        format: variant[0],
+        repo: variant[1],
+        official: variant[2],
+        source: variant[3] ?? undefined,
+        allow_patterns: variant[4] ?? undefined,
+        size_gb: variant[5],
+        caveat: variant[6],
       })),
     })),
   })),

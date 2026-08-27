@@ -1,21 +1,7 @@
-import { defineRule } from "@oxlint/plugins";
-
-import type { ESTree, Scope, SourceCode, Variable } from "@oxlint/plugins";
+import type { ESTree, SourceCode, Variable } from "@oxlint/plugins";
+import { resolveVariable } from "../shared/ast.ts";
 
 const moduleMockMethods = new Set(["doMock", "mock", "unstable_mockModule"]);
-
-function resolveVariable(
-  sourceCode: SourceCode,
-  identifier: ESTree.IdentifierReference,
-): Variable | null {
-  let scope: Scope | null = sourceCode.getScope(identifier);
-  while (scope !== null) {
-    const variable = scope.set.get(identifier.name);
-    if (variable !== undefined) return variable;
-    scope = scope.upper;
-  }
-  return null;
-}
 
 function importedName(node: ESTree.Node): string | null {
   if (node.type !== "ImportSpecifier") return null;
@@ -44,7 +30,9 @@ function isTestFrameworkObject(
     }
     const source = definition.parent.source.value;
     const name = importedName(definition.node);
-    return (source === "vitest" && name === "vi") || (source === "@jest/globals" && name === "jest");
+    return (
+      (source === "vitest" && name === "vi") || (source === "@jest/globals" && name === "jest")
+    );
   });
 }
 
@@ -65,20 +53,12 @@ function moduleMockCall(sourceCode: SourceCode, callee: ESTree.Expression): bool
   return method !== null && moduleMockMethods.has(method);
 }
 
-/** Ban test framework module mocking in favor of real dependency seams. */
-export const noModuleMockingRule = defineRule({
-  meta: {
-    type: "problem",
-    docs: {
-      description:
-        "Disallow Vitest and Jest module mocking; tests must replace dependencies through real interfaces.",
-    },
-    messages: {
-      moduleMock:
-        "Replace module mocking with dependency injection through a real interface, service layer, or faithful test implementation.",
-    },
-  },
-  createOnce(context) {
+import { antiSlopRule } from "../shared/rule.ts";
+
+export const noModuleMockingRule = antiSlopRule(
+  "moduleMock",
+  "Replace module mocking with dependency injection through a real interface, service layer, or faithful test implementation.",
+  (context) => {
     return {
       CallExpression(node) {
         if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression") return;
@@ -88,4 +68,4 @@ export const noModuleMockingRule = defineRule({
       },
     };
   },
-});
+);

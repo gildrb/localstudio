@@ -5,20 +5,10 @@ import { fileURLToPath } from "node:url";
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const appDir = join(scriptsDir, "..", "..", "src", "app");
 
-const preferredOrder = [
-  "/",
-  "/agent",
-  "/agent/sessions",
-  "/settings",
-  "/recipes",
-  "/logs",
-  "/server",
-  "/usage",
-  "/configure",
-  "/discover",
-  "/quick",
-  "/setup",
-];
+const preferredOrder =
+  `/ /agent /agent/sessions /settings /recipes /logs /server /usage /configure /discover /quick /setup`.split(
+    " ",
+  );
 
 const httpBudgetOverrides = new Map([
   ["/", { assetKiB: 1050 }],

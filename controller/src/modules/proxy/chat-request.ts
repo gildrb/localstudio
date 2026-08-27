@@ -121,7 +121,6 @@ export interface UpstreamResolution {
   auth: Partial<UpstreamAuth>;
   requestProvider: string;
   providerRouting: ProviderRouteConfig | null;
-  rewroteModel: boolean;
 }
 
 /**
@@ -157,7 +156,6 @@ export const resolveUpstreamForModel = (
       auth,
       requestProvider,
       providerRouting,
-      rewroteModel: true,
     };
   }
   const inferenceKey = process.env["INFERENCE_API_KEY"] ?? "";
@@ -166,7 +164,6 @@ export const resolveUpstreamForModel = (
     auth: inferenceKey ? { Authorization: `Bearer ${inferenceKey}` } : {},
     requestProvider,
     providerRouting: null,
-    rewroteModel: false,
   };
 };
 

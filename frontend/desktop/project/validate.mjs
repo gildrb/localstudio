@@ -4,67 +4,11 @@ import path from "node:path";
 import { git, repoRoot } from "./lib.mjs";
 
 export function validateContracts() {
-  const contractNames = [
-    "Backend",
-    "ServeRuntimeKind",
-    "ServeRuntime",
-    "Serve",
-    "ServePayload",
-    "RecipeBase",
-    "RecipePayload",
-    "DownloadStatus",
-    "DownloadFileStatus",
-    "DownloadFileInfo",
-    "ModelDownload",
-    "StorageInfo",
-    "ModelInfo",
-    "ServiceInfo",
-    "SystemConfig",
-    "EnvironmentInfo",
-    "Environment",
-    "EnvironmentEngineId",
-    "RuntimeBackendInfo",
-    "EngineBackend",
-    "RuntimeKind",
-    "RuntimeTarget",
-    "EngineJob",
-    "RuntimePlatformKind",
-    "RuntimeRocmSmiTool",
-    "RuntimeGpuMonitoringTool",
-    "RuntimeCudaInfo",
-    "RuntimeRocmInfo",
-    "RuntimeTorchBuildInfo",
-    "RuntimePlatformInfo",
-    "RuntimeGpuMonitoringInfo",
-    "RuntimeGpuInfoSummary",
-    "CompatibilitySeverity",
-    "CompatibilityCheck",
-    "SystemRuntimeInfo",
-    "CompatibilityReport",
-    "ConfigData",
-    "RuntimeUpgradeResult",
-    "ControllerEventType",
-    "ControllerStreamEventType",
-    "ControllerEventDomain",
-    "ControllerBrowserEventChannel",
-    "GPU",
-    "Metrics",
-    "VRAMCalculation",
-    "PeakMetrics",
-    "ProcessInfo",
-    "LogSession",
-    "StudioSettings",
-    "StudioDiagnostics",
-    "ControllerUsageStats",
-    "UsageStats",
-    "RigHardwareType",
-    "RigNodeRole",
-    "RigNodeSource",
-    "RigAccelerator",
-    "RigNode",
-    "Rig",
-    "RigsPayload",
-  ];
+  const contractNames = `
+    Backend ServeRuntimeKind ServeRuntime Serve ServePayload RecipeBase RecipePayload DownloadStatus DownloadFileStatus DownloadFileInfo ModelDownload StorageInfo ModelInfo ServiceInfo SystemConfig EnvironmentInfo Environment EnvironmentEngineId RuntimeBackendInfo EngineBackend RuntimeKind RuntimeTarget EngineJob RuntimePlatformKind RuntimeRocmSmiTool RuntimeGpuMonitoringTool RuntimeCudaInfo RuntimeRocmInfo RuntimeTorchBuildInfo RuntimePlatformInfo RuntimeGpuMonitoringInfo RuntimeGpuInfoSummary CompatibilitySeverity CompatibilityCheck SystemRuntimeInfo CompatibilityReport ConfigData RuntimeUpgradeResult ControllerEventType ControllerStreamEventType ControllerEventDomain ControllerBrowserEventChannel GPU Metrics VRAMCalculation PeakMetrics ProcessInfo LogSession StudioSettings StudioDiagnostics ControllerUsageStats UsageStats RigHardwareType RigNodeRole RigNodeSource RigAccelerator RigNode Rig RigsPayload
+  `
+    .trim()
+    .split(/\s+/);
   const allowedFiles = new Set([
     "controller/contracts/recipes.ts",
     "controller/contracts/system.ts",
@@ -136,40 +80,19 @@ export function validatePackage() {
   const read = (relativePath) =>
     JSON.parse(readFileSync(path.resolve(repoRoot, relativePath), "utf8"));
   const packageRequirements = [
-    {
-      manifest: "package.json",
-      scripts: [
-        "doctor",
-        "setup",
-        "dev",
-        "dev:controller",
-        "build",
-        "start",
-        "start:controller",
-        "check",
-      ],
-    },
-    {
-      manifest: "frontend/package.json",
-      scripts: ["dev", "build", "start", "desktop:dist", "check:quality"],
-    },
-    {
-      manifest: "controller/package.json",
-      scripts: ["dev", "start", "typecheck", "lint", "check"],
-    },
-    {
-      manifest: "services/agent-runtime/package.json",
-      scripts: ["bundle", "build", "dev", "start"],
-    },
-    { manifest: "shared/package.json", scripts: [] },
-    { manifest: "controller/contracts/package.json", scripts: [] },
+    ["package.json", "doctor setup dev dev:controller build start start:controller check"],
+    ["frontend/package.json", "dev build start desktop:dist check:quality"],
+    ["controller/package.json", "dev start typecheck lint check"],
+    ["services/agent-runtime/package.json", "bundle build dev start"],
+    ["shared/package.json", ""],
+    ["controller/contracts/package.json", ""],
   ];
   const packageLocks = ["bun.lockb"];
   const missing = [];
-  for (const { manifest, scripts } of packageRequirements) {
+  for (const [manifest, scripts] of packageRequirements) {
     const packageJson = read(manifest);
     if (packageJson.private !== true) missing.push(`${manifest}:private`);
-    for (const script of scripts) {
+    for (const script of scripts.split(" ").filter(Boolean)) {
       if (!packageJson.scripts?.[script]) missing.push(`${manifest}:script:${script}`);
     }
   }
@@ -246,6 +169,7 @@ export function validateUi() {
   const sourceExtensions = new Set([".ts", ".tsx"]);
   const findings = [];
   const sharedModuleImporters = new Map();
+  const report = (rule, path, detail) => findings.push({ rule, path, detail });
 
   const isSharedLayerPath = (rel) => {
     const top = rel.split(path.sep)[0];
@@ -294,26 +218,25 @@ export function validateUi() {
     const rel = path.relative(srcRoot, filePath);
     const segments = rel.split(path.sep);
     if (segments[0] === "components") {
-      findings.push({
-        rule: "retired-components-dir",
-        path: rel,
-        detail:
-          "src/components is retired; page features live in src/features, primitives in src/ui.",
-      });
+      report(
+        "retired-components-dir",
+        rel,
+        "src/components is retired; page features live in src/features, primitives in src/ui.",
+      );
     }
     if (isRetiredUiFeaturePath(segments)) {
-      findings.push({
-        rule: "feature-location",
-        path: rel,
-        detail: `Page-feature UI belongs in src/features/${segments[1]}; src/ui is for shared primitives.`,
-      });
+      report(
+        "feature-location",
+        rel,
+        `Page-feature UI belongs in src/features/${segments[1]}; src/ui is for shared primitives.`,
+      );
     }
     if (segments[0] === "app" && rel.includes(`${path.sep}_components${path.sep}`)) {
-      findings.push({
-        rule: "route-ui-location",
-        path: rel,
-        detail: "Route UI belongs in src/features/<name>; app routes stay thin shells.",
-      });
+      report(
+        "route-ui-location",
+        rel,
+        "Route UI belongs in src/features/<name>; app routes stay thin shells.",
+      );
     }
     const extension = filePath.slice(filePath.lastIndexOf("."));
     if (!sourceExtensions.has(extension)) return;
@@ -323,28 +246,28 @@ export function validateUi() {
     }
     recordImportEdges(filePath, rel, source);
     for (const match of source.matchAll(/from\s+["']@\/components\/([^"']+)["']/g)) {
-      findings.push({
-        rule: "retired-components-import",
-        path: rel,
-        detail: `Import "@/components/${match[1]}" is retired; use "@/features/..." or "@/ui/...".`,
-      });
+      report(
+        "retired-components-import",
+        rel,
+        `Import "@/components/${match[1]}" is retired; use "@/features/..." or "@/ui/...".`,
+      );
     }
     if (segments[0] === "ui" && !legacyPrimitivePurityFiles.has(rel)) {
       for (const match of source.matchAll(/from\s+["']@\/(features|app)\/([^"']+)["']/g)) {
-        findings.push({
-          rule: "primitive-purity",
-          path: rel,
-          detail: `src/ui is the primitives layer and must not import "@/${match[1]}/${match[2]}".`,
-        });
+        report(
+          "primitive-purity",
+          rel,
+          `src/ui is the primitives layer and must not import "@/${match[1]}/${match[2]}".`,
+        );
       }
     }
     if (segments[0] === "features") {
       for (const match of source.matchAll(/from\s+["']@\/app\/([^"']+)["']/g)) {
-        findings.push({
-          rule: "feature-app-import",
-          path: rel,
-          detail: `src/features must not import app code ("@/app/${match[1]}"); features are composed by routes, not the reverse.`,
-        });
+        report(
+          "feature-app-import",
+          rel,
+          `src/features must not import app code ("@/app/${match[1]}"); features are composed by routes, not the reverse.`,
+        );
       }
     }
   };
@@ -364,12 +287,11 @@ export function validateUi() {
     )) {
       if (sharedLayerAllowlist.has(rel)) continue;
       if (importers.size === 0) {
-        findings.push({
-          rule: "shared-layer-consumers",
-          path: rel,
-          detail:
-            "No importer anywhere in src; shared-layer modules without consumers are dead code.",
-        });
+        report(
+          "shared-layer-consumers",
+          rel,
+          "No importer anywhere in src; shared-layer modules without consumers are dead code.",
+        );
         continue;
       }
       const featureOwners = new Set();
@@ -381,11 +303,11 @@ export function validateUi() {
       }
       if (!hasNonFeatureImporter && featureOwners.size === 1) {
         const [owner] = featureOwners;
-        findings.push({
-          rule: "shared-layer-consumers",
-          path: rel,
-          detail: `All importers live in src/features/${owner}; move this module into that feature.`,
-        });
+        report(
+          "shared-layer-consumers",
+          rel,
+          `All importers live in src/features/${owner}; move this module into that feature.`,
+        );
       }
     }
   };

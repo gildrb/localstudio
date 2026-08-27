@@ -1,20 +1,44 @@
 @import "tailwindcss" source("../");
 :root {
   color-scheme: dark;
-  --bg: #181818;
-  --panel: #212121;
-  --line: #ffffff18;
-  --fg: #f4f4f4;
-  --dim: #aaa;
-  --accent: #70b7ff;
+  --bg: #111315;
+  --panel: #191c20;
+  --sidebar: #15171a;
+  --line: #ffffff14;
+  --line-strong: #ffffff24;
+  --fg: #f2f4f7;
+  --dim: #9ba3ad;
+  --accent: #82b5ff;
+  --accent-soft: #77aef51b;
+  --sidebar-nav: #b9c0c9;
+  --sidebar-nav-active: #f7f9fb;
+  --sidebar-muted: #858d98;
+  --sidebar-footer: #858d98;
+  --sidebar-tag: #858d98;
+  --sidebar-control: #ffffff0a;
+  --sidebar-control-hover: #ffffff10;
+  --sidebar-line-hover: #ffffff30;
+  --sidebar-brand-bg: linear-gradient(145deg, #374151, #20242a);
+  --sidebar-brand-fg: #dbeafe;
+  --sidebar-brand-line: #ffffff1f;
+  --sidebar-brand-highlight: #ffffff14;
   font:
-    14px/1.5 system-ui,
+    14px/1.5 Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
     sans-serif;
   background: var(--bg);
   color: var(--fg);
 }
 * {
   box-sizing: border-box;
+}
+html,
+body {
+  min-height: 100%;
 }
 body {
   margin: 0;
@@ -41,49 +65,21 @@ a {
   cursor: pointer;
 }
 button:hover,
-nav a:hover,
 .tabs a:hover {
   background: #ffffff12;
 }
-.shell {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 220px 1fr;
-}
-.shell > aside {
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  padding: 1rem;
-  border-right: 1px solid var(--line);
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-.brand {
-  font-size: 1.1rem;
-  font-weight: 700;
-}
-.shell nav {
-  display: grid;
-  gap: 0.25rem;
-}
-.shell nav a,
-.tabs a {
-  padding: 0.55rem 0.7rem;
-  border-radius: 7px;
-}
-.shell small {
-  margin-top: auto;
-  color: var(--dim);
-}
-main {
-  min-width: 0;
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .page {
   max-width: 1200px;
   margin: auto;
-  padding: 2rem;
+  padding: 2rem clamp(1.25rem, 3vw, 3rem);
 }
 .page > header {
   display: flex;
@@ -95,11 +91,11 @@ main {
 .page h1 {
   margin: 0;
   font-size: 1.65rem;
+  letter-spacing: -0.025em;
 }
 .page h2 {
   font-size: 1rem;
 }
-.page header p,
 p {
   color: var(--dim);
 }
@@ -126,6 +122,11 @@ pre {
 }
 .tabs {
   margin-bottom: 1rem;
+}
+.tabs a {
+  padding: 0.5rem 0.65rem;
+  border-radius: 7px;
+  color: var(--accent);
 }
 .row input,
 .row textarea {
@@ -173,39 +174,6 @@ pre {
   margin-left: 12%;
   background: #16446b;
 }
-@media (max-width: 760px) {
-  .shell {
-    display: block;
-  }
-  .shell > aside {
-    position: static;
-    width: auto;
-    height: auto;
-    border: 0;
-    border-bottom: 1px solid var(--line);
-    padding: 0.75rem;
-  }
-  .shell nav {
-    display: flex;
-    overflow: auto;
-  }
-  .shell small {
-    display: none;
-  }
-  .page {
-    padding: 1rem;
-  }
-  .workbench {
-    display: block;
-  }
-  .panel {
-    margin-bottom: 1rem;
-  }
-  .page > header {
-    align-items: flex-start;
-  }
-}
-
 label {
   display: grid;
   gap: 0.35rem;
@@ -244,15 +212,47 @@ label select {
   font-size: 0.78rem;
   white-space: pre-wrap;
 }
-.shell select {
+select {
   max-width: 260px;
 }
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #fafafa;
+  --bg: #f5f6f7;
   --panel: #fff;
-  --line: #00000018;
-  --fg: #181818;
-  --dim: #666;
+  --sidebar: #eceeef;
+  --line: #00000014;
+  --line-strong: #00000024;
+  --fg: #181a1d;
+  --dim: #626971;
   --accent: #075ea8;
+  --accent-soft: #075ea812;
+  --sidebar-nav: #454b53;
+  --sidebar-nav-active: #181a1d;
+  --sidebar-muted: #626971;
+  --sidebar-footer: #626971;
+  --sidebar-tag: #555d66;
+  --sidebar-control: #00000008;
+  --sidebar-control-hover: #00000010;
+  --sidebar-line-hover: #00000030;
+  --sidebar-brand-line: #0000002b;
 }
+@media (max-width: 760px) {
+  .page {
+    padding: 1.25rem 1rem;
+  }
+  .page > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .workbench {
+    display: block;
+  }
+  .panel {
+    margin-bottom: 1rem;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@stylex;

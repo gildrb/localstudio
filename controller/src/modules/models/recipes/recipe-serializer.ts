@@ -122,57 +122,20 @@ const migrateLegacyFields = (data: RecipeInput, extraArguments: RecipeInput): vo
 
 const migrateEnvironmentVariables = (data: RecipeInput, extraArguments: RecipeInput): void => {
   if (data["env_vars"] !== undefined) return;
-  if (data["env-vars"] !== undefined) {
-    if (data["env-vars"]) {
-      data["env_vars"] = data["env-vars"];
-      delete data["env-vars"];
+  for (const key of ["env-vars", "envVars"]) {
+    if (data[key] === undefined) continue;
+    if (data[key]) {
+      data["env_vars"] = data[key];
+      delete data[key];
     }
     return;
   }
-  if (data["envVars"] !== undefined) {
-    if (data["envVars"]) {
-      data["env_vars"] = data["envVars"];
-      delete data["envVars"];
-    }
-    return;
-  }
-  const legacySource = ["env_vars", "env-vars", "envVars"].find((key) => key in extraArguments);
-  if (legacySource) {
-    data["env_vars"] = extraArguments[legacySource] ?? null;
-    delete extraArguments[legacySource];
+  const key = ["env_vars", "env-vars", "envVars"].find((name) => name in extraArguments);
+  if (key) {
+    data["env_vars"] = extraArguments[key] ?? null;
+    delete extraArguments[key];
   }
 };
-
-const knownKeys = new Set([
-  "id",
-  "name",
-  "model_path",
-  "vision",
-  "backend",
-  "runtime",
-  "env_vars",
-  "tensor_parallel_size",
-  "pipeline_parallel_size",
-  "max_model_len",
-  "gpu_memory_utilization",
-  "kv_cache_dtype",
-  "max_num_seqs",
-  "trust_remote_code",
-  "tool_call_parser",
-  "reasoning_parser",
-  "enable_auto_tool_choice",
-  "quantization",
-  "dtype",
-  "host",
-  "port",
-  "served_model_name",
-  "python_path",
-  "extra_args",
-  "max_thinking_tokens",
-  "thinking_mode",
-  "tp",
-  "pp",
-]);
 
 export const normalizeRecipeInput = (raw: RecipeInput): RecipeInput => {
   const data = { ...raw };
@@ -233,6 +196,8 @@ export const recipeSchema = Schema.Struct({
   thinking_mode: Schema.String,
 });
 
+const knownKeys = new Set([...Object.keys(recipeSchema.fields), "tp", "pp"]);
+
 const recipeDefaults = (normalized: RecipeInput): RecipeInput => ({
   ...normalized,
   vision: normalized["vision"] ?? null,
@@ -272,23 +237,9 @@ export const parseRecipe = <Input>(raw: Input): Recipe => {
   const parsed = Schema.decodeUnknownSync(recipeSchema, {
     onExcessProperty: "preserve",
   })(recipeDefaults(normalized));
-  const environmentVariables = parsed.env_vars
-    ? Object.fromEntries(
-        Object.entries(parsed.env_vars).map(([key, value]) => [key, String(value)]),
-      )
-    : null;
   return {
     ...parsed,
     id: asRecipeId(parsed.id),
-    vision: parsed.vision ?? null,
-    env_vars: environmentVariables,
-    tool_call_parser: parsed.tool_call_parser ?? null,
-    reasoning_parser: parsed.reasoning_parser ?? null,
-    quantization: parsed.quantization ?? null,
-    dtype: parsed.dtype ?? null,
-    served_model_name: parsed.served_model_name ?? null,
-    python_path: parsed.python_path ?? null,
-    max_thinking_tokens: parsed.max_thinking_tokens ?? null,
-    extra_args: Schema.decodeUnknownSync(recipeExtraArgumentsSchema)(parsed.extra_args ?? {}),
+    extra_args: Schema.decodeUnknownSync(recipeExtraArgumentsSchema)(parsed.extra_args),
   };
 };

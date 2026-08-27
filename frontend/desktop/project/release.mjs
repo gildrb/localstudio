@@ -13,7 +13,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { frontendDir, repoRoot, valueAfter } from "./lib.mjs";
+import { commandOutput, frontendDir, repoRoot, valueAfter } from "./lib.mjs";
 
 const output = path.join(frontendDir, "dist-desktop");
 const requireFromHere = createRequire(import.meta.url);
@@ -91,13 +91,9 @@ function runInRepo(command, args, options = {}) {
   execFileSync(command, args, { cwd: repoRoot, env: process.env, stdio: "inherit", ...options });
 }
 
-function repoCommandOutput(command, args) {
-  return execFileSync(command, args, { cwd: repoRoot, env: process.env, encoding: "utf8" }).trim();
-}
-
 function keychainList() {
   return [
-    ...repoCommandOutput("security", ["list-keychains", "-d", "user"]).matchAll(/"([^"]+)"/g),
+    ...commandOutput("security", ["list-keychains", "-d", "user"]).matchAll(/"([^"]+)"/g),
   ].map((match) => match[1]);
 }
 
@@ -241,7 +237,7 @@ export async function signDesktopRelease(args = process.argv.slice(2)) {
       ...originalKeychains,
     ]);
 
-    const identity = repoCommandOutput("security", [
+    const identity = commandOutput("security", [
       "find-identity",
       "-v",
       "-p",

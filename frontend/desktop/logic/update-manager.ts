@@ -5,23 +5,17 @@ import { DESKTOP_CONFIG } from "../configs";
 import type { DesktopUpdateSnapshot } from "../types";
 import { log } from "../helpers/logger";
 import { isLoopbackHttpUrl } from "../helpers/url";
-import { UpdateInstallIntent } from "./update-install-intent";
 
 let latestUpdateState: DesktopUpdateSnapshot = { status: "idle" };
-const installIntent = new UpdateInstallIntent();
+let installRequested = false;
 
 function setUpdateState(nextState: DesktopUpdateSnapshot): void {
   latestUpdateState = nextState;
 }
 
 type UpdateFailure = Parameters<StringConstructor>[0];
-interface ConfiguredFeed {
-  ok: true;
-  url: string;
-}
-
 function setUpdateError(error: UpdateFailure): void {
-  installIntent.clear();
+  installRequested = false;
   const message = String(error);
   setUpdateState({ status: "error", message });
   log.error(`Auto update error: ${message}`);
@@ -43,7 +37,7 @@ function resolveFeedUrl(): string | null {
   return raw.replace(/\/+$/, "");
 }
 
-function ensureFeedConfigured(): ConfiguredFeed {
+function ensureFeedConfigured(): string {
   const feedUrl = resolveFeedUrl();
   if (feedUrl) {
     autoUpdater.setFeedURL({
@@ -51,7 +45,7 @@ function ensureFeedConfigured(): ConfiguredFeed {
       url: feedUrl,
       channel: "stable",
     });
-    return { ok: true, url: feedUrl };
+    return feedUrl;
   }
 
   autoUpdater.setFeedURL({
@@ -59,15 +53,11 @@ function ensureFeedConfigured(): ConfiguredFeed {
     owner: "sybil-solutions",
     repo: "local-studio",
   });
-  return { ok: true, url: "github:sybil-solutions/local-studio" };
+  return "github:sybil-solutions/local-studio";
 }
 
 export function getUpdateState(): DesktopUpdateSnapshot {
   return latestUpdateState;
-}
-
-function installDownloadedUpdate(): void {
-  autoUpdater.quitAndInstall();
 }
 
 export async function checkForUpdates(force = false): Promise<DesktopUpdateSnapshot> {
@@ -120,20 +110,22 @@ export async function checkForUpdates(force = false): Promise<DesktopUpdateSnaps
 }
 
 export async function startUpdate(): Promise<DesktopUpdateSnapshot> {
-  const action = installIntent.request(latestUpdateState.status);
-  if (action === "install") {
-    installDownloadedUpdate();
+  installRequested = true;
+  if (latestUpdateState.status === "downloaded") {
+    installRequested = false;
+    autoUpdater.quitAndInstall();
     return latestUpdateState;
   }
-  if (action === "wait") return latestUpdateState;
-
+  if (["checking", "available", "downloading"].includes(latestUpdateState.status)) {
+    return latestUpdateState;
+  }
   const snapshot = await checkForUpdates(true);
   if (
     snapshot.status === "idle" ||
     snapshot.status === "not-available" ||
     snapshot.status === "error"
   ) {
-    installIntent.clear();
+    installRequested = false;
   }
   return snapshot;
 }
@@ -150,8 +142,7 @@ export function initializeAutoUpdates(): void {
     return;
   }
 
-  const feed = ensureFeedConfigured();
-  log.info(`[update] Feed: ${feed.url}`);
+  log.info(`[update] Feed: ${ensureFeedConfigured()}`);
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -168,7 +159,7 @@ export function initializeAutoUpdates(): void {
   });
 
   autoUpdater.on("update-not-available", (info) => {
-    installIntent.clear();
+    installRequested = false;
     setUpdateState({ status: "not-available", version: info.version });
     log.info("No update available");
   });
@@ -185,9 +176,10 @@ export function initializeAutoUpdates(): void {
   autoUpdater.on("update-downloaded", (info) => {
     setUpdateState({ status: "downloaded", version: info.version });
     log.info(`Update downloaded: ${info.version}`);
-    if (installIntent.downloadCompleted()) {
+    if (installRequested) {
+      installRequested = false;
       log.info(`Restarting to install update: ${info.version}`);
-      installDownloadedUpdate();
+      autoUpdater.quitAndInstall();
     }
   });
 

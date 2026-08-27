@@ -7,7 +7,7 @@ import { useMountSubscription } from "@/hooks/use-mount-subscription";
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type RecordJson = { [key: string]: Json };
 
-const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
+export const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
   Schema.Union([
     Schema.Null,
     Schema.Boolean,
@@ -17,9 +17,9 @@ const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
     Schema.Record(Schema.String, JsonSchema),
   ]),
 );
-const JsonRecordSchema = Schema.Record(Schema.String, JsonSchema);
+export const JsonRecordSchema = Schema.Record(Schema.String, JsonSchema);
 const decodeJson = Schema.decodeUnknownSync(JsonSchema);
-const isRecordJson = Schema.is(JsonRecordSchema);
+export const isRecordJson = Schema.is(JsonRecordSchema);
 const isString = Schema.is(Schema.String);
 
 export async function request(path: `/api/${string}`, init?: RequestInit): Promise<Json> {

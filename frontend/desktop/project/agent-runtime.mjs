@@ -22,19 +22,10 @@ export function prepareAgentRuntime() {
 
 export function bundleAgentRuntime() {
   const bundlePath = path.join(distDir, "standalone.mjs");
-  const runtimePackages = [
-    "playwright-core",
-    "chromium-bidi",
-    "mitt",
-    "devtools-protocol",
-    "@silvia-odwyer/photon-node",
-    "undici",
-    "@lydell/node-pty",
-    "typebox",
-    "@earendil-works/pi-agent-core",
-    "@earendil-works/pi-tui",
-    "@earendil-works/pi-ai",
-  ];
+  const runtimePackages =
+    `playwright-core chromium-bidi mitt devtools-protocol @silvia-odwyer/photon-node undici @lydell/node-pty typebox @earendil-works/pi-agent-core @earendil-works/pi-tui @earendil-works/pi-ai`.split(
+      " ",
+    );
 
   rmSync(distDir, { recursive: true, force: true });
   mkdirSync(distDir, { recursive: true });

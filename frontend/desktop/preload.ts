@@ -1,15 +1,13 @@
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopBridge } from "./interfaces";
 
 const bridge: DesktopBridge = {
   getRuntime: () => ipcRenderer.invoke("desktop:get-runtime"),
-  openExternal: (url) => ipcRenderer.invoke("desktop:open-external", url),
   revealPath: (target) => ipcRenderer.invoke("desktop:reveal-path", target),
   openPath: (target) => ipcRenderer.invoke("desktop:open-path", target),
   getUpdateStatus: () => ipcRenderer.invoke("desktop:get-update-status"),
   startUpdate: () => ipcRenderer.invoke("desktop:start-update"),
   openDirectory: () => ipcRenderer.invoke("desktop:open-directory"),
-  getPathForFile: (file) => webUtils.getPathForFile(file),
   listProjects: () => ipcRenderer.invoke("desktop:list-projects"),
   addProject: (directoryPath) => ipcRenderer.invoke("desktop:add-project", directoryPath),
   removeProject: (id) => ipcRenderer.invoke("desktop:remove-project", id),

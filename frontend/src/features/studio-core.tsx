@@ -73,37 +73,6 @@ function loadSavedControllerMetadata(): SavedController[] {
   }
 }
 
-const NAV = [
-  ["/", "Dashboard"],
-  ["/agent", "Workbench"],
-  ["/models", "Models"],
-  ["/usage", "Usage"],
-  ["/configure", "Configure"],
-  ["/logs", "Logs"],
-  ["/settings", "Settings"],
-] as const;
-
-export function Shell({ children }: { children: ReactNode }) {
-  return (
-    <div className="shell">
-      <aside>
-        <Link className="brand" href="/">
-          Local Studio
-        </Link>
-        <nav>
-          {NAV.map(([href, label]) => (
-            <Link key={href} href={href}>
-              {label}
-            </Link>
-          ))}
-        </nav>
-        <small>Local-first model workstation</small>
-      </aside>
-      <main>{children}</main>
-    </div>
-  );
-}
-
 export function Page({
   title,
   actions,

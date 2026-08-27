@@ -2,9 +2,6 @@ import type { AgentImageInput } from "@shared/agent/agent-image-input";
 import { Schema } from "effect";
 
 export type { AgentImageInput };
-// The turn wire contract + generic body-field helpers live in
-// shared/agent/agent-turn.ts so the @local-studio/agent-runtime HTTP handlers
-// can share them; re-exported here for frontend callers.
 export {
   objectRecord,
   stringField,

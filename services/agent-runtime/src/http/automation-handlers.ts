@@ -16,7 +16,7 @@ import { errorMessage, jsonError, readJsonBody } from "./helpers";
 const decodeString = Schema.decodeUnknownOption(Schema.String);
 const decodeBoolean = Schema.decodeUnknownOption(Schema.Boolean);
 
-export async function handleAutomationsList(): Promise<Response> {
+export async function list(): Promise<Response> {
   try {
     return Response.json({ automations: await listAutomations() });
   } catch (error) {
@@ -30,7 +30,7 @@ function targetSessionPatch(value: UnparsedValue): { targetSessionId: string | n
   return decoded === undefined ? null : { targetSessionId: decoded.trim() || null };
 }
 
-export async function handleAutomationCreate(request: Request): Promise<Response> {
+export async function create(request: Request): Promise<Response> {
   const body = await readJsonBody(request);
   const name = Option.getOrUndefined(decodeString(body?.name)) ?? "";
   const prompt = Option.getOrUndefined(decodeString(body?.prompt)) ?? "";
@@ -54,23 +54,19 @@ export async function handleAutomationCreate(request: Request): Promise<Response
   }
 }
 
-export async function handleAutomationPatch(request: Request, id: string): Promise<Response> {
+export async function patch(request: Request, id: string): Promise<Response> {
   const body = await readJsonBody(request);
   if (!body) return jsonError("Body must be a JSON object.");
-  const name = Option.getOrUndefined(decodeString(body.name));
-  const prompt = Option.getOrUndefined(decodeString(body.prompt));
-  const modelId = Option.getOrUndefined(decodeString(body.modelId));
-  const cwd = Option.getOrUndefined(decodeString(body.cwd));
+  let patch: Parameters<typeof patchAutomation>[1] = {};
+  for (const field of ["name", "prompt", "modelId", "cwd"] as const) {
+    const value = Option.getOrUndefined(decodeString(body[field]));
+    if (value !== undefined) patch = { ...patch, [field]: value };
+  }
   const status = Option.getOrUndefined(
     Schema.decodeUnknownOption(Schema.Literals(["active", "paused"]))(body.status),
   );
-  const unread = Option.getOrUndefined(decodeBoolean(body.unread));
-  let patch: Parameters<typeof patchAutomation>[1] = {};
-  if (name !== undefined) patch = { ...patch, name };
-  if (prompt !== undefined) patch = { ...patch, prompt };
-  if (modelId !== undefined) patch = { ...patch, modelId };
-  if (cwd !== undefined) patch = { ...patch, cwd };
   if (status !== undefined) patch = { ...patch, status };
+  const unread = Option.getOrUndefined(decodeBoolean(body.unread));
   if (unread !== undefined) patch = { ...patch, unread };
   if ("schedule" in body) {
     const schedule = Option.getOrElse(
@@ -93,13 +89,13 @@ export async function handleAutomationPatch(request: Request, id: string): Promi
   }
 }
 
-export async function handleAutomationDelete(id: string): Promise<Response> {
+export async function remove(id: string): Promise<Response> {
   const removed = await deleteAutomation(id);
   if (!removed) return jsonError(`Unknown automation '${id}'.`, 404);
   return Response.json({ ok: true });
 }
 
-export async function handleAutomationRun(id: string): Promise<Response> {
+export async function run(id: string): Promise<Response> {
   const automation = await getAutomation(id);
   if (!automation) return jsonError(`Unknown automation '${id}'.`, 404);
   const completed = await runAutomationNow(id);
@@ -111,13 +107,13 @@ function goalSessionId(request: Request): string | null {
   return id || null;
 }
 
-export async function handleGoalGet(request: Request): Promise<Response> {
+export async function getGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
   return Response.json({ goal: await readGoal(piSessionId) });
 }
 
-export async function handleGoalPut(request: Request): Promise<Response> {
+export async function putGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
   const body = await readJsonBody(request);
@@ -141,7 +137,7 @@ export async function handleGoalPut(request: Request): Promise<Response> {
   }
 }
 
-export async function handleGoalDelete(request: Request): Promise<Response> {
+export async function deleteGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
   await clearGoal(piSessionId);

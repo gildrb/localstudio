@@ -1,8 +1,3 @@
-/**
- * Generic read/write primitives for the JSON/YAML config files local coding
- * agents keep on disk — shared by the per-agent detection and merge logic in
- * this feature, with no knowledge of any specific agent's schema.
- */
 import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";

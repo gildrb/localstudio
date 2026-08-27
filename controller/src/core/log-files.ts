@@ -116,7 +116,6 @@ export const listLogFiles = (dataDirectory: string): LogFileEntry[] => {
     ...scanLogDirectory(FALLBACK_LOG_DIR, "tmp"),
   ];
 
-  // Deduplicate by session id, preferring the newest mtime.
   const bySession = new Map<string, LogFileEntry>();
   for (const entry of all) {
     const existing = bySession.get(entry.sessionId);
@@ -162,7 +161,6 @@ export const cleanupLogFiles = (
     if (shouldDeleteAge(entry)) safeUnlink(entry.path);
   }
 
-  // 2) Recompute after deletions.
   const remaining = entries.filter((entry) => !deletedPaths.includes(entry.path));
 
   if (remaining.length > maxFiles) {
@@ -212,7 +210,6 @@ export const tailFileLines = (
       chunks.push(slice);
       bytesRead += n;
 
-      // Count newlines in this chunk.
       for (let index = 0; index < slice.length; index++) {
         if (slice[index] === 0x0a) newlineCount += 1;
       }

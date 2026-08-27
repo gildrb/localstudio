@@ -14,13 +14,7 @@ import type {
   AgentToolAccess,
 } from "../../../shared/agent/agent-turn";
 
-type RuntimeSkillRef = {
-  id?: string;
-  name?: string;
-  path?: string;
-};
-
-type RuntimePromptTemplateRef = {
+type RuntimeResourceRef = {
   id?: string;
   name?: string;
   path?: string;
@@ -32,8 +26,8 @@ export type RuntimeStartOptions = {
   browserToolEnabled?: boolean;
   browserSessionId?: string;
   browserBackend?: BrowserBackend;
-  skills?: RuntimeSkillRef[];
-  promptTemplates?: RuntimePromptTemplateRef[];
+  skills?: RuntimeResourceRef[];
+  promptTemplates?: RuntimeResourceRef[];
 };
 
 type AgentSessionOptionsInput = {
@@ -113,12 +107,8 @@ export function runtimeOptionsFingerprint(options: RuntimeStartOptions): string 
   });
 }
 
-function selectedSkillPaths(skills: RuntimeSkillRef[]): string[] {
-  return uniqueExistingPaths(skills.map((skill) => skill.path));
-}
-
-function selectedPromptTemplatePaths(templates: RuntimePromptTemplateRef[]): string[] {
-  return uniqueExistingPaths(templates.map((template) => template.path));
+function selectedPaths(resources: RuntimeResourceRef[]): string[] {
+  return uniqueExistingPaths(resources.map((resource) => resource.path));
 }
 
 function uniqueExistingPaths(values: Array<string | null | undefined>): string[] {
@@ -130,11 +120,6 @@ function uniqueExistingPaths(values: Array<string | null | undefined>): string[]
     seen.add(resolved);
     return true;
   });
-}
-
-function deriveFrontendBase(env: NodeJS.ProcessEnv = process.env): string {
-  const port = env.PORT || "3000";
-  return `http://127.0.0.1:${port}`;
 }
 
 function shouldLoadBrowserTool(options: RuntimeStartOptions): boolean {
@@ -151,100 +136,52 @@ function shouldLoadChromeTool(options: RuntimeStartOptions): boolean {
   return shouldLoadBrowserTool(options) && browserBackend(options) === "chrome";
 }
 
+type BundledResourceSpec = readonly [enabled: boolean, name: string, override?: string];
+
+function selectedBundledResources(kind: string, specs: BundledResourceSpec[]): string[] {
+  return uniqueExistingPaths(
+    specs.flatMap(([enabled, name, override]) =>
+      enabled ? [resolveBundledResourcePath(kind, name, override)] : [],
+    ),
+  );
+}
+
 function runtimeExtensionPaths(options: RuntimeStartOptions): string[] {
-  return uniqueExistingPaths([
-    resolveBundledResourcePath(
-      "pi-extensions",
-      "local-studio-timeouts.ts",
-      process.env.LOCAL_STUDIO_TIMEOUT_EXTENSION_PATH,
-    ),
-    resolveBundledResourcePath(
-      "pi-extensions",
-      "local-studio-agent-policy.ts",
-      process.env.LOCAL_STUDIO_AGENT_POLICY_EXTENSION_PATH,
-    ),
-    shouldLoadBrowserTool(options)
-      ? resolveBundledResourcePath(
-          "pi-extensions",
-          "cua.ts",
-          process.env.LOCAL_STUDIO_CUA_EXTENSION_PATH,
-        )
-      : null,
-    shouldLoadChromeTool(options)
-      ? resolveBundledResourcePath(
-          "pi-extensions",
-          "chrome.ts",
-          process.env.LOCAL_STUDIO_CHROME_EXTENSION_PATH,
-        )
-      : null,
-    hasGithubCliSync()
-      ? resolveBundledResourcePath(
-          "pi-extensions",
-          "github.ts",
-          process.env.LOCAL_STUDIO_GITHUB_EXTENSION_PATH,
-        )
-      : null,
-    hasObsidianVaultSync()
-      ? resolveBundledResourcePath(
-          "pi-extensions",
-          "obsidian.ts",
-          process.env.LOCAL_STUDIO_OBSIDIAN_EXTENSION_PATH,
-        )
-      : null,
-    hasEnabledConnectorsSync()
-      ? resolveBundledResourcePath(
-          "pi-extensions",
-          "connectors.ts",
-          process.env.LOCAL_STUDIO_CONNECTORS_EXTENSION_PATH,
-        )
-      : null,
-    resolveBundledResourcePath(
-      "pi-extensions",
-      "subagents.ts",
-      process.env.LOCAL_STUDIO_SUBAGENTS_EXTENSION_PATH,
-    ),
-    resolveBundledResourcePath(
-      "pi-extensions",
-      "automations.ts",
-      process.env.LOCAL_STUDIO_AUTOMATIONS_EXTENSION_PATH,
-    ),
+  const browser = shouldLoadBrowserTool(options);
+  const chrome = shouldLoadChromeTool(options);
+  return selectedBundledResources("pi-extensions", [
+    [true, "local-studio-timeouts.ts", process.env.LOCAL_STUDIO_TIMEOUT_EXTENSION_PATH],
+    [true, "local-studio-agent-policy.ts", process.env.LOCAL_STUDIO_AGENT_POLICY_EXTENSION_PATH],
+    [browser, "cua.ts", process.env.LOCAL_STUDIO_CUA_EXTENSION_PATH],
+    [chrome, "chrome.ts", process.env.LOCAL_STUDIO_CHROME_EXTENSION_PATH],
+    [hasGithubCliSync(), "github.ts", process.env.LOCAL_STUDIO_GITHUB_EXTENSION_PATH],
+    [hasObsidianVaultSync(), "obsidian.ts", process.env.LOCAL_STUDIO_OBSIDIAN_EXTENSION_PATH],
+    [
+      hasEnabledConnectorsSync(),
+      "connectors.ts",
+      process.env.LOCAL_STUDIO_CONNECTORS_EXTENSION_PATH,
+    ],
+    [true, "subagents.ts", process.env.LOCAL_STUDIO_SUBAGENTS_EXTENSION_PATH],
+    [true, "automations.ts", process.env.LOCAL_STUDIO_AUTOMATIONS_EXTENSION_PATH],
   ]);
 }
 
 function runtimeSkillPaths(options: RuntimeStartOptions): string[] {
   return uniqueExistingPaths([
-    ...selectedSkillPaths(options.skills ?? []),
-    shouldLoadBrowserTool(options)
-      ? resolveBundledResourcePath("skills", "cua", process.env.LOCAL_STUDIO_CUA_SKILL_PATH)
-      : null,
-    shouldLoadChromeTool(options)
-      ? resolveBundledResourcePath("skills", "chrome", process.env.LOCAL_STUDIO_CHROME_SKILL_PATH)
-      : null,
-    hasGithubCliSync()
-      ? resolveBundledResourcePath("skills", "github", process.env.LOCAL_STUDIO_GITHUB_SKILL_PATH)
-      : null,
-    hasObsidianVaultSync()
-      ? resolveBundledResourcePath(
-          "skills",
-          "obsidian",
-          process.env.LOCAL_STUDIO_OBSIDIAN_SKILL_PATH,
-        )
-      : null,
-    resolveBundledResourcePath(
-      "skills",
-      "automations",
-      process.env.LOCAL_STUDIO_AUTOMATIONS_SKILL_PATH,
-    ),
-    resolveBundledResourcePath(
-      "skills",
-      "subagents",
-      process.env.LOCAL_STUDIO_SUBAGENTS_SKILL_PATH,
-    ),
+    ...selectedPaths(options.skills ?? []),
+    ...selectedBundledResources("skills", [
+      [shouldLoadBrowserTool(options), "cua", process.env.LOCAL_STUDIO_CUA_SKILL_PATH],
+      [shouldLoadChromeTool(options), "chrome", process.env.LOCAL_STUDIO_CHROME_SKILL_PATH],
+      [hasGithubCliSync(), "github", process.env.LOCAL_STUDIO_GITHUB_SKILL_PATH],
+      [hasObsidianVaultSync(), "obsidian", process.env.LOCAL_STUDIO_OBSIDIAN_SKILL_PATH],
+      [true, "automations", process.env.LOCAL_STUDIO_AUTOMATIONS_SKILL_PATH],
+      [true, "subagents", process.env.LOCAL_STUDIO_SUBAGENTS_SKILL_PATH],
+    ]),
   ]);
 }
 
 function runtimeEnvInjections(options: RuntimeStartOptions, env: NodeJS.ProcessEnv, cwd: string) {
-  const frontendBase = env.LOCAL_STUDIO_FRONTEND_BASE ?? deriveFrontendBase(env);
+  const frontendBase = env.LOCAL_STUDIO_FRONTEND_BASE ?? `http://127.0.0.1:${env.PORT || "3000"}`;
   const relay = readChromeRelayEnv(env);
   const githubCliPath = githubCliPathSync();
   const obsidianVaults = listObsidianVaultsSync();
@@ -304,7 +241,7 @@ export function buildAgentSessionOptionsSync(input: AgentSessionOptionsInput): A
   return {
     extensionPaths: runtimeExtensionPaths(options),
     skills: runtimeSkillPaths(options),
-    promptTemplatePaths: selectedPromptTemplatePaths(options.promptTemplates ?? []),
+    promptTemplatePaths: selectedPaths(options.promptTemplates ?? []),
     envInjections: runtimeEnvInjections(options, input.processEnv ?? process.env, input.cwd ?? ""),
   };
 }

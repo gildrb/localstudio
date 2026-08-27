@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Schema } from "effect";
 import { notifySessionListChanged } from "./session-list-changed";
@@ -64,23 +64,29 @@ function storePath(): string {
 }
 
 const isString = Schema.is(Schema.String);
+const nullableMetadataFields = ["archivedAt", "title"] as const;
+const optionalMetadataFields = [
+  "updatedAt",
+  "cwd",
+  "projectId",
+  "projectName",
+  "sessionUpdatedAt",
+  "parentSessionId",
+  "subagentName",
+  "subagentRunId",
+  "subagentTask",
+] as const;
 
 function normalizeStoredMetadata(metadata: PersistedValue): StoredSessionMetadata | null {
   if (!isRecord(metadata)) return null;
-  return {
-    archived: metadata.archived === true,
-    archivedAt: isString(metadata.archivedAt) ? metadata.archivedAt : null,
-    updatedAt: isString(metadata.updatedAt) ? metadata.updatedAt : undefined,
-    cwd: isString(metadata.cwd) ? metadata.cwd : undefined,
-    title: isString(metadata.title) ? metadata.title : null,
-    projectId: isString(metadata.projectId) ? metadata.projectId : undefined,
-    projectName: isString(metadata.projectName) ? metadata.projectName : undefined,
-    sessionUpdatedAt: isString(metadata.sessionUpdatedAt) ? metadata.sessionUpdatedAt : undefined,
-    parentSessionId: isString(metadata.parentSessionId) ? metadata.parentSessionId : undefined,
-    subagentName: isString(metadata.subagentName) ? metadata.subagentName : undefined,
-    subagentRunId: isString(metadata.subagentRunId) ? metadata.subagentRunId : undefined,
-    subagentTask: isString(metadata.subagentTask) ? metadata.subagentTask : undefined,
-  };
+  const normalized: StoredSessionMetadata = { archived: metadata.archived === true };
+  for (const field of nullableMetadataFields) {
+    normalized[field] = isString(metadata[field]) ? metadata[field] : null;
+  }
+  for (const field of optionalMetadataFields) {
+    if (isString(metadata[field])) normalized[field] = metadata[field];
+  }
+  return normalized;
 }
 
 function normalizeStore(value: PersistedValue): SessionMetadataStore {
@@ -105,13 +111,16 @@ function backupUnreadableStore(filepath: string): void {
   }
 }
 
-function readStore(): SessionMetadataStore {
+function readStore(quarantineCorrupt = false): SessionMetadataStore {
   const filepath = storePath();
   try {
     if (!existsSync(filepath)) return defaultStore();
     return normalizeStore(JSON.parse(readFileSync(filepath, "utf-8")));
   } catch (error) {
-    backupUnreadableStore(filepath);
+    if (quarantineCorrupt) {
+      if (!(error instanceof SyntaxError)) throw error;
+      backupUnreadableStore(filepath);
+    }
     console.warn("[agent-session-metadata] Failed to read metadata store", error);
     return defaultStore();
   }
@@ -121,10 +130,10 @@ function writeStore(store: SessionMetadataStore): void {
   const filepath = storePath();
   mkdirSync(path.dirname(filepath), { recursive: true });
   const tempPath = `${filepath}.${process.pid}.tmp`;
-  writeFileSync(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf-8");
-  try {
-    chmodSync(tempPath, 0o600);
-  } catch {}
+  writeFileSync(tempPath, `${JSON.stringify(store, null, 2)}\n`, {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
   renameSync(tempPath, filepath);
   notifySessionListChanged();
 }
@@ -155,22 +164,24 @@ function cleanOptionalString(value: string | null | undefined): string | undefin
   return trimmed || undefined;
 }
 
+const archiveMetadataFields = [
+  "cwd",
+  "title",
+  "projectId",
+  "projectName",
+  "sessionUpdatedAt",
+] as const;
+
 function applyMetadataInput(
   current: StoredSessionMetadata,
   metadata?: SessionArchiveMetadataInput,
 ): StoredSessionMetadata {
   if (!metadata) return current;
   const next = { ...current };
-  const cwd = cleanOptionalString(metadata.cwd);
-  const title = cleanOptionalString(metadata.title);
-  const projectId = cleanOptionalString(metadata.projectId);
-  const projectName = cleanOptionalString(metadata.projectName);
-  const sessionUpdatedAt = cleanOptionalString(metadata.sessionUpdatedAt);
-  if (cwd) next.cwd = cwd;
-  if (title) next.title = title;
-  if (projectId) next.projectId = projectId;
-  if (projectName) next.projectName = projectName;
-  if (sessionUpdatedAt) next.sessionUpdatedAt = sessionUpdatedAt;
+  for (const field of archiveMetadataFields) {
+    const value = cleanOptionalString(metadata[field]);
+    if (value) next[field] = value;
+  }
   return next;
 }
 
@@ -216,7 +227,7 @@ export async function setSubagentLink(
   const parentId = parentSessionId.trim();
   if (!childId || !parentId || childId === parentId) return;
   await withStoreLock(() => {
-    const store = readStore();
+    const store = readStore(true);
     const current = store.sessions[childId] ?? {};
     const next: StoredSessionMetadata = {
       ...current,
@@ -292,7 +303,7 @@ export async function setSessionArchived(
   const id = sessionId.trim();
   if (!id) return { archived: false, archivedAt: null };
   return withStoreLock(() => {
-    const store = readStore();
+    const store = readStore(true);
     const current = store.sessions[id] ?? {};
     const archivedAt = archived ? (current.archivedAt ?? now.toISOString()) : null;
     if (archived) {

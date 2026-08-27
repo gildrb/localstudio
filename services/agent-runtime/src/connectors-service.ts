@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { resolveDataDir } from "./data-dir";
 import { Schema } from "effect";
+import type { PersistedValue } from "./session-json-store";
 import {
   ConnectorsFileSchema,
   type ConnectorConfig,
@@ -159,6 +160,14 @@ export function resolveConnectorsFilePath(): string {
   return join(resolveDataDir(), "connectors.json");
 }
 
+export async function writePrivateJson(file: string, value: PersistedValue): Promise<void> {
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, file);
+  await chmod(file, 0o600);
+}
+
 const CONNECTOR_ID_PATTERN = /^[a-z0-9][a-z0-9-_]{0,63}$/;
 
 export const isValidConnectorId = (id: string): boolean => CONNECTOR_ID_PATTERN.test(id);
@@ -181,11 +190,7 @@ export async function listConnectors(): Promise<ConnectorConfig[]> {
 async function writeConnectors(connectors: ConnectorConfig[]): Promise<void> {
   resolveDataDir();
   const file = resolveConnectorsFilePath();
-  const payload = JSON.stringify({ connectors: connectors.map(protectManagedConnector) }, null, 2);
-  const tempFile = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tempFile, payload, "utf-8");
-  await chmod(tempFile, 0o600).catch(() => undefined);
-  await rename(tempFile, file);
+  await writePrivateJson(file, { connectors: connectors.map(protectManagedConnector) });
 }
 
 export function saveConnectors(connectors: ConnectorConfig[]): Promise<void> {

@@ -6,34 +6,47 @@ import { readGoal, writeGoal, type GoalWritePatch } from "./goals-store";
 import { assistantMessageText } from "./session-text";
 
 const CONTINUATION_GRACE_MS = 2000;
-
 const AssistantEventSchema = Schema.Struct({
   type: Schema.Literals(["message", "message_end"]),
-  message: Schema.Struct({
-    role: Schema.Literal("assistant"),
-    content: Schema.Unknown,
-  }),
+  message: Schema.Struct({ role: Schema.Literal("assistant"), content: Schema.Unknown }),
 });
 
-type DriverState = {
-  sawToolThisTurn: boolean;
-  assistantText: string;
-  lastTurnWasContinuation: boolean;
+type GoalTurn = {
+  startedAt: number | null;
+  origin: "user" | "continuation";
   aborted: boolean;
-  runStartedAtMs: number | null;
-  pendingContinuation: boolean;
+  hadTools: boolean;
+  text: string;
+  generation: number;
+};
+type DriverControl = { waitForIdle(): Promise<void>; dispose(): void };
+type DriverState = {
+  turn: GoalTurn | null;
+  nextOrigin: GoalTurn["origin"];
+  generation: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  tail: Promise<void>;
+  failure: unknown;
+  control?: DriverControl;
 };
 
 const driverStates = new WeakMap<PiAgentSession, DriverState>();
+const newTurn = (state: DriverState, startedAt: number | null): GoalTurn => ({
+  startedAt,
+  origin: state.nextOrigin,
+  aborted: false,
+  hadTools: false,
+  text: "",
+  generation: state.generation,
+});
 
 export function markGoalTurnAborted(session: PiAgentSession): void {
   const state = driverStates.get(session);
-  if (state) state.aborted = true;
+  if (state?.turn) state.turn.aborted = true;
 }
 
 function eventTouchesTools(event: LoggedPiEvent["event"]): boolean {
-  const type = event.type ?? "";
-  return type.includes("tool");
+  return (event.type ?? "").includes("tool");
 }
 
 function assistantTextFromEvent(event: LoggedPiEvent["event"]): string {
@@ -41,136 +54,136 @@ function assistantTextFromEvent(event: LoggedPiEvent["event"]): string {
   return decoded._tag === "Some" ? assistantMessageText(decoded.value.message.content) : "";
 }
 
-async function openGoalRun(session: PiAgentSession): Promise<void> {
-  try {
-    const piSessionId = session.status.piSessionId;
-    if (!piSessionId) return;
-    const goal = await readGoal(piSessionId);
-    if (!goal || goal.status !== "active") return;
+async function openGoalRun(piSessionId: string | null): Promise<void> {
+  if (!piSessionId) return;
+  const goal = await readGoal(piSessionId);
+  if (goal?.status === "active") {
     await writeGoal(piSessionId, { activeRunStartedAt: new Date().toISOString() });
-  } catch {}
+  }
 }
 
-type GoalTurn = {
-  aborted: boolean;
-  wasContinuation: boolean;
-  hadTools: boolean;
-  assistantText: string;
-  runSeconds: number;
-};
-
-function takeTurn(state: DriverState): GoalTurn {
-  const runSeconds = state.runStartedAtMs === null ? 0 : (Date.now() - state.runStartedAtMs) / 1000;
-  const turn = {
-    aborted: state.aborted,
-    wasContinuation: state.lastTurnWasContinuation,
-    hadTools: state.sawToolThisTurn,
-    assistantText: state.assistantText,
-    runSeconds,
-  };
-  state.aborted = false;
-  state.lastTurnWasContinuation = false;
-  state.sawToolThisTurn = false;
-  state.assistantText = "";
-  state.runStartedAtMs = null;
-  return turn;
-}
-
-async function settleGoalAfterTurn(session: PiAgentSession, state: DriverState): Promise<void> {
-  const status = session.status;
-  const piSessionId = status.piSessionId;
-  const turn = takeTurn(state);
+async function settleGoalAfterTurn(
+  session: PiAgentSession,
+  state: DriverState,
+  piSessionId: string | null,
+  lastError: string | null,
+  turn: GoalTurn,
+): Promise<void> {
   if (!piSessionId) return;
   const goal = await readGoal(piSessionId);
   if (!goal) return;
-
+  const runSeconds = turn.startedAt === null ? 0 : (Date.now() - turn.startedAt) / 1000;
   const banked = {
-    timeUsedSeconds: goal.timeUsedSeconds + turn.runSeconds,
+    timeUsedSeconds: goal.timeUsedSeconds + runSeconds,
     activeRunStartedAt: null,
   } satisfies GoalWritePatch;
-  const settle = (patch: GoalWritePatch) => writeGoal(piSessionId, { ...banked, ...patch });
+  const settle = async (patch: GoalWritePatch): Promise<void> => {
+    await writeGoal(piSessionId, { ...banked, ...patch });
+  };
 
   if (goal.status !== "active") {
-    if (turn.runSeconds > 0 || goal.activeRunStartedAt) await writeGoal(piSessionId, banked);
+    if (runSeconds > 0 || goal.activeRunStartedAt) await writeGoal(piSessionId, banked);
     return;
   }
-
-  if (turn.aborted || status.lastError) {
-    await settle({ status: "paused" });
-    return;
-  }
-
-  const outcome = goalOutcomeFromText(turn.assistantText);
-  if (outcome) {
-    await settle({ status: outcome.kind === "complete" ? "complete" : "blocked" });
-    return;
-  }
+  if (turn.aborted || lastError) return settle({ status: "paused" });
+  const outcome = goalOutcomeFromText(turn.text);
+  if (outcome) return settle({ status: outcome.kind === "complete" ? "complete" : "blocked" });
 
   const turnsUsed = goal.turnsUsed + 1;
   if (goal.turnBudget !== null && turnsUsed >= goal.turnBudget) {
-    await settle({ turnsUsed, status: "budget_limited" });
-    return;
+    return settle({ turnsUsed, status: "budget_limited" });
   }
-  if (turn.wasContinuation && !turn.hadTools) {
-    await settle({ turnsUsed, status: "paused" });
-    return;
+  if (turn.origin === "continuation" && !turn.hadTools) {
+    return settle({ turnsUsed, status: "paused" });
   }
   await settle({ turnsUsed });
-  if (!state.pendingContinuation) scheduleContinuation(session, state, piSessionId);
+  scheduleContinuation(session, state, piSessionId, turn.generation);
 }
 
 function scheduleContinuation(
   session: PiAgentSession,
   state: DriverState,
   piSessionId: string,
+  generation: number,
 ): void {
-  state.pendingContinuation = true;
-  setTimeout(() => {
-    void (async () => {
+  if (state.generation !== generation) return;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    const run = async () => {
+      if (state.generation !== generation || session.status.active) return;
+      if (session.status.piSessionId !== piSessionId) return;
+      const goal = await readGoal(piSessionId);
+      if (!goal || goal.status !== "active") return;
+      if (state.generation !== generation || session.status.active) return;
+      state.nextOrigin = "continuation";
       try {
-        const current = session.status;
-        if (current.active || current.piSessionId !== piSessionId) return;
-        const liveGoal = await readGoal(piSessionId);
-        if (!liveGoal || liveGoal.status !== "active") return;
-        state.lastTurnWasContinuation = true;
-        state.sawToolThisTurn = false;
-        state.assistantText = "";
-        await session.prompt(goalContinuationPrompt(liveGoal.objective), () => {});
-      } catch {
-      } finally {
-        state.pendingContinuation = false;
+        await session.prompt(goalContinuationPrompt(goal.objective), () => {});
+      } catch (error) {
+        if (!state.turn) state.nextOrigin = "user";
+        throw error;
       }
-    })();
+    };
+    state.tail = state.tail.then(run).catch((error) => {
+      console.error("[agent-runtime] goal continuation failed:", error);
+      state.failure ??= error;
+    });
   }, CONTINUATION_GRACE_MS);
 }
 
-export function attachGoalDriver(session: PiAgentSession): void {
+export function attachGoalDriver(session: PiAgentSession): DriverControl {
+  const attached = driverStates.get(session);
+  if (attached?.control) return attached.control;
   const state: DriverState = {
-    sawToolThisTurn: false,
-    assistantText: "",
-    lastTurnWasContinuation: false,
-    aborted: false,
-    runStartedAtMs: null,
-    pendingContinuation: false,
+    turn: null,
+    nextOrigin: "user",
+    generation: 0,
+    timer: null,
+    tail: Promise.resolve(),
+    failure: null,
+  } satisfies DriverState;
+  const enqueue = (task: () => Promise<void>) => {
+    state.tail = state.tail.then(task).catch((error) => {
+      console.error("[agent-runtime] goal driver failed:", error);
+      state.failure ??= error;
+    });
   };
-  driverStates.set(session, state);
-  session.onLoggedEvent((logged) => {
+  const off = session.onLoggedEvent((logged) => {
     const type = logged.event.type ?? "";
     if (type === "agent_start") {
-      state.sawToolThisTurn = false;
-      state.assistantText = "";
-      state.aborted = false;
-      state.runStartedAtMs = Date.now();
-      void openGoalRun(session);
+      state.generation += 1;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+      state.turn = newTurn(state, Date.now());
+      state.nextOrigin = "user";
+      const piSessionId = session.status.piSessionId;
+      enqueue(() => openGoalRun(piSessionId));
       return;
     }
-    if (eventTouchesTools(logged.event)) {
-      state.sawToolThisTurn = true;
-      return;
-    }
-    state.assistantText += assistantTextFromEvent(logged.event);
-    if (isAgentSettledEvent(logged.event)) {
-      void settleGoalAfterTurn(session, state);
-    }
+    state.turn ??= newTurn(state, null);
+    if (eventTouchesTools(logged.event)) state.turn.hadTools = true;
+    else state.turn.text += assistantTextFromEvent(logged.event);
+    if (!isAgentSettledEvent(logged.event)) return;
+    const turn = state.turn;
+    const { piSessionId, lastError } = session.status;
+    state.turn = null;
+    enqueue(() => settleGoalAfterTurn(session, state, piSessionId, lastError, turn));
   });
+  state.control = {
+    async waitForIdle() {
+      let observed: Promise<void>;
+      do {
+        observed = state.tail;
+        await observed;
+      } while (observed !== state.tail);
+      if (state.failure) throw state.failure;
+    },
+    dispose() {
+      off();
+      if (state.timer) clearTimeout(state.timer);
+      driverStates.delete(session);
+    },
+  };
+  driverStates.set(session, state);
+  return state.control;
 }

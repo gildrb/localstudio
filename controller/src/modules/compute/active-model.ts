@@ -15,13 +15,6 @@ import {
 import type { ComputeLaunchInput, ComputeService } from "./lifecycle";
 import type { InstanceStore } from "./instances/store";
 
-/**
- * The one-active-model surface: "what is serving on the inference port", "what is
- * launching", launch, evict, wait-ready — answered from compute instance records.
- * The active model gets a fixed instance name and serves on the inference port, so
- * the proxy, metrics and speech surfaces are unchanged.
- */
-
 export const LLM_INSTANCE = "llm";
 
 export interface ActiveModel {
@@ -40,8 +33,6 @@ export interface ActiveModelDependencies {
   readonly store: InstanceStore;
   readonly getRecipe: (recipeId: string) => Effect.Effect<Recipe | null, unknown>;
 }
-
-/* ── recipe extra_args -> argv (semantics preserved from the legacy builder) ── */
 
 const isString = Schema.is(Schema.String);
 const isJsonArray = Schema.is(Schema.Array(Schema.Json));
@@ -107,8 +98,6 @@ export const serializeRecipeExtraArguments = (recipe: Recipe): string[] => {
   return argv;
 };
 
-/* ── custom launch command (opt-in arbitrary argv, unchanged policy) ───────── */
-
 const splitLaunchCommand = (command: string): string[] => {
   const result: string[] = [];
   let current = "";
@@ -158,8 +147,6 @@ const launchCommandOverride = (recipe: Recipe): string[] | null => {
   const argv = splitLaunchCommand(override);
   return argv.length > 0 ? argv : null;
 };
-
-/* ── recipe -> launch input ────────────────────────────────────────────────── */
 
 const addLaunchOverrides = (
   input: ComputeLaunchInput,
@@ -214,8 +201,6 @@ export const recipeToLaunchInput = (
     override,
   );
 };
-
-/* ── the surface ───────────────────────────────────────────────────────────── */
 
 const RUNNING_STATES = new Set(["starting", "ready", "unhealthy"]);
 

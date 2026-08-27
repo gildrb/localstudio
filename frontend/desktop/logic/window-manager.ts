@@ -56,9 +56,6 @@ export function createMainWindow(appUrl: string): BrowserWindow {
         ].join(" "),
       );
     });
-    // Recover from a renderer crash (OOM/GPU/abnormal) by reloading, so the user
-    // isn't left with a permanent blank window. Rate-limited so a hard crash-loop
-    // doesn't spin — after that the window stays blank rather than thrashing.
     if (details.reason === "clean-exit" || window.isDestroyed()) return;
     const now = Date.now();
     if (now - lastRendererReloadAt < 10_000) return;

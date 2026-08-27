@@ -4,9 +4,6 @@ import path from "node:path";
 import { writeJsonAtomic } from "../helpers/fs-json";
 import { Schema } from "effect";
 
-/** Main-process-owned settings (hotkeys, window sizes) — separate from the
- * renderer-owned ui-preferences.json, which the renderer rewrites wholesale. */
-
 export interface QuickPanelSize {
   width: number;
   height: number;

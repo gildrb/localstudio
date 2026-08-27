@@ -48,13 +48,13 @@ async function isAgentRuntimeHealthy(url: string): Promise<boolean> {
 }
 
 async function waitForAgentRuntime(
-  child: ChildProcess,
+  child: ChildProcess | undefined,
   url: string,
   timeoutMs: number,
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (child.exitCode !== null) {
+    if (child && child.exitCode !== null) {
       throw new Error(`Agent runtime exited with code ${child.exitCode}`);
     }
     if (await isAgentRuntimeHealthy(url)) return;
@@ -87,9 +87,13 @@ export async function startAgentRuntime(
   options: StartAgentRuntimeOptions,
 ): Promise<AgentRuntimeHandle> {
   const preferredUrl = options.preferredPort ? `http://127.0.0.1:${options.preferredPort}` : null;
-  if (preferredUrl && (await isAgentRuntimeHealthy(preferredUrl))) {
-    log.info(`Using agent runtime at ${preferredUrl}`);
-    return { frontendUrl: options.frontendUrl, url: preferredUrl };
+  if (preferredUrl) {
+    if (!app.isPackaged)
+      await waitForAgentRuntime(undefined, preferredUrl, DESKTOP_CONFIG.startupTimeoutMs);
+    if (!app.isPackaged || (await isAgentRuntimeHealthy(preferredUrl))) {
+      log.info(`Using agent runtime at ${preferredUrl}`);
+      return { frontendUrl: options.frontendUrl, url: preferredUrl };
+    }
   }
 
   const entry = agentRuntimeEntry();

@@ -8,7 +8,7 @@ import { badRequest, notFound } from "../../core/errors";
 import { findObservedInferenceProcess } from "../../core/function-observability";
 import { buildSseHeaders, toReadableByteStream, withSseHeartbeat } from "../../http/sse";
 import { CONTROLLER_EVENTS } from "@local-studio/contracts/controller-events";
-import { Event } from "./event-manager";
+import { abortSignalEffect, Event } from "./event-manager";
 import { isRecipeRunning } from "../models/recipes/recipe-matching";
 import {
   cleanupLogFiles,
@@ -23,35 +23,16 @@ import {
 import { redactLogLine } from "../../core/log-redaction";
 import { runCommandAsyncEffect } from "../../core/command";
 
-const LogLimitQuerySchema = Schema.Struct({
-  limit: Schema.optionalKey(
-    Schema.FiniteFromString.pipe(
-      Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 20_000 })),
-    ),
-  ),
-});
+const LogLimitSchema = Schema.FiniteFromString.pipe(
+  Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 20_000 })),
+);
 const DockerContainerSchema = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[a-zA-Z0-9_.-]+$/)),
 );
 const LogEventDataSchema = Schema.Struct({ line: Schema.String });
-const LogTailQuerySchema = Schema.Struct({
-  tail: Schema.optionalKey(
-    Schema.FiniteFromString.pipe(
-      Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 0, maximum: 20_000 })),
-    ),
-  ),
-});
-
-const abortEffect = (signal: AbortSignal): Effect.Effect<void> =>
-  Effect.callback<void>((resume) => {
-    if (signal.aborted) {
-      resume(Effect.void);
-      return;
-    }
-    const abort = (): void => resume(Effect.void);
-    signal.addEventListener("abort", abort, { once: true });
-    return Effect.sync(() => signal.removeEventListener("abort", abort));
-  });
+const LogTailSchema = Schema.FiniteFromString.pipe(
+  Schema.check(Schema.isInt(), Schema.isBetween({ minimum: 0, maximum: 20_000 })),
+);
 
 const waitForChildExit = (child: ReturnType<typeof spawn>): Effect.Effect<void> =>
   Effect.callback<void>((resume) => {
@@ -109,14 +90,12 @@ export const registerLogsRoutes = defineRoutes((app, context) => {
           extraArguments["docker_container"] ??
           extraArguments["container-name"] ??
           extraArguments["container_name"];
-        return Option.getOrNull(
-          Schema.decodeUnknownOption(DockerContainerSchema)(
-            Schema.decodeUnknownOption(Schema.String)(value).pipe(
-              Option.map((container) => container.trim()),
-              Option.getOrNull,
-            ),
-          ),
-        );
+        const decoded = Schema.decodeUnknownOption(Schema.String)(value);
+        return Option.isSome(decoded)
+          ? Option.getOrNull(
+              Schema.decodeUnknownOption(DockerContainerSchema)(decoded.value.trim()),
+            )
+          : null;
       }),
     );
 
@@ -204,7 +183,7 @@ export const registerLogsRoutes = defineRoutes((app, context) => {
             }),
         ).pipe(Effect.map(({ lines }) => Stream.fromAsyncIterable(lines, (error) => error))),
       ),
-    ).pipe(Stream.interruptWhen(abortEffect(signal)));
+    ).pipe(Stream.interruptWhen(abortSignalEffect(signal)));
 
   return mergeRoutes(
     effectRoute(app.get, "/logs", (ctx) =>
@@ -258,10 +237,12 @@ export const registerLogsRoutes = defineRoutes((app, context) => {
       Effect.gen(function* () {
         const sessionId = yield* decodeSessionId(ctx.req.param("sessionId") ?? "");
         const limitRaw = ctx.req.query("limit");
-        const query = yield* Schema.decodeUnknownEffect(LogLimitQuerySchema)(
-          limitRaw === undefined ? {} : { limit: limitRaw },
-        ).pipe(Effect.mapError(() => badRequest("Invalid log limit")));
-        const limit = query.limit ?? 2000;
+        const limit =
+          limitRaw !== undefined
+            ? yield* Schema.decodeUnknownEffect(LogLimitSchema)(limitRaw).pipe(
+                Effect.mapError(() => badRequest("Invalid log limit")),
+              )
+            : 2000;
         const dockerContainer = yield* getDockerContainerForSession(sessionId);
         if (dockerContainer) {
           const dockerLines = (yield* readDockerLogLines(dockerContainer, limit)).map(
@@ -325,10 +306,12 @@ export const registerLogsRoutes = defineRoutes((app, context) => {
       Effect.gen(function* () {
         const sessionId = yield* decodeSessionId(ctx.req.param("sessionId") ?? "");
         const tailRaw = ctx.req.query("tail");
-        const query = yield* Schema.decodeUnknownEffect(LogTailQuerySchema)(
-          tailRaw === undefined ? {} : { tail: tailRaw },
-        ).pipe(Effect.mapError(() => badRequest("Invalid log tail")));
-        const replayLimit = query.tail ?? 2000;
+        const replayLimit =
+          tailRaw !== undefined
+            ? yield* Schema.decodeUnknownEffect(LogTailSchema)(tailRaw).pipe(
+                Effect.mapError(() => badRequest("Invalid log tail")),
+              )
+            : 2000;
         const path = yield* Effect.sync(() =>
           resolveExistingLogPath(context.config.data_dir, sessionId),
         );

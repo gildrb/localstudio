@@ -1,8 +1,8 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
-import { cleanTemps, tempDir } from "./test-fixtures";
+import { cleanTemps, isolatedDataDir } from "./test-fixtures";
 
-process.env.LOCAL_STUDIO_DATA_DIR = tempDir("connector-grants-");
+process.env.LOCAL_STUDIO_DATA_DIR = isolatedDataDir("connector-grants-");
 const grants = await import("../src/connector-grants");
 const { resolveConnectorsFilePath } = await import("../src/connectors-service");
 afterAll(cleanTemps);

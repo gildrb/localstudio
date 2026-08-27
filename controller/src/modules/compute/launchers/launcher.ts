@@ -26,8 +26,7 @@ export interface Launcher {
   readonly logTail: (reference: HandleReference, record: InstanceRecord) => Effect.Effect<string>;
 }
 
-/** Uniform tail length for every failure path — the old code truncated the same crash to
- *  200 chars on one path and 20 lines on another. */
+/** Uniform tail length for every failure path. */
 export const LOG_TAIL_BYTES = 4_096;
 
 export const spawnFailed = (

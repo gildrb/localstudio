@@ -1,9 +1,9 @@
 /**
  * Server-only support for attaching a Local Studio model to locally installed
- * coding-agent CLIs (pi, opencode, droid, hermes). Detection inspects well-known
- * config directories under a given home dir; attachment merges a provider /
- * model entry into each agent's own config file, preserving everything else
- * in the file and backing the file up before the first modification.
+ * coding-agent CLIs. Detection inspects well-known config directories under a
+ * given home dir; attachment merges a provider/model entry into each agent's
+ * config file, preserving everything else and backing up existing files before
+ * modification.
  */
 import path from "node:path";
 import { Option, Schema } from "effect";

@@ -4,7 +4,6 @@ import { Effect, Schema } from "effect";
 import type { ModelInfo } from "./types";
 
 const MODEL_BROWSER_WEIGHT_EXTENSIONS = [".safetensors", ".bin", ".gguf"] as const;
-const MODEL_BROWSER_CONFIG_FILENAMES = ["config.json"] as const;
 const MODEL_QUANTIZATION_SIGNATURES = [
   "awq",
   "gptq",
@@ -41,7 +40,6 @@ const modelBrowserError = (
     source,
   });
 
-
 const ConfigMetadataSchema = Schema.Struct({
   architectures: Schema.optional(Schema.Array(Schema.String)),
   max_position_embeddings: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
@@ -58,11 +56,10 @@ export const looksLikeModelDirectory = (path: string): Effect.Effect<boolean, Mo
     try: () => readdir(path, { withFileTypes: true }),
     catch: (source) => modelBrowserError("scan", path, String(source)),
   }).pipe(
-    Effect.map(
-      (entries) =>
-        MODEL_BROWSER_CONFIG_FILENAMES.some((configName) =>
-          entries.some((entry) => entry.isFile() && entry.name === configName),
-        ) || entries.some((entry) => entry.isFile() && isWeightFile(entry.name)),
+    Effect.map((entries) =>
+      entries.some(
+        (entry) => entry.isFile() && (entry.name === "config.json" || isWeightFile(entry.name)),
+      ),
     ),
   );
 
@@ -89,14 +86,9 @@ export const readConfigMetadata = (
       }),
     ),
     Effect.map((parsed) => {
-      const architectures = parsed["architectures"];
-      const architecture =
-        Array.isArray(architectures) && architectures.length > 0 ? String(architectures[0]) : null;
+      const architecture = parsed.architectures?.[0] ?? null;
       const raw =
-        parsed["max_position_embeddings"] ??
-        parsed["max_seq_len"] ??
-        parsed["seq_length"] ??
-        parsed["n_ctx"];
+        parsed.max_position_embeddings ?? parsed.max_seq_len ?? parsed.seq_length ?? parsed.n_ctx;
       const contextLength = Schema.is(Schema.Number)(raw)
         ? raw
         : Schema.is(Schema.String)(raw) && /^\d+$/.test(raw)

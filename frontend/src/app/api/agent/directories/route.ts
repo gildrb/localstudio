@@ -1,8 +1,12 @@
 import { NextRequest } from "next/server";
-import os from "node:os";
 import path from "node:path";
-import { readdir, stat } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
+import {
+  allowedWorkspaceRoots,
+  resolveAllowedWorkspace,
+} from "@local-studio/agent-runtime/projects-store";
 import { errorMessage, jsonError } from "@/app/api/_lib/route-helpers";
+import { requireApiAccess } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,14 +16,6 @@ type DirectoryEntry = {
   path: string;
 };
 
-async function isDirectory(candidate: string): Promise<boolean> {
-  try {
-    return (await stat(candidate)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
 function isLoopbackHost(host: string | null): boolean {
   const value = host ?? "";
   const hostname = value.startsWith("[")
@@ -28,67 +24,53 @@ function isLoopbackHost(host: string | null): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
-function configuredRoots(): string[] {
-  const raw = process.env.LOCAL_STUDIO_DIRECTORY_BROWSER_ROOTS;
-  if (!raw) return [path.resolve(os.homedir())];
-  return raw
-    .split(path.delimiter)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map((entry) => path.resolve(entry));
-}
-
-function isWithinRoot(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-}
-
-function resolveAllowedPath(input: string | null, roots: string[]): string | null {
-  const fallbackRoot = roots[0] ?? path.resolve(os.homedir());
-  const candidate = path.resolve(input?.trim() || fallbackRoot);
-  return roots.some((root) => isWithinRoot(candidate, root)) ? candidate : null;
+function allowedDirectory(input: string | null, fallback: string): string | null {
+  try {
+    return resolveAllowedWorkspace(input?.trim() || fallback);
+  } catch {
+    return null;
+  }
 }
 
 export async function GET(request: NextRequest) {
-  const roots = configuredRoots();
+  const denied = requireApiAccess(request);
+  if (denied) return denied;
   const remoteBrowserEnabled = process.env.LOCAL_STUDIO_ENABLE_REMOTE_DIRECTORY_BROWSER === "1";
-  if (!isLoopbackHost(request.headers.get("host")) && !(remoteBrowserEnabled && roots.length > 0)) {
+  if (!isLoopbackHost(request.headers.get("host")) && !remoteBrowserEnabled) {
     return jsonError("Directory browsing is only available locally", 403);
   }
 
-  const directoryPath = resolveAllowedPath(request.nextUrl.searchParams.get("path"), roots);
-  if (!directoryPath) {
-    return jsonError("Path is outside the allowed directories", 403);
+  let roots: string[];
+  try {
+    roots = allowedWorkspaceRoots();
+  } catch (error) {
+    return jsonError(errorMessage(error, "Workspace roots are invalid"), 500);
   }
-
-  if (!(await isDirectory(directoryPath))) {
-    return jsonError("Path is not a directory");
-  }
+  const directoryPath = allowedDirectory(request.nextUrl.searchParams.get("path"), roots[0] ?? "");
+  if (!directoryPath) return jsonError("Path is outside WORKSPACE_ROOTS", 403);
 
   try {
     const names = await readdir(directoryPath);
-    const entries: DirectoryEntry[] = [];
-
-    await Promise.all(
-      names.map(async (name) => {
-        if (name === "." || name === "..") return;
-        const entryPath = path.join(directoryPath, name);
-        if (!(await isDirectory(entryPath))) return;
-        entries.push({ name, path: entryPath });
-      }),
-    );
-
-    entries.sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
-    );
-
-    const parent = path.dirname(directoryPath);
+    const entries = (
+      await Promise.all(
+        names.map(async (name): Promise<DirectoryEntry | null> => {
+          if (name === "." || name === "..") return null;
+          const entryPath = allowedDirectory(path.join(directoryPath, name), roots[0] ?? "");
+          return entryPath ? { name, path: entryPath } : null;
+        }),
+      )
+    )
+      .filter((entry): entry is DirectoryEntry => entry !== null)
+      .sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" }),
+      );
+    const parentPath = path.dirname(directoryPath);
+    const parent =
+      parentPath === directoryPath ? null : allowedDirectory(parentPath, roots[0] ?? "");
     return Response.json({
       path: directoryPath,
-      parent: parent === directoryPath ? null : parent,
-      home: os.homedir(),
+      parent,
+      roots,
       entries,
     });
   } catch (error) {

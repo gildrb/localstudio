@@ -23,31 +23,15 @@ const ACCELERATOR_BY_VENDOR = {
   unknown: "cpu",
 } satisfies Readonly<Record<DeviceVendor, AcceleratorInfo["accelerator"]>>;
 
-/** Stable across reboots. Indices renumber when a card is added or removed, so they are
- *  the last resort and are namespaced by vendor to stay unambiguous. */
 const deviceIdFor = (gpu: GpuInfo, vendor: DeviceVendor): string =>
   gpu.uuid ?? gpu.pci_bus_id ?? `${vendor}:${gpu.index}`;
 
-/**
- * `detectGpuMonitoringTool` only knows about the SMI binaries, so it answers null on
- * Apple Silicon even though `getGpuInfo` does return the SoC's GPU. Falling back to the
- * host is what keeps a Mac from being classified as a CPU-only box.
- */
 const vendorFor = (tool: RuntimeGpuMonitoringTool | null): DeviceVendor => {
   if (tool) return TOOL_VENDORS[tool];
   if (platform() === "darwin" && arch() === "arm64") return "apple";
   return "unknown";
 };
 
-/**
- * The vendor probes already report, per GPU, which counters they could actually read
- * (`utilization_available`, `temperature_available`, …). Honouring those flags is what
- * lets the UI distinguish "this platform cannot tell you" from "it is currently zero" —
- * a 0 with the flag unset is the absence of a reading, not an idle GPU.
- *
- * The flags are optional in the contract; absent means "reported", which matches the
- * NVIDIA path where every counter is genuinely available.
- */
 const available = (flag: boolean | undefined): boolean => flag !== false;
 
 const reading = (flag: boolean | undefined, value: number | undefined): number | null =>

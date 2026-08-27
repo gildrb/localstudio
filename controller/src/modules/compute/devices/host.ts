@@ -13,11 +13,6 @@ export const hostPlatform = (): HostPlatform => {
 
 export const hostArch = (): HostArch => (arch() === "arm64" ? "arm64" : "x64");
 
-/**
- * `os.freemem()` counts only wholly unused pages, so on Linux it understates what is
- * actually available by the size of the page cache. MemAvailable is the kernel's own
- * estimate and is the number a launch decision should use.
- */
 const linuxMemoryField = (field: string): number | null => {
   try {
     const meminfo = readFileSync("/proc/meminfo", "utf8");
@@ -29,12 +24,6 @@ const linuxMemoryField = (field: string): number | null => {
   }
 };
 
-/**
- * macOS reports almost everything as "inactive" rather than free, so `os.freemem()` on a
- * 34 GB Mac routinely answers a few hundred MB. Inactive and speculative pages are
- * reclaimable on demand, so the honest available figure is free + inactive + speculative,
- * minus whatever is pinned by compression.
- */
 const darwinAvailableBytes = (): number | null => {
   const result = realProcessRunner.runSync("vm_stat", [], { timeoutMs: 2_000 });
   if (result.status !== 0 || result.stdout.length === 0) return null;
@@ -42,7 +31,10 @@ const darwinAvailableBytes = (): number | null => {
   const pages = (label: string): number =>
     Number(new RegExp(`${label}:\\s+(\\d+)`).exec(result.stdout)?.[1] ?? 0);
   const reclaimable =
-    pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable");
+    pages("Pages free") +
+    pages("Pages inactive") +
+    pages("Pages speculative") +
+    pages("Pages purgeable");
   const bytes = reclaimable * pageSize;
   return Number.isFinite(bytes) && bytes > 0 ? bytes : null;
 };

@@ -1,42 +1,14 @@
-import { defineRule } from "@oxlint/plugins";
-
 import type { ESTree } from "@oxlint/plugins";
 
 import { lexicalTypeParameterNames } from "../shared/lexical-type-parameters.ts";
+import { parameterVisitors, referencedAliasName, type ParameterOwner } from "../shared/ast.ts";
 
-type FunctionWithReturnType =
-  | ESTree.ArrowFunctionExpression
-  | ESTree.Function
-  | ESTree.TSCallSignatureDeclaration
-  | ESTree.TSConstructSignatureDeclaration
-  | ESTree.TSConstructorType
-  | ESTree.TSFunctionType
-  | ESTree.TSMethodSignature;
+import { antiSlopRule } from "../shared/rule.ts";
 
-function referencedAliasName(type: ESTree.TSType): string | null {
-  if (type.type === "TSParenthesizedType") return referencedAliasName(type.typeAnnotation);
-  if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") return null;
-  return type.typeArguments === null ||
-    type.typeArguments === undefined ||
-    type.typeArguments.params.length === 0
-    ? type.typeName.name
-    : null;
-}
-
-/** Ban function contracts that return unknown instead of a parsed domain type. */
-export const noUnknownReturnsRule = defineRule({
-  meta: {
-    type: "problem",
-    docs: {
-      description:
-        "Disallow functions whose explicit return contract is unknown or Promise<unknown>.",
-    },
-    messages: {
-      unknownReturn:
-        "This function exposes `unknown` to its caller. Parse the value at its boundary and return a named domain type.",
-    },
-  },
-  createOnce(context) {
+export const noUnknownReturnsRule = antiSlopRule(
+  "unknownReturn",
+  "This function exposes `unknown` to its caller. Parse the value at its boundary and return a named domain type.",
+  (context) => {
     const aliases = new Map<string, ESTree.TSTypeAliasDeclaration>();
 
     const resolvesToUnknown = (
@@ -49,9 +21,7 @@ export const noUnknownReturnsRule = defineRule({
         return resolvesToUnknown(type.typeAnnotation, shadowedAliases, visited);
       }
       if (type.type === "TSUnionType") {
-        return type.types.some((member) =>
-          resolvesToUnknown(member, shadowedAliases, visited),
-        );
+        return type.types.some((member) => resolvesToUnknown(member, shadowedAliases, visited));
       }
       if (
         type.type === "TSTypeReference" &&
@@ -75,7 +45,7 @@ export const noUnknownReturnsRule = defineRule({
       return resolvesToUnknown(alias.typeAnnotation, shadowedAliases, nextVisited);
     };
 
-    const checkReturnType = (node: FunctionWithReturnType) => {
+    const checkReturnType = (node: ParameterOwner) => {
       const annotation = node.returnType;
       if (annotation === null || annotation === undefined) return;
       if (
@@ -100,16 +70,7 @@ export const noUnknownReturnsRule = defineRule({
           }
         }
       },
-      ArrowFunctionExpression: checkReturnType,
-      FunctionDeclaration: checkReturnType,
-      FunctionExpression: checkReturnType,
-      TSCallSignatureDeclaration: checkReturnType,
-      TSConstructSignatureDeclaration: checkReturnType,
-      TSConstructorType: checkReturnType,
-      TSDeclareFunction: checkReturnType,
-      TSEmptyBodyFunctionExpression: checkReturnType,
-      TSFunctionType: checkReturnType,
-      TSMethodSignature: checkReturnType,
+      ...parameterVisitors(checkReturnType),
     };
   },
-});
+);

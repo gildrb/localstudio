@@ -16,16 +16,8 @@ import { toEvent } from "./failures";
 import type { Launcher } from "./launchers/launcher";
 import type { InstanceStore, Reservation } from "./instances/store";
 
-/**
- * The only mutator in the compute layer. Everything it knows lives in the instance
- * records; there is no coordinator state to go stale, and cancellation is one flag per
- * name rather than an abort controller + an intent serial + a boolean racing each other.
- */
-
 const STOP_GRACE_MS = 20_000;
 
-/** Operators tune cold-start budgets per box (large MoE + AOT compile can exceed any
- *  default); the legacy env override keeps working. */
 const readyDeadlineOverrideMs = (): number | null => {
   const raw = process.env["LOCAL_STUDIO_READY_TIMEOUT_MS"];
   const parsed = raw ? Number(raw) : NaN;
@@ -48,9 +40,7 @@ export interface ComputeLaunchInput {
   readonly runtime: EngineRuntimeKind;
   readonly deviceCount: number;
   readonly devices?: readonly DeviceId[];
-  /** Serve on exactly this port (legacy inference_port); default = engine base scan. */
   readonly portOverride?: number;
-  /** Verbatim launch argv (recipe custom launch command); replaces the engine plan. */
   readonly commandOverride?: readonly string[];
   readonly modelPath: string;
   readonly servedModelName: string;
@@ -113,7 +103,6 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
       return response !== null && response.ok;
     });
 
-  /** Liveness first, then health, then the deadline. Never stored anywhere. */
   const stateOf = (record: InstanceRecord): Effect.Effect<InstanceState> =>
     Effect.gen(function* () {
       if (record.ref === null) return "reserving";

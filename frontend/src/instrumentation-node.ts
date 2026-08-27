@@ -1,6 +1,3 @@
-// Node-runtime half of instrumentation.ts. Lives in its own module (loaded
-// dynamically behind the NEXT_RUNTIME gate) so the edge-runtime compile of
-// instrumentation.ts never sees the `node:net` import.
 import { Effect } from "effect";
 
 export function register(): Promise<void> {

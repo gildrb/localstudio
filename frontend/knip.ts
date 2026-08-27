@@ -14,8 +14,9 @@ const config = {
     "desktop/interfaces.ts": ["types"],
   },
   ignoreDependencies: [
-    "tailwindcss",
+    "@stylexjs/babel-plugin",
     "postcss",
+    "tailwindcss",
     "@local-studio/agent-runtime",
     "react-dom",
     "concurrently",

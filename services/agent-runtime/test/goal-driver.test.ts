@@ -1,17 +1,23 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { cleanTemps, tempDir } from "./test-fixtures";
+import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { cleanTemps, isolatedDataDir } from "./test-fixtures";
 import { attachGoalDriver, markGoalTurnAborted } from "../src/goal-driver";
 import { readGoal, writeGoal } from "../src/goals-store";
 import type { LoggedPiEvent, PiAgentSession, PiAgentStatus } from "../src/pi-runtime-types";
 
 const id = "goal-driver-test-session";
 const original = process.env.LOCAL_STUDIO_DATA_DIR;
+const disposers = new Set<() => void>();
 beforeEach(() => {
-  process.env.LOCAL_STUDIO_DATA_DIR = tempDir("goal-driver-");
+  const directory = isolatedDataDir("goal-driver-");
+  process.env.LOCAL_STUDIO_DATA_DIR = directory;
+  jest.useFakeTimers();
 });
 afterEach(() => {
+  for (const dispose of disposers) dispose();
+  disposers.clear();
   if (original === undefined) delete process.env.LOCAL_STUDIO_DATA_DIR;
   else process.env.LOCAL_STUDIO_DATA_DIR = original;
+  jest.useRealTimers();
   cleanTemps();
 });
 
@@ -20,6 +26,7 @@ type Harness = {
   session: PiAgentSession;
   status: PiAgentStatus;
   emit: (event: GoalEvent) => void;
+  waitForIdle: () => Promise<void>;
   prompts: string[];
 };
 function harness(): Harness {
@@ -67,11 +74,13 @@ function harness(): Harness {
       return false;
     },
   };
-  attachGoalDriver(session);
+  const control = attachGoalDriver(session);
+  disposers.add(() => control.dispose());
   return {
     session,
     status,
     prompts,
+    waitForIdle: () => control.waitForIdle(),
     emit(event) {
       for (const listener of listeners) listener({ seq: ++seq, event, timestamp: "" });
     },
@@ -81,18 +90,6 @@ const says = (text: string) => ({
   type: "message",
   message: { role: "assistant", content: [{ type: "text", text }] },
 });
-async function flush(): Promise<void> {
-  let previous = JSON.stringify(await readGoal(id)),
-    stable = 0;
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    await Bun.sleep(5);
-    const current = JSON.stringify(await readGoal(id));
-    stable = current === previous ? stable + 1 : 0;
-    previous = current;
-    if (stable >= 3) return;
-  }
-}
 const goal = (patch: Parameters<typeof writeGoal>[1] = {}) =>
   writeGoal(id, {
     objective: "ship the release",
@@ -100,63 +97,64 @@ const goal = (patch: Parameters<typeof writeGoal>[1] = {}) =>
     resetProgress: true,
     ...patch,
   });
-async function turn(emit: Harness["emit"], text?: string): Promise<void> {
-  emit({ type: "agent_start" });
-  if (text) emit(says(text));
-  emit({ type: "agent_settled" });
-  await flush();
+async function turn(harness: Harness, text?: string): Promise<void> {
+  harness.emit({ type: "agent_start" });
+  if (text) harness.emit(says(text));
+  harness.emit({ type: "agent_settled" });
+  await harness.waitForIdle();
 }
 
 test("ordinary turns count and remain active", async () => {
-  const { emit } = harness();
+  const h = harness();
   await goal();
-  await turn(emit, "Rebuilt the bundle.");
+  await turn(h, "Rebuilt the bundle.");
   const result = await readGoal(id);
   expect(result?.status).toBe("active");
   expect(result?.turnsUsed).toBe(1);
 });
 
 test("this turn's completion sentinel settles the goal", async () => {
-  const { emit } = harness();
+  const h = harness();
   await goal();
-  await turn(emit, "All green.\nGOAL_COMPLETE");
+  await turn(h, "All green.\nGOAL_COMPLETE");
   expect((await readGoal(id))?.status).toBe("complete");
 });
 
 test("textless turns do not inherit old sentinels", async () => {
-  const { emit } = harness();
+  const h = harness();
   await goal();
-  await turn(emit, "All green.\nGOAL_COMPLETE");
+  await turn(h, "All green.\nGOAL_COMPLETE");
   await goal({ objective: "now do the next thing" });
-  emit({ type: "agent_start" });
-  emit({ type: "tool_execution_start" });
-  emit({ type: "agent_settled" });
-  await flush();
+  h.emit({ type: "agent_start" });
+  h.emit({ type: "tool_execution_start" });
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
   const result = await readGoal(id);
   expect(result?.status).toBe("active");
   expect(result?.turnsUsed).toBe(1);
 });
 
 test("spent turn budgets stop pursuit", async () => {
-  const { emit } = harness();
+  const h = harness();
   await goal({ turnBudget: 1 });
-  await turn(emit, "Working.");
+  await turn(h, "Working.");
   const result = await readGoal(id);
   expect(result?.status).toBe("budget_limited");
   expect(result?.turnsUsed).toBe(1);
 });
 
 test("pursuit time is banked per run", async () => {
-  const { emit } = harness();
+  const h = harness();
   await goal();
-  emit({ type: "agent_start" });
-  await flush();
+  h.emit({ type: "agent_start" });
+  await h.waitForIdle();
   expect((await readGoal(id))?.activeRunStartedAt).not.toBeNull();
-  emit({ type: "agent_settled" });
-  await flush();
+  jest.advanceTimersByTime(1_500);
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
   const result = await readGoal(id);
   expect(result?.activeRunStartedAt).toBeNull();
-  expect(result?.timeUsedSeconds).toBeGreaterThanOrEqual(0);
+  expect(result?.timeUsedSeconds).toBe(1.5);
 });
 
 test("Stop pauses without reprompting", async () => {
@@ -165,9 +163,10 @@ test("Stop pauses without reprompting", async () => {
   h.emit({ type: "agent_start" });
   markGoalTurnAborted(h.session);
   h.emit({ type: "agent_settled" });
-  await flush();
+  await h.waitForIdle();
   expect((await readGoal(id))?.status).toBe("paused");
-  await Bun.sleep(2200);
+  jest.advanceTimersByTime(2_000);
+  await h.waitForIdle();
   expect(h.prompts).toHaveLength(0);
 });
 
@@ -177,19 +176,20 @@ test("runtime errors pause pursuit", async () => {
   h.emit({ type: "agent_start" });
   h.status.lastError = "model unreachable";
   h.emit({ type: "agent_settled" });
-  await flush();
+  await h.waitForIdle();
   expect((await readGoal(id))?.status).toBe("paused");
 });
 
 test("tool-free continuations park the goal", async () => {
   const h = harness();
   await goal();
-  await turn(h.emit, "Working.");
-  await Bun.sleep(2200);
+  await turn(h, "Working.");
+  jest.advanceTimersByTime(2_000);
+  await h.waitForIdle();
   expect(h.prompts).toHaveLength(1);
   expect(h.prompts[0]).toContain("ship the release");
   h.emit(says("I think we are nearly there."));
   h.emit({ type: "agent_settled" });
-  await flush();
+  await h.waitForIdle();
   expect((await readGoal(id))?.status).toBe("paused");
 });

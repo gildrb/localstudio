@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Effect, Schema, Semaphore } from "effect";
 import { connectMcp, type McpConnection } from "./mcp-client";
-import { listConnectors, upsertConnectors } from "./connectors-service";
+import { listConnectors, upsertConnectors, writePrivateJson } from "./connectors-service";
 import { resolveDataDir } from "./data-dir";
 import { createGoogleRestConnection } from "./google-rest-adapter";
 import {
@@ -28,6 +28,8 @@ type Transport = GoogleWorkspaceTransport;
 type Identity = GoogleWorkspaceIdentity;
 type Dependencies = GoogleOAuthDependencies;
 
+const OptionalString = Schema.optional(Schema.String);
+
 const TransportSchema = Schema.Union([Schema.Literal("rest"), Schema.Literal("remote-mcp")]);
 
 const ConnectionSchema = Schema.Struct({
@@ -35,7 +37,7 @@ const ConnectionSchema = Schema.Struct({
   endpoint: Schema.String,
   transport: TransportSchema,
   connectedAt: Schema.String,
-  revision: Schema.optional(Schema.String),
+  revision: OptionalString,
 });
 
 const ConnectionsSchema = Schema.Struct({
@@ -74,19 +76,19 @@ const LegacyMetadataSchema = Schema.Struct({
 const StoredMetadataSchema = Schema.Union([MetadataSchema, LegacyMetadataSchema]);
 
 const AccountTokensSchema = Schema.Struct({
-  gmail: Schema.optional(Schema.String),
-  "google-calendar": Schema.optional(Schema.String),
+  gmail: OptionalString,
+  "google-calendar": OptionalString,
 });
 
 const SecretsSchema = Schema.Struct({
   version: Schema.Literal(2),
-  clientSecret: Schema.optional(Schema.String),
+  clientSecret: OptionalString,
   refreshTokens: Schema.Record(Schema.String, AccountTokensSchema),
   pendingRevocations: Schema.optional(Schema.Array(Schema.String)),
 });
 
 const LegacySecretsSchema = Schema.Struct({
-  clientSecret: Schema.optional(Schema.String),
+  clientSecret: OptionalString,
   refreshTokens: AccountTokensSchema,
   pendingRevocations: Schema.optional(Schema.Array(Schema.String)),
 });
@@ -107,8 +109,8 @@ const PendingSchema = Schema.Struct({
 const TokenResponseSchema = Schema.Struct({
   access_token: Schema.String,
   expires_in: Schema.optional(Schema.Number),
-  refresh_token: Schema.optional(Schema.String),
-  scope: Schema.optional(Schema.String),
+  refresh_token: OptionalString,
+  scope: OptionalString,
 });
 
 const UserInfoSchema = Schema.Struct({ email: Schema.String });
@@ -284,13 +286,8 @@ async function readMetadata(): Promise<Metadata | null> {
   }
 }
 
-async function writeMetadata(metadata: Metadata): Promise<void> {
-  const file = resolveGoogleAccountFilePath();
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(temporary, JSON.stringify(metadata, null, 2), { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, file);
-  await chmod(file, 0o600);
+function writeMetadata(metadata: Metadata): Promise<void> {
+  return writePrivateJson(resolveGoogleAccountFilePath(), metadata);
 }
 
 function metadataEffect(): Effect.Effect<Metadata | null, GoogleAccountError> {
@@ -445,7 +442,6 @@ export function saveGoogleClient(
           accounts: sameClient ? (current?.accounts ?? {}) : {},
         };
         if (!sameClient) {
-          invalidateGoogleWorkspaceAuthorizations();
           yield* Effect.forEach(GOOGLE_WORKSPACE_PLUGIN_IDS, (id) =>
             removeVaultValue(vault, pendingKey(id)),
           );
@@ -453,7 +449,6 @@ export function saveGoogleClient(
         yield* writeVaultJson(vault, secretsKey, secrets);
         yield* writeMetadataEffect(metadata);
         accessTokens.clear();
-        if (!sameClient) yield* disableGoogleWorkspaceConnectors();
         return accountView(metadata);
       }),
     ),
@@ -695,7 +690,7 @@ async function revokeGoogleGrant(token: string, dependencies: Dependencies): Pro
     signal: googleRequestSignal(dependencies),
   });
   if (response.ok) return;
-  const RevokeResponseSchema = Schema.Struct({ error: Schema.optional(Schema.String) });
+  const RevokeResponseSchema = Schema.Struct({ error: OptionalString });
   const body = Schema.decodeUnknownOption(RevokeResponseSchema)(
     await response.json().catch(() => null),
   );

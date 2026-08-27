@@ -53,6 +53,13 @@ const buildModelFilter = (knownModels?: ReadonlySet<string>): ModelFilter => {
   return { clause: ` AND model IN (${placeholders})`, params };
 };
 
+const groupedUsageColumns = `
+  COUNT(*) as requests,
+  SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
+  COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+  COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+  COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens`;
+
 export class InferenceRequestStore {
   private readonly db: Database;
   private readonly closeDatabase: () => Effect.Effect<void, RepositoryError>;
@@ -91,43 +98,41 @@ export class InferenceRequestStore {
     );
   }
 
-  private recordSync(record: InferenceRequestRecord): void {
-    const promptTokens = Math.max(0, Math.round(record.prompt_tokens));
-    const completionTokens = Math.max(0, Math.round(record.completion_tokens));
-    const reasoningTokens = Math.max(0, Math.round(record.reasoning_tokens ?? 0));
-    const cacheRead = Math.max(0, Math.round(record.cache_read_tokens ?? 0));
-    const cacheWrite = Math.max(0, Math.round(record.cache_write_tokens ?? 0));
-    const totalTokens = promptTokens + completionTokens;
+  public record(record: InferenceRequestRecord): Effect.Effect<void, RepositoryError> {
+    return repositoryEffect("inference-requests.record", () => {
+      const promptTokens = Math.max(0, Math.round(record.prompt_tokens));
+      const completionTokens = Math.max(0, Math.round(record.completion_tokens));
+      const reasoningTokens = Math.max(0, Math.round(record.reasoning_tokens ?? 0));
+      const cacheRead = Math.max(0, Math.round(record.cache_read_tokens ?? 0));
+      const cacheWrite = Math.max(0, Math.round(record.cache_write_tokens ?? 0));
+      const totalTokens = promptTokens + completionTokens;
 
-    this.db
-      .query(
-        `INSERT INTO inference_requests (
+      this.db
+        .query(
+          `INSERT INTO inference_requests (
            model, source, session_id, provider,
            prompt_tokens, completion_tokens, reasoning_tokens,
            cache_read_tokens, cache_write_tokens, total_tokens,
            ttft_ms, duration_ms, status, streamed
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.model,
-        record.source ?? null,
-        record.session_id ?? null,
-        record.provider ?? null,
-        promptTokens,
-        completionTokens,
-        reasoningTokens,
-        cacheRead,
-        cacheWrite,
-        totalTokens,
-        record.ttft_ms ?? null,
-        record.duration_ms ?? null,
-        record.status ?? 200,
-        record.streamed ? 1 : 0,
-      );
-  }
-
-  public record(record: InferenceRequestRecord): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("inference-requests.record", () => this.recordSync(record));
+        )
+        .run(
+          record.model,
+          record.source ?? null,
+          record.session_id ?? null,
+          record.provider ?? null,
+          promptTokens,
+          completionTokens,
+          reasoningTokens,
+          cacheRead,
+          cacheWrite,
+          totalTokens,
+          record.ttft_ms ?? null,
+          record.duration_ms ?? null,
+          record.status ?? 200,
+          record.streamed ? 1 : 0,
+        );
+    });
   }
 
   public aggregate(knownModels?: ReadonlySet<string>): UsageAggregate | null {
@@ -177,11 +182,7 @@ export class InferenceRequestStore {
       .query<UsageRow, string[]>(
         `SELECT
            model,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens,
+           ${groupedUsageColumns},
            AVG(duration_ms) as avg_latency_ms,
            AVG(ttft_ms) as avg_ttft_ms
          FROM inference_requests
@@ -196,11 +197,7 @@ export class InferenceRequestStore {
       .query<UsageRow, string[]>(
         `SELECT
            DATE(created_at) as date,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens,
+           ${groupedUsageColumns},
            AVG(duration_ms) as avg_latency_ms
          FROM inference_requests
          WHERE DATE(created_at) >= DATE('now', '-366 days')${filter.clause}
@@ -215,11 +212,7 @@ export class InferenceRequestStore {
         `SELECT
            DATE(created_at) as date,
            model,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens
+           ${groupedUsageColumns}
          FROM inference_requests
          WHERE DATE(created_at) >= DATE('now', '-366 days')${filter.clause}
          GROUP BY DATE(created_at), model

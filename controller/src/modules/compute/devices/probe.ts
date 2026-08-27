@@ -5,8 +5,6 @@ export type SnapshotFragment = Partial<Omit<DeviceSnapshot, "sampledAt" | "capab
 
 export interface ProbeResult {
   readonly fragment: SnapshotFragment;
-  /** Fields this probe can genuinely answer on this host. A field absent here renders as
-   *  "unsupported" rather than as a plausible zero. */
   readonly capabilities: readonly TelemetryField[];
 }
 
@@ -18,6 +16,5 @@ export interface DeviceProbe {
 
 export const emptyResult: ProbeResult = { fragment: {}, capabilities: [] };
 
-/** A probe must never fail the snapshot: a missing tool is data, not an error. */
 export const neverFails = (effect: Effect.Effect<ProbeResult>): Effect.Effect<ProbeResult> =>
   effect.pipe(Effect.catchCause(() => Effect.succeed(emptyResult)));

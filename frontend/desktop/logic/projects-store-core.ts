@@ -32,10 +32,8 @@ const decodeProjectsFile = Schema.decodeUnknownSync(Schema.fromJsonString(Projec
 const decodeProjectRecord = Schema.decodeUnknownOption(ProjectRecordSchema);
 
 export interface ProjectsStoreOptions {
-  /** Resolved on every operation so env/Electron path changes keep applying. */
   projectsFilePath: () => string;
   chatsProjectId: string;
-  /** Error message thrown when addProject receives a blank path. */
   emptyPathMessage: string;
 }
 
@@ -104,12 +102,6 @@ function withMeta(record: ProjectRecord): ProjectEntry {
   };
 }
 
-/**
- * Shared projects.json store used by both the web app (src/features/agent/
- * projects-store.ts) and the Electron main process (desktop/logic/
- * projects-store.ts). Hosted under desktop/ because the desktop build
- * (tsc rootDir = desktop/) cannot import from src/.
- */
 export function createProjectsStore(options: ProjectsStoreOptions): ProjectsStore {
   const { projectsFilePath, chatsProjectId, emptyPathMessage } = options;
 

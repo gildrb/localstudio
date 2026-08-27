@@ -3,17 +3,16 @@ import { Schema } from "effect";
 import { useState } from "react";
 import { useMountSubscription } from "@/hooks/use-mount-subscription";
 import { ErrorText, JsonView } from "./studio-ui";
-import { records, request, useJson, type Json, type RecordJson } from "./studio-api";
+import {
+  jsonText,
+  records,
+  requestRecord,
+  useJson,
+  type Json,
+  type RecordJson,
+} from "./studio-api";
 
-const MutationResponseSchema = Schema.Record(Schema.String, Schema.Unknown);
-const decodeMutationResponse = Schema.decodeUnknownSync(MutationResponseSchema, {
-  onExcessProperty: "preserve",
-});
-const isString = Schema.is(Schema.String);
 const isNumber = Schema.is(Schema.Number);
-function text(value: Json | undefined): string {
-  return isString(value) ? value : "";
-}
 function numberText(value: Json | undefined, fallback = ""): string {
   return isNumber(value) ? String(value) : fallback;
 }
@@ -21,14 +20,43 @@ function jsonBody(value: RecordJson, method = "POST"): RequestInit {
   return { method, headers: { "content-type": "application/json" }, body: JSON.stringify(value) };
 }
 
+function useFields<T extends Record<string, string>>(initial: T) {
+  const [fields, setFields] = useState(initial);
+  const input = (key: keyof T) => ({
+    value: fields[key],
+    onChange: (event: { target: { value: string } }) =>
+      setFields((current) => ({ ...current, [key]: event.target.value })),
+  });
+  return { fields, setFields, input };
+}
+function useMutationActions(success: string, reloads: Array<() => Promise<void>>) {
+  const [message, setMessage] = useState("");
+  const run = async (path: `/api/${string}`, init?: RequestInit) => {
+    try {
+      await requestRecord(path, init);
+      setMessage(success);
+      await Promise.all(reloads.map((reload) => reload()));
+    } catch (value) {
+      setMessage(value instanceof Error ? value.message : String(value));
+    }
+  };
+  return { message, setMessage, run };
+}
+
 export function RecipeManager() {
   const state = useJson("/api/proxy/recipes");
   const status = useJson("/api/proxy/status");
-  const [id, setId] = useState("");
-  const [name, setName] = useState("");
-  const [model, setModel] = useState("");
-  const [backend, setBackend] = useState("llamacpp");
-  const [message, setMessage] = useState("");
+  const { fields, setFields, input } = useFields({
+    id: "",
+    name: "",
+    model: "",
+    backend: "llamacpp",
+  });
+  const { id, name, model, backend } = fields;
+  const { message, setMessage, run } = useMutationActions(
+    "Recipe state reconciled with the controller",
+    [state.reload, status.reload],
+  );
   const [pinnedRecipes, setPinnedRecipes] = useState<Set<string>>(new Set());
   useMountSubscription(() => {
     const saved = localStorage.getItem("local-studio-pinned-recipes");
@@ -49,15 +77,6 @@ export function RecipeManager() {
       return next;
     });
   };
-  const run = async (path: `/api/${string}`, init?: RequestInit) => {
-    try {
-      decodeMutationResponse(await request(path, init));
-      setMessage("Recipe state reconciled with the controller");
-      await Promise.all([state.reload(), status.reload()]);
-    } catch (value) {
-      setMessage(value instanceof Error ? value.message : String(value));
-    }
-  };
   const draft: RecordJson = {
     id: id || name.toLowerCase().replaceAll(" ", "-"),
     name,
@@ -68,14 +87,10 @@ export function RecipeManager() {
     <article>
       <h2>Recipe editor</h2>
       <div className="row">
-        <input value={id} onChange={(event) => setId(event.target.value)} placeholder="Recipe id" />
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Name" />
-        <input
-          value={model}
-          onChange={(event) => setModel(event.target.value)}
-          placeholder="Local model path"
-        />
-        <select value={backend} onChange={(event) => setBackend(event.target.value)}>
+        <input {...input("id")} placeholder="Recipe id" />
+        <input {...input("name")} placeholder="Name" />
+        <input {...input("model")} placeholder="Local model path" />
+        <select {...input("backend")}>
           <option value="vllm">vLLM</option>
           <option value="sglang">SGLang</option>
           <option value="llamacpp">llama.cpp</option>
@@ -96,22 +111,25 @@ export function RecipeManager() {
       {records(state.data, "recipes")
         .sort(
           (left, right) =>
-            Number(pinnedRecipes.has(text(right.id))) - Number(pinnedRecipes.has(text(left.id))),
+            Number(pinnedRecipes.has(jsonText(right.id))) -
+            Number(pinnedRecipes.has(jsonText(left.id))),
         )
         .map((recipe) => {
-          const recipeId = text(recipe.id);
-          const label = text(recipe.name) || recipeId;
+          const recipeId = jsonText(recipe.id);
+          const label = jsonText(recipe.name) || recipeId;
           return (
             <div className="item" key={recipeId}>
               <span>
-                {label} · {text(recipe.status)}
+                {label} · {jsonText(recipe.status)}
               </span>
               <button
                 onClick={() => {
-                  setId(recipeId);
-                  setName(label);
-                  setModel(text(recipe.model_path));
-                  setBackend(text(recipe.backend) || "llamacpp");
+                  setFields({
+                    id: recipeId,
+                    name: label,
+                    model: jsonText(recipe.model_path),
+                    backend: jsonText(recipe.backend) || "llamacpp",
+                  });
                 }}
               >
                 Edit
@@ -146,57 +164,78 @@ export function MachineManager() {
   const rigs = useJson("/api/proxy/studio/rigs");
   const targets = useJson("/api/proxy/runtime/targets");
   const providers = useJson("/api/agent/providers");
-  const [rigId, setRigId] = useState("");
-  const [nodeId, setNodeId] = useState("");
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [hardwareType, setHardwareType] = useState("custom");
-  const [role, setRole] = useState("standalone");
-  const [hostname, setHostname] = useState("");
-  const [address, setAddress] = useState("");
-  const [osName, setOsName] = useState("");
-  const [cpuModel, setCpuModel] = useState("");
-  const [memoryGb, setMemoryGb] = useState("");
-  const [notes, setNotes] = useState("");
-  const [acceleratorName, setAcceleratorName] = useState("");
-  const [acceleratorCount, setAcceleratorCount] = useState("1");
-  const [acceleratorMemory, setAcceleratorMemory] = useState("");
-  const [acceleratorType, setAcceleratorType] = useState("");
-  const [acceleratorBandwidth, setAcceleratorBandwidth] = useState("");
+  const { fields, setFields, input } = useFields({
+    rigId: "",
+    nodeId: "",
+    name: "",
+    description: "",
+    hardwareType: "custom",
+    role: "standalone",
+    hostname: "",
+    address: "",
+    osName: "",
+    cpuModel: "",
+    memoryGb: "",
+    notes: "",
+    acceleratorName: "",
+    acceleratorCount: "1",
+    acceleratorMemory: "",
+    acceleratorType: "",
+    acceleratorBandwidth: "",
+  });
+  const {
+    rigId,
+    nodeId,
+    name,
+    description,
+    hardwareType,
+    role,
+    hostname,
+    address,
+    osName,
+    cpuModel,
+    memoryGb,
+    notes,
+    acceleratorName,
+    acceleratorCount,
+    acceleratorMemory,
+    acceleratorType,
+    acceleratorBandwidth,
+  } = fields;
   const [unifiedMemory, setUnifiedMemory] = useState(false);
-  const [message, setMessage] = useState("");
-  const run = async (path: `/api/${string}`, init?: RequestInit) => {
-    try {
-      decodeMutationResponse(await request(path, init));
-      setMessage("Machine configuration saved locally");
-      await Promise.all([rigs.reload(), targets.reload(), providers.reload()]);
-    } catch (value) {
-      setMessage(value instanceof Error ? value.message : String(value));
-    }
-  };
-  const editRig = (rig: RecordJson) => {
-    setRigId(text(rig.id));
-    setName(text(rig.name));
-    setDescription(text(rig.description));
-  };
+  const { message, run } = useMutationActions("Machine configuration saved locally", [
+    rigs.reload,
+    targets.reload,
+    providers.reload,
+  ]);
+  const editRig = (rig: RecordJson) =>
+    setFields((current) => ({
+      ...current,
+      rigId: jsonText(rig.id),
+      name: jsonText(rig.name),
+      description: jsonText(rig.description),
+    }));
   const editNode = (rig: RecordJson, node: RecordJson) => {
-    editRig(rig);
-    setNodeId(text(node.id));
-    setName(text(node.name));
-    setHardwareType(text(node.hardware_type) || "custom");
-    setRole(text(node.role) || "standalone");
-    setHostname(text(node.hostname));
-    setAddress(text(node.address));
-    setOsName(text(node.os));
-    setCpuModel(text(node.cpu_model));
-    setMemoryGb(numberText(node.memory_gb));
-    setNotes(text(node.notes));
     const accelerator = records({ items: node.accelerators ?? [] }, "items")[0];
-    setAcceleratorName(text(accelerator?.name));
-    setAcceleratorCount(numberText(accelerator?.count, "1"));
-    setAcceleratorMemory(numberText(accelerator?.memory_gb));
-    setAcceleratorType(text(accelerator?.memory_type));
-    setAcceleratorBandwidth(numberText(accelerator?.memory_bandwidth_gbs));
+    setFields({
+      rigId: jsonText(rig.id),
+      nodeId: jsonText(node.id),
+      name: jsonText(node.name),
+      description: jsonText(rig.description),
+      hardwareType: jsonText(node.hardware_type) || "custom",
+      role: jsonText(node.role) || "standalone",
+      hostname: jsonText(node.hostname),
+      address: jsonText(node.address),
+      osName: jsonText(node.os),
+      cpuModel: jsonText(node.cpu_model),
+      memoryGb: numberText(node.memory_gb),
+      notes: jsonText(node.notes),
+      acceleratorName: jsonText(accelerator?.name),
+      acceleratorCount: numberText(accelerator?.count, "1"),
+      acceleratorMemory: numberText(accelerator?.memory_gb),
+      acceleratorType: jsonText(accelerator?.memory_type),
+      acceleratorBandwidth: numberText(accelerator?.memory_bandwidth_gbs),
+    });
     setUnifiedMemory(accelerator?.unified_memory === true);
   };
   const nodeBody = (): RecordJson => ({
@@ -226,17 +265,9 @@ export function MachineManager() {
     <article>
       <h2>Rigs, nodes, runtimes & providers</h2>
       <div className="row">
-        <input
-          value={rigId}
-          onChange={(event) => setRigId(event.target.value)}
-          placeholder="Rig id"
-        />
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Name" />
-        <input
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          placeholder="Description"
-        />
+        <input {...input("rigId")} placeholder="Rig id" />
+        <input {...input("name")} placeholder="Name" />
+        <input {...input("description")} placeholder="Description" />
         <button
           onClick={() =>
             run(
@@ -259,12 +290,8 @@ export function MachineManager() {
         </button>
       </div>
       <div className="row">
-        <input
-          value={nodeId}
-          onChange={(event) => setNodeId(event.target.value)}
-          placeholder="Node id"
-        />
-        <select value={hardwareType} onChange={(event) => setHardwareType(event.target.value)}>
+        <input {...input("nodeId")} placeholder="Node id" />
+        <select {...input("hardwareType")}>
           {(
             [
               "dgx-spark",
@@ -279,30 +306,27 @@ export function MachineManager() {
             <option key={value}>{value}</option>
           ))}
         </select>
-        <select value={role} onChange={(event) => setRole(event.target.value)}>
+        <select {...input("role")}>
           {(["head", "worker", "standalone"] as const).map((value) => (
             <option key={value}>{value}</option>
           ))}
         </select>
-        {[
-          { value: hostname, set: setHostname, label: "Hostname" },
-          { value: address, set: setAddress, label: "Address" },
-          { value: osName, set: setOsName, label: "OS" },
-          { value: cpuModel, set: setCpuModel, label: "CPU model" },
-          { value: memoryGb, set: setMemoryGb, label: "Memory GB" },
-          { value: notes, set: setNotes, label: "Notes" },
-          { value: acceleratorName, set: setAcceleratorName, label: "Accelerator" },
-          { value: acceleratorCount, set: setAcceleratorCount, label: "Accelerator count" },
-          { value: acceleratorMemory, set: setAcceleratorMemory, label: "Accelerator memory GB" },
-          { value: acceleratorType, set: setAcceleratorType, label: "Memory type" },
-          { value: acceleratorBandwidth, set: setAcceleratorBandwidth, label: "Bandwidth GB/s" },
-        ].map((field) => (
-          <input
-            key={field.label}
-            value={field.value}
-            onChange={(event) => field.set(event.target.value)}
-            placeholder={field.label}
-          />
+        {(
+          [
+            ["hostname", "Hostname"],
+            ["address", "Address"],
+            ["osName", "OS"],
+            ["cpuModel", "CPU model"],
+            ["memoryGb", "Memory GB"],
+            ["notes", "Notes"],
+            ["acceleratorName", "Accelerator"],
+            ["acceleratorCount", "Accelerator count"],
+            ["acceleratorMemory", "Accelerator memory GB"],
+            ["acceleratorType", "Memory type"],
+            ["acceleratorBandwidth", "Bandwidth GB/s"],
+          ] as const
+        ).map(([key, label]) => (
+          <input key={key} {...input(key)} placeholder={label} />
         ))}
         <label>
           <input
@@ -338,20 +362,20 @@ export function MachineManager() {
         </button>
       </div>
       {records(rigs.data, "rigs").map((rig) => (
-        <div className="item" key={text(rig.id)}>
-          <button onClick={() => editRig(rig)}>Edit {text(rig.name)}</button>
+        <div className="item" key={jsonText(rig.id)}>
+          <button onClick={() => editRig(rig)}>Edit {jsonText(rig.name)}</button>
           {records({ items: rig.nodes ?? [] }, "items").map((node) => (
-            <button key={text(node.id)} onClick={() => editNode(rig, node)}>
-              Edit {text(node.name)}
+            <button key={jsonText(node.id)} onClick={() => editNode(rig, node)}>
+              Edit {jsonText(node.name)}
             </button>
           ))}
         </div>
       ))}
       {records(targets.data, "targets").map((target) => {
-        const targetId = text(target.id);
+        const targetId = jsonText(target.id);
         return (
           <div className="item" key={targetId}>
-            <span>{text(target.name) || targetId}</span>
+            <span>{jsonText(target.name) || targetId}</span>
             <button
               onClick={() =>
                 run(`/api/proxy/runtime/targets/${encodeURIComponent(targetId)}/select`, {
@@ -384,11 +408,9 @@ function redactDeployLine(line: string): string {
 
 export function DesktopManager() {
   const bridge = globalThis.window?.localStudioDesktop;
-  const [path, setPath] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const { fields, input } = useFields({ path: "", projectId: "", deployHost: "", hotkey: "" });
+  const { path, projectId, deployHost, hotkey } = fields;
   const [deployMode, setDeployMode] = useState<"ssh" | "local">("ssh");
-  const [deployHost, setDeployHost] = useState("");
-  const [hotkey, setHotkey] = useState("");
   const [output, setOutput] = useState<Json | null>(null);
   const [deployLog, setDeployLog] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -425,7 +447,10 @@ export function DesktopManager() {
       if (!result.ok) return { ok: false, error: result.error ?? "Deployment failed" };
       if (!result.url || !result.apiKey)
         return { ok: false, error: "Deployment omitted credentials" };
-      await request("/api/settings", jsonBody({ backendUrl: result.url, apiKey: result.apiKey }));
+      await requestRecord(
+        "/api/settings",
+        jsonBody({ backendUrl: result.url, apiKey: result.apiKey }),
+      );
       return { ok: true, url: result.url, credentialStored: true };
     });
   };
@@ -445,17 +470,9 @@ export function DesktopManager() {
       <div className="row">
         <button onClick={() => call(() => bridge.openDirectory())}>Add project folder</button>
         <button onClick={() => call(() => bridge.listProjects())}>List projects</button>
-        <input
-          value={projectId}
-          onChange={(event) => setProjectId(event.target.value)}
-          placeholder="Project id"
-        />
+        <input {...input("projectId")} placeholder="Project id" />
         <button onClick={() => call(() => bridge.removeProject(projectId))}>Remove project</button>
-        <input
-          value={path}
-          onChange={(event) => setPath(event.target.value)}
-          placeholder="Local path"
-        />
+        <input {...input("path")} placeholder="Local path" />
         <button onClick={() => call(() => bridge.openPath(path))}>Open</button>
         <button onClick={() => call(() => bridge.revealPath(path))}>Reveal</button>
       </div>
@@ -477,11 +494,7 @@ export function DesktopManager() {
         <button onClick={() => call(() => bridge.startUpdate())}>Install update</button>
       </div>
       <div className="row">
-        <input
-          value={hotkey}
-          onChange={(event) => setHotkey(event.target.value)}
-          placeholder="Quick panel hotkey"
-        />
+        <input {...input("hotkey")} placeholder="Quick panel hotkey" />
         <button onClick={() => call(() => bridge.quickPanel.getHotkey())}>Get hotkey</button>
         <button onClick={() => call(() => bridge.quickPanel.setHotkey(hotkey))}>Set hotkey</button>
         <button onClick={() => call(() => bridge.quickPanel.expand().then(() => true))}>
@@ -509,11 +522,7 @@ export function DesktopManager() {
           <option value="local">This machine</option>
         </select>
         {deployMode === "ssh" ? (
-          <input
-            value={deployHost}
-            onChange={(event) => setDeployHost(event.target.value)}
-            placeholder="SSH host for controller"
-          />
+          <input {...input("deployHost")} placeholder="SSH host for controller" />
         ) : null}
         <button onClick={deploy}>Deploy controller and store credential</button>
       </div>

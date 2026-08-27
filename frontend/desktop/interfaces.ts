@@ -44,10 +44,6 @@ export interface ControllerDeployResultPayload {
 }
 
 export interface ControllerDeployBridge {
-  /**
-   * Deploy a controller — onto this machine (`mode: "local"`, loopback bind)
-   * or to an ssh host; resolves with url + api key.
-   */
   start(options: {
     mode?: "ssh" | "local";
     host?: string;
@@ -77,22 +73,16 @@ export interface DesktopBridge {
     chromeVersion: string;
     electronVersion: string;
   }>;
-  openExternal(url: string): Promise<boolean>;
-  /** Reveal a file in Finder/Explorer. Returns false when outside the home tree. */
   revealPath(target: string): Promise<boolean>;
-  /** Open a file with its default application. False when outside the home tree. */
   openPath(target: string): Promise<boolean>;
   getUpdateStatus(): Promise<DesktopUpdateSnapshot>;
   startUpdate(): Promise<DesktopUpdateSnapshot>;
   openDirectory(): Promise<ProjectEntry | null>;
-  getPathForFile(file: File): string;
   listProjects(): Promise<ProjectEntry[]>;
   addProject(directoryPath: string): Promise<ProjectEntry>;
   removeProject(id: string): Promise<{ ok: true }>;
-  /** Durable file-backed session prefs that survive process kill. */
   loadSessionPrefs(): Promise<SessionPrefsPayload>;
   saveSessionPrefs(prefs: SessionPrefsPayload): Promise<void>;
-  /** Durable backup for renderer localStorage UI prefs (theme, font, layout). */
   loadUiPreferences(): Promise<UiPreferencesPayload>;
   saveUiPreferences(prefs: UiPreferencesPayload): Promise<void>;
   getKittylitterPairingJson(): Promise<KittylitterPairingResult>;

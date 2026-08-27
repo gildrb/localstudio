@@ -15,7 +15,9 @@
     "madge",
     "@oxlint/plugins",
     "oxlint",
-    "oxlint-tsgolint"
+    "oxlint-tsgolint",
+    "@stylexjs/postcss-plugin",
+    "autoprefixer"
   ],
   "ignore-patterns": ["*.d.ts", ".next/**", "dist-desktop/**", "desktop/dist/**"],
   "specials": ["next", "webpack", "babel"],

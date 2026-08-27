@@ -42,13 +42,13 @@ function runView(run: SubagentRun) {
   return { ...runSummary(run), error: run.error ?? report.error, report: report.text };
 }
 
-export async function handleSubagentsList(request: Request): Promise<Response> {
+export async function list(request: Request): Promise<Response> {
   const parent = parentFromQuery(request);
   if (!parent) return jsonError("piSessionId is required.");
   return Response.json({ subagents: listSubagents(parent).map(runSummary) });
 }
 
-export async function handleSubagentGet(request: Request, runId: string): Promise<Response> {
+export async function get(request: Request, runId: string): Promise<Response> {
   const parent = parentFromQuery(request);
   if (!parent) return jsonError("piSessionId is required.");
   const run = findSubagent(parent, runId);
@@ -56,7 +56,7 @@ export async function handleSubagentGet(request: Request, runId: string): Promis
   return Response.json({ ok: true, subagent: runView(run) });
 }
 
-export async function handleSubagentStop(request: Request, runId: string): Promise<Response> {
+export async function stop(request: Request, runId: string): Promise<Response> {
   const rawBody = await readJsonBody(request);
   const body = Option.getOrNull(Schema.decodeUnknownOption(SubagentStopBodySchema)(rawBody));
   const parent = body?.piSessionId.trim() ?? "";
@@ -68,7 +68,7 @@ export async function handleSubagentStop(request: Request, runId: string): Promi
   }
 }
 
-export async function handleSubagentRun(request: Request): Promise<Response> {
+export async function run(request: Request): Promise<Response> {
   const rawBody = await readJsonBody(request);
   const body = Option.getOrNull(Schema.decodeUnknownOption(SubagentRunBodySchema)(rawBody));
   if (!body?.parentPiSessionId.trim() || !body.task.trim()) {

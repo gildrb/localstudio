@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -7,6 +7,12 @@ const roots: string[] = [];
 export function tempDir(prefix: string): string {
   const root = mkdtempSync(path.join(tmpdir(), prefix));
   roots.push(root);
+  return root;
+}
+
+export function isolatedDataDir(prefix: string): string {
+  const root = tempDir(prefix);
+  writeFileSync(path.join(root, "api-settings.json"), "{}", { mode: 0o600 });
   return root;
 }
 

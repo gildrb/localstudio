@@ -1,28 +1,31 @@
 import { defineRule } from "@oxlint/plugins";
-
 import { isGlobalReflectMethodCall } from "../shared/reflect-method.ts";
 
-/** Ban Reflect.apply, which bypasses ordinary typed function calls. */
-export const noReflectApplyRule = defineRule({
-  meta: {
-    type: "problem",
-    docs: {
-      description:
-        "Disallow Reflect.apply; call typed functions directly or model dynamic dispatch behind an interface.",
+function reflectRule(method: "apply" | "get", messageId: string, message: string) {
+  return defineRule({
+    meta: { type: "problem", messages: { [messageId]: message } },
+    createOnce(context) {
+      return {
+        CallExpression(node) {
+          if (
+            node.callee.type !== "Super" &&
+            node.callee.type !== "V8IntrinsicExpression" &&
+            isGlobalReflectMethodCall(context.sourceCode, node.callee, method)
+          )
+            context.report({ node, messageId });
+        },
+      };
     },
-    messages: {
-      reflectApply:
-        "Replace `Reflect.apply` with a typed function call. Model dynamic dispatch behind a named interface.",
-    },
-  },
-  createOnce(context) {
-    return {
-      CallExpression(node) {
-        if (node.callee.type === "Super" || node.callee.type === "V8IntrinsicExpression") return;
-        if (isGlobalReflectMethodCall(context.sourceCode, node.callee, "apply")) {
-          context.report({ node, messageId: "reflectApply" });
-        }
-      },
-    };
-  },
-});
+  });
+}
+
+export const noReflectApplyRule = reflectRule(
+  "apply",
+  "reflectApply",
+  "Replace `Reflect.apply` with a typed function call. Model dynamic dispatch behind a named interface.",
+);
+export const noReflectGetRule = reflectRule(
+  "get",
+  "reflectGet",
+  "Replace `Reflect.get` with typed property access. Parse dynamic input into a named domain type before reading it.",
+);

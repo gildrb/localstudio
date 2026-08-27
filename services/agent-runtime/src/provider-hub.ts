@@ -90,7 +90,7 @@ function serializeAuthEvent(event: AuthEvent): ProviderLoginEventPayload {
 }
 
 function isInternalProviderId(id: string): boolean {
-  return INTERNAL_PROVIDER_PREFIXES.some((prefix) => id === prefix || id.startsWith(prefix));
+  return INTERNAL_PROVIDER_PREFIXES.some((prefix) => id.startsWith(prefix));
 }
 
 function agentDirPath(): string {
@@ -101,17 +101,17 @@ async function createHubRuntime(): Promise<ModelRuntime> {
   const modelsDir = agentDirPath();
   const nativeAgentDir =
     process.env.PI_CODING_AGENT_DIR?.trim() || path.join(homedir(), ".pi", "agent");
-  await mkdir(modelsDir, { recursive: true });
-  await mkdir(nativeAgentDir, { recursive: true });
-  await chmod(modelsDir, 0o700).catch(() => undefined);
-  await chmod(nativeAgentDir, 0o700).catch(() => undefined);
+  await mkdir(modelsDir, { recursive: true, mode: 0o700 });
+  await mkdir(nativeAgentDir, { recursive: true, mode: 0o700 });
+  await chmod(modelsDir, 0o700);
+  await chmod(nativeAgentDir, 0o700);
   return ModelRuntime.create({
     authPath: path.join(nativeAgentDir, "auth.json"),
     modelsPath: path.join(modelsDir, "models.json"),
   });
 }
 
-function hubPromise(): Promise<ModelRuntime> {
+export function getProviderHub(): Promise<ModelRuntime> {
   return getGlobalSingleton("providerHubRuntime", createHubRuntime);
 }
 
@@ -119,17 +119,13 @@ function jobsMap(): Map<string, LoginJob> {
   return getGlobalSingleton("providerHubLoginJobs", () => new Map<string, LoginJob>());
 }
 
-export function getProviderHub(): Promise<ModelRuntime> {
-  return hubPromise();
-}
-
 export async function refreshProviderHub(): Promise<void> {
-  const runtime = await hubPromise();
+  const runtime = await getProviderHub();
   await runtime.refresh({ allowNetwork: false });
 }
 
 export async function listProviders(): Promise<ProviderView[]> {
-  const runtime = await hubPromise();
+  const runtime = await getProviderHub();
   const credentials = new Map(
     (await runtime.listCredentials()).map((info) => [info.providerId, info.type]),
   );
@@ -222,7 +218,7 @@ export async function startProviderLogin(
   providerId: string,
   authType: AuthType,
 ): Promise<{ jobId: string } | { error: string; status: number }> {
-  const runtime = await hubPromise();
+  const runtime = await getProviderHub();
   const provider = runtime.getProvider(providerId);
   if (!provider || isInternalProviderId(providerId)) {
     return { error: `Unknown provider '${providerId}'.`, status: 404 };
@@ -311,7 +307,7 @@ export function cancelProviderLogin(jobId: string): boolean {
 export async function logoutProvider(
   providerId: string,
 ): Promise<{ ok: true } | { error: string; status: number }> {
-  const runtime = await hubPromise();
+  const runtime = await getProviderHub();
   if (!runtime.getProvider(providerId) || isInternalProviderId(providerId)) {
     return { error: `Unknown provider '${providerId}'.`, status: 404 };
   }
@@ -350,7 +346,7 @@ function providerModelToAgentModel(
 
 export async function listProviderAgentModels(): Promise<AgentModel[]> {
   try {
-    const runtime = await hubPromise();
+    const runtime = await getProviderHub();
     const available = await runtime.getAvailable();
     const models: AgentModel[] = [];
     for (const model of available) {

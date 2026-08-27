@@ -7,13 +7,19 @@ import type { AppContext } from "../../app-context";
 import { getGpuInfo } from "./platform/gpu";
 import { fetchInference } from "../../http/local-fetch";
 import type { UsageAggregate } from "../../stores/inference-request-store";
-import type { PeakMetric, PeakMetricWithBestSession } from "./metrics-store";
+import type { PeakMetric } from "./metrics-store";
 import {
   SGLANG_METRIC_NAMES,
   VLLM_METRIC_NAMES,
   scrapeEngineMetrics,
 } from "./engine-metrics-scrape";
-import { firstMetric, positiveOrUndefined } from "./metrics-peaks";
+import {
+  firstMetric,
+  lifetimeMetrics,
+  positiveOrUndefined,
+  roundTenth,
+  summarizeGpus,
+} from "./metrics-peaks";
 import type { EventData } from "./event-manager";
 
 const throughputSamples = new Map<
@@ -50,19 +56,11 @@ const buildBaseMetrics = (
   lifetimeData: Record<string, number>,
   gpus: Effect.Success<ReturnType<typeof getGpuInfo>>,
 ): EventData => {
-  const currentPowerWatts = gpus.reduce((sum, gpu) => sum + gpu.power_draw, 0);
-  const vramUsedGb = gpus.reduce((sum, gpu) => sum + gpu.memory_used_mb / 1024, 0);
-  const vramCapacityGb = gpus.reduce((sum, gpu) => sum + gpu.memory_total_mb / 1024, 0);
-  const powerLimitWatts = gpus.reduce((sum, gpu) => sum + gpu.power_limit, 0);
+  const { powerWatts, powerLimitWatts, vramUsedGb, vramCapacityGb } = summarizeGpus(gpus);
   return {
-    lifetime_prompt_tokens: lifetimeData["prompt_tokens_total"] ?? 0,
-    lifetime_completion_tokens: lifetimeData["completion_tokens_total"] ?? 0,
-    lifetime_requests: lifetimeData["requests_total"] ?? 0,
-    lifetime_energy_kwh: (lifetimeData["energy_wh"] ?? 0) / 1000,
-    lifetime_uptime_hours: (lifetimeData["uptime_seconds"] ?? 0) / 3600,
-    current_power_watts: currentPowerWatts,
-    vram_used_gb: Math.round(vramUsedGb * 10) / 10,
-    vram_capacity_gb: Math.round(vramCapacityGb * 10) / 10,
+    ...lifetimeMetrics(lifetimeData, powerWatts),
+    vram_used_gb: roundTenth(vramUsedGb),
+    vram_capacity_gb: roundTenth(vramCapacityGb),
     power_limit_watts: Math.round(powerLimitWatts),
   };
 };
@@ -199,17 +197,12 @@ const buildCurrentMetrics = (
       ...buildUsageMetrics(usage, promptTokens, generationTokens),
       prompt_throughput: throughput.prompt,
       generation_throughput: throughput.generation,
-      avg_ttft_ms: avgTtftMs > 0 ? Math.round(avgTtftMs * 10) / 10 : usage?.ttft.avg_ms,
+      avg_ttft_ms: avgTtftMs > 0 ? roundTenth(avgTtftMs) : usage?.ttft.avg_ms,
       ...buildPeakMetrics(peak, best),
     };
   });
 
-const PEAK_METRICS_CACHE_TTL_MS = 15_000;
-
 export const registerMonitoringRoutes = defineRoutes((app, context) => {
-  type PeakMetricsBody = PeakMetric | { error: string } | { metrics: PeakMetricWithBestSession[] };
-  const peakMetricsCache = new Map<string, { at: number; body: PeakMetricsBody }>();
-
   return mergeRoutes(
     effectRoute(app.get, "/v1/metrics/vllm", (ctx) =>
       Effect.gen(function* () {
@@ -228,11 +221,6 @@ export const registerMonitoringRoutes = defineRoutes((app, context) => {
     effectRoute(app.get, "/peak-metrics", (ctx) =>
       Effect.gen(function* () {
         const modelId = ctx.req.query("model_id");
-        const cacheKey = modelId ?? "\u0000all";
-        const cached = peakMetricsCache.get(cacheKey);
-        if (cached && Date.now() - cached.at < PEAK_METRICS_CACHE_TTL_MS) {
-          return ctx.json(cached.body);
-        }
         const body = yield* modelId
           ? context.stores.peakMetricsStore
               .getEffect(modelId)
@@ -240,7 +228,6 @@ export const registerMonitoringRoutes = defineRoutes((app, context) => {
           : context.stores.peakMetricsStore
               .getAllEffect()
               .pipe(Effect.map((metrics) => ({ metrics })));
-        peakMetricsCache.set(cacheKey, { at: Date.now(), body });
         return ctx.json(body);
       }),
     ),
@@ -305,7 +292,7 @@ export const registerMonitoringRoutes = defineRoutes((app, context) => {
               prompt_tokens: promptTokensActual,
               completion_tokens: completionTokens,
               total_time_s: Math.round(totalTime * 100) / 100,
-              generation_tps: Math.round(generationTps * 10) / 10,
+              generation_tps: roundTenth(generationTps),
             },
             peak_metrics: result,
           });

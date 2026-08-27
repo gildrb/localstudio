@@ -1,10 +1,9 @@
 import { Schema } from "effect";
-import { records, type Json, type RecordJson } from "./studio-api";
+import { JsonRecordSchema, isRecordJson, type Json, type RecordJson } from "./studio-api";
 
 const isString = Schema.is(Schema.String);
 const isNumber = Schema.is(Schema.Number);
 
-const JsonRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
 const CanonicalMetaSchema = Schema.Struct({
   title: Schema.optional(Schema.NullOr(Schema.String)),
   modelId: Schema.optional(Schema.NullOr(Schema.String)),
@@ -45,15 +44,6 @@ const RuntimeSnapshotSchema = Schema.Struct({
     ),
   ),
 });
-const decodeRuntimeSnapshotOption = Schema.decodeUnknownOption(RuntimeSnapshotSchema, {
-  onExcessProperty: "preserve",
-});
-const decodeCanonicalSessionOption = Schema.decodeUnknownOption(CanonicalSessionSchema, {
-  onExcessProperty: "preserve",
-});
-const decodeRuntimePayloadOption = Schema.decodeUnknownOption(RuntimePayloadSchema, {
-  onExcessProperty: "preserve",
-});
 
 export type CanonicalSession = {
   events: RecordJson[];
@@ -70,14 +60,11 @@ export type RuntimeSnapshot = {
   events: Array<{ seq: number; event: RecordJson }>;
 };
 export function decodeRuntimeSnapshot(value: Json): RuntimeSnapshot {
-  const decoded = decodeRuntimeSnapshotOption(value);
+  const decoded = Schema.decodeUnknownOption(RuntimeSnapshotSchema)(value);
   if (decoded._tag === "None") throw new Error("Invalid runtime status response");
   return {
     cursor: decoded.value.status?.eventSeq ?? 0,
-    events: records(value, "events").flatMap((entry) => {
-      const event = nestedRecord(entry.event);
-      return event && isNumber(entry.seq) ? [{ seq: entry.seq, event }] : [];
-    }),
+    events: [...(decoded.value.events ?? [])],
   };
 }
 
@@ -93,11 +80,11 @@ export type RuntimePayload =
   | { type: "status"; phase: string; session?: RecordJson };
 
 export function decodeCanonicalSession(value: Json): CanonicalSession {
-  const decoded = decodeCanonicalSessionOption(value);
+  const decoded = Schema.decodeUnknownOption(CanonicalSessionSchema)(value);
   if (decoded._tag === "None") throw new Error("Invalid canonical session response");
   const meta = decoded.value.meta;
   return {
-    events: records(value, "events"),
+    events: [...(decoded.value.events ?? [])],
     cursor: decoded.value.cursor ?? null,
     meta: meta
       ? {
@@ -110,26 +97,13 @@ export function decodeCanonicalSession(value: Json): CanonicalSession {
   };
 }
 export function decodeRuntimePayload(value: Json): RuntimePayload | null {
-  const decoded = decodeRuntimePayloadOption(value);
+  const decoded = Schema.decodeUnknownOption(RuntimePayloadSchema)(value);
   if (decoded._tag === "None") return null;
-  const source = records([value], "value")[0];
-  if (!source) return null;
-  if (decoded.value.type === "status") {
-    const session = nestedRecord(source.session);
-    const payload: RuntimePayload = { type: "status", phase: decoded.value.phase };
-    if (session) payload.session = session;
-    return payload;
-  }
-  const event = nestedRecord(source.event);
-  if (!event) return null;
-  const payload: RuntimePayload = { type: "pi", event };
-  if (decoded.value.seq !== undefined) payload.seq = decoded.value.seq;
-  return payload;
+  return decoded.value;
 }
 
 function nestedRecord(value: Json | undefined): RecordJson | null {
-  if (value === undefined) return null;
-  return records({ value }, "value")[0] ?? null;
+  return isRecordJson(value) ? value : null;
 }
 function blockText(value: Json): string {
   if (isString(value)) return value;
@@ -157,16 +131,14 @@ function snapshotBlocks(event: RecordJson, message: RecordJson | null): Transcri
   const update = nestedRecord(event.assistantMessageEvent);
   const partial = nestedRecord(update?.partial);
   const candidate = contentBlocks(partial?.content);
-  const payloadSize = (blocks: TranscriptBlock[]) =>
+  const size = (blocks: TranscriptBlock[]) =>
     blocks.reduce((total, block) => total + JSON.stringify(block.value).length, 0);
-  return payloadSize(candidate) > payloadSize(direct) ? candidate : direct;
+  return size(candidate) > size(direct) ? candidate : direct;
 }
 const MESSAGE_EVENT_TYPES: Json[] = ["message", "message_start", "message_update", "message_end"];
 
 function messageRole(value: Json | undefined): FoldedMessage["role"] {
-  if (value === "user") return "user";
-  if (value === "assistant") return "assistant";
-  return "event";
+  return value === "user" || value === "assistant" ? value : "event";
 }
 
 function eventMessage(event: RecordJson): Omit<FoldedMessage, "id"> | null {
@@ -243,13 +215,15 @@ export function mergeCanonicalRuntimeEvents(
 }
 
 export function foldSessionEvents(events: RecordJson[]): FoldedMessage[] {
-  let folded: FoldedMessage[] = [];
-  for (const [index, wrapper] of events.entries()) {
+  const initial: FoldedMessage[] = [];
+  return events.reduce((folded, wrapper, index) => {
     const event = nestedRecord(wrapper.event) ?? wrapper;
-    const seq = isNumber(wrapper.seq) ? wrapper.seq : index;
-    folded = foldSessionEvent(folded, event, `canonical-${seq}`);
-  }
-  return folded;
+    return foldSessionEvent(
+      folded,
+      event,
+      `canonical-${isNumber(wrapper.seq) ? wrapper.seq : index}`,
+    );
+  }, initial);
 }
 
 export type RuntimeCursor = { received: number; committed: number; unsequenced: number };

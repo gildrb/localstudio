@@ -401,7 +401,39 @@ const BLOCKED_COMMANDS = new Set([
   "ssh-key",
 ]);
 
-function blockedReason(args: string[]): string | null {
+const API_VALUE_FLAGS = new Set([
+  "--cache",
+  "--field",
+  "-F",
+  "--header",
+  "-H",
+  "--hostname",
+  "--input",
+  "--raw-field",
+  "-f",
+]);
+
+function apiMethod(args: string[]): string | undefined {
+  if (args[0]?.toLowerCase() !== "api") return undefined;
+  let method = "GET";
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") break;
+    if (arg === "--method" || arg === "-X") {
+      method = args[index + 1]?.replace(/^=/, "") ?? method;
+      index += 1;
+    } else if (arg.startsWith("--method=")) {
+      method = arg.slice("--method=".length);
+    } else if (arg.startsWith("-X") && arg.length > 2) {
+      method = arg.slice(2).replace(/^=/, "");
+    } else if (API_VALUE_FLAGS.has(arg)) {
+      index += 1;
+    }
+  }
+  return method;
+}
+
+export function blockedReason(args: string[]): string | null {
   const command = args[0] ?? "";
   if (!command) return 'github_cli needs at least one argument, e.g. ["pr", "create", "--fill"].';
   if (command.startsWith("-")) {
@@ -410,7 +442,10 @@ function blockedReason(args: string[]): string | null {
   if (BLOCKED_COMMANDS.has(command)) {
     return `github_cli refuses \`gh ${command}\`: it reads or replaces credentials, or installs code. Use github_status to check the signed-in account; run anything else in this family yourself.`;
   }
-  if (args.includes("delete")) {
+  if (
+    args.some((arg) => arg.toLowerCase() === "delete") ||
+    apiMethod(args)?.toUpperCase() === "DELETE"
+  ) {
     return "github_cli refuses `delete` subcommands — they are irreversible. Ask the user to run it themselves if that is really what they want.";
   }
   return null;

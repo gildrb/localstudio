@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { DESKTOP_CONFIG, resolveStandaloneBaseDir, resolveStaticAssetsSource } from "../configs";
 import type { DesktopServerRuntime } from "../types";
 import { log } from "../helpers/logger";
@@ -13,10 +13,6 @@ import {
   stopAgentRuntime,
   type AgentRuntimeHandle,
 } from "./agent-runtime-server";
-
-// The most recently forked embedded server. A single process-exit hook kills
-// whichever child is current — registering a fresh once("exit") per (re)start
-// leaked listeners on every frontend restart.
 let currentEmbeddedServer: ChildProcess | null = null;
 process.once("exit", () => {
   if (currentEmbeddedServer && !currentEmbeddedServer.killed) {
@@ -55,11 +51,6 @@ function embeddedServerPortPath(): string {
   return path.join(DESKTOP_CONFIG.userDataDir, "embedded-frontend.port");
 }
 
-/**
- * The embedded server's origin (http://127.0.0.1:<port>) is the storage key for
- * all renderer state (selected controller, API key, sessions). Persisting the
- * port keeps that origin stable across launches and restarts so state survives.
- */
 function readPersistedPort(): number | undefined {
   try {
     const raw = readFileSync(embeddedServerPortPath(), "utf8").trim();
@@ -74,19 +65,29 @@ function persistPort(port: number): void {
   try {
     mkdirSync(DESKTOP_CONFIG.userDataDir, { recursive: true });
     writeFileSync(embeddedServerPortPath(), String(port));
+  } catch {}
+}
+
+function writeEmbeddedServerPid(pid: number | undefined, serverScript: string): void {
+  try {
+    mkdirSync(DESKTOP_CONFIG.userDataDir, { recursive: true });
+    writeFileSync(embeddedServerPidPath(), `${pid ?? ""}\n${serverScript}`);
+  } catch {}
+}
+
+function readEmbeddedServerIdentity(): { pid: number; serverScript: string } | null {
+  try {
+    const [pidLine, ...scriptLines] = readFileSync(embeddedServerPidPath(), "utf8").split("\n");
+    const pid = Number(pidLine);
+    const serverScript = scriptLines.join("\n");
+    return Number.isInteger(pid) && pid > 0 && serverScript ? { pid, serverScript } : null;
   } catch {
-    // Non-fatal: a fresh port will be chosen next launch.
+    return null;
   }
 }
 
-function writeEmbeddedServerPid(pid: number | undefined): void {
-  try {
-    mkdirSync(DESKTOP_CONFIG.userDataDir, { recursive: true });
-    writeFileSync(embeddedServerPidPath(), String(pid ?? ""));
-  } catch {
-    // Non-fatal: stale-pid cleanup just won't find a file next launch. The
-    // server is already running; failing here would orphan it.
-  }
+function clearEmbeddedServerPid(pid: number | undefined): void {
+  if (readEmbeddedServerIdentity()?.pid === pid) rmSync(embeddedServerPidPath(), { force: true });
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -104,28 +105,42 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function killStaleEmbeddedServer(): Promise<void> {
-  const pidFile = embeddedServerPidPath();
-  if (!existsSync(pidFile)) return;
-  const pid = Number(readFileSync(pidFile, "utf8"));
-  rmSync(pidFile, { force: true });
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || !isProcessAlive(pid)) {
+function processRunsScript(pid: number, expectedScript: string): boolean {
+  if (!isProcessAlive(pid) || process.platform === "win32") return false;
+  try {
+    return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      timeout: 2_000,
+    }).includes(expectedScript);
+  } catch {
+    return false;
+  }
+}
+
+async function killStaleEmbeddedServer(expectedScript: string): Promise<void> {
+  const identity = readEmbeddedServerIdentity();
+  rmSync(embeddedServerPidPath(), { force: true });
+  if (
+    !identity ||
+    identity.serverScript !== expectedScript ||
+    identity.pid === process.pid ||
+    !processRunsScript(identity.pid, expectedScript)
+  ) {
     return;
   }
   try {
-    process.kill(pid, "SIGTERM");
+    process.kill(identity.pid, "SIGTERM");
   } catch {
     return;
   }
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 1_500 && isProcessAlive(pid)) {
+  while (Date.now() - startedAt < 1_500 && processRunsScript(identity.pid, expectedScript)) {
     await delay(100);
   }
-  if (isProcessAlive(pid)) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {}
-  }
+  if (!processRunsScript(identity.pid, expectedScript)) return;
+  try {
+    process.kill(identity.pid, "SIGKILL");
+  } catch {}
 }
 
 function resolveStandaloneServerRoot(): string {
@@ -176,14 +191,13 @@ export async function startFrontendServer(
     return { agentRuntime, runtime };
   }
 
-  await killStaleEmbeddedServer();
-
   const serverRoot = resolveStandaloneServerRoot();
   const serverScript = path.join(serverRoot, "server.js");
 
   if (!existsSync(serverScript)) {
     throw new Error(`Missing standalone server build: ${serverScript}. Run npm run build first.`);
   }
+  await killStaleEmbeddedServer(serverScript);
 
   const { staticDir, publicDir } = resolveStaticAssetsSource();
   const targetStaticDir = path.join(serverRoot, ".next", "static");
@@ -211,15 +225,7 @@ export async function startFrontendServer(
   const child = fork(serverScript, {
     cwd: serverRoot,
     stdio: "pipe",
-    // Electron's bundled Node/undici races IPv4/IPv6 with a 250ms per-attempt
-    // connect timeout. On hosts with broken IPv6 (or slow Cloudflare-fronted
-    // backends that need ~1s to connect), every outbound fetch from the embedded
-    // server aborts with ETIMEDOUT, surfacing as 500/502 from the proxy. Give the
-    // family-autoselection enough time to fall back to a working address.
     execArgv: ["--network-family-autoselection-attempt-timeout=2000"],
-    // Keep the embedded Next server attached to Electron. A detached child can
-    // survive a main-process exit with closed stdio pipes and spin while the
-    // desktop app itself is gone.
     detached: false,
     env: {
       ...process.env,
@@ -248,15 +254,10 @@ export async function startFrontendServer(
     log.warn(`frontend: ${String(chunk).trim()}`);
   });
 
-  writeEmbeddedServerPid(child.pid);
+  writeEmbeddedServerPid(child.pid, serverScript);
 
   child.once("exit", (code, signal) => {
-    try {
-      if (readFileSync(embeddedServerPidPath(), "utf8") === String(child.pid ?? "")) {
-        rmSync(embeddedServerPidPath(), { force: true });
-      }
-    } catch {
-    }
+    clearEmbeddedServerPid(child.pid);
     log.warn(`Embedded frontend exited code=${code ?? "null"} signal=${signal ?? "null"}`);
     options.onExit?.({ code, signal, pid: child.pid });
   });
@@ -306,11 +307,7 @@ export async function stopFrontendServer(
   if (handle.process) {
     const child = handle.process;
     const pid = child.pid;
-    try {
-      if (readFileSync(embeddedServerPidPath(), "utf8") === String(child.pid ?? "")) {
-        rmSync(embeddedServerPidPath(), { force: true });
-      }
-    } catch {}
+    clearEmbeddedServerPid(child.pid);
     child.kill("SIGTERM");
 
     await new Promise<void>((resolve) => {

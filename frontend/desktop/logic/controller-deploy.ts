@@ -12,7 +12,6 @@ export interface ControllerDeployResult {
 }
 
 export interface ControllerDeployOptions {
-  /** "ssh" installs onto a remote host; "local" runs the bundled installer on this machine. */
   mode?: "ssh" | "local";
   host?: string;
   port?: number;
@@ -24,16 +23,20 @@ const INSTALL_SCRIPT_URL =
   "https://raw.githubusercontent.com/sybil-solutions/local-studio/main/scripts/install-controller.sh";
 const DEPLOY_TIMEOUT_MS = 15 * 60_000;
 const DeployMarkerSchema = Schema.Struct({ url: Schema.String, api_key: Schema.String });
+const ControllerDeployOptionsSchema = Schema.Struct({
+  mode: Schema.optional(Schema.Literals(["ssh", "local"])),
+  host: Schema.optional(Schema.String),
+  port: Schema.optional(
+    Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 65_535 })),
+  ),
+  installDir: Schema.optional(Schema.String),
+});
 const decodeDeployMarker = Schema.decodeUnknownOption(Schema.fromJsonString(DeployMarkerSchema));
-
-// "user@host" / "host" / tailnet names; conservative charset keeps the value
-// safe to place inside the ssh argv (never inside a shell string).
 const HOST_PATTERN = /^[A-Za-z0-9._@-]+$/;
 
 export const isValidDeployHost = (host: string): boolean =>
   HOST_PATTERN.test(host) && !host.startsWith("-");
 
-/** Bundled installer (packaged app) or checkout copy (dev tree). */
 const findLocalInstallScript = (resourcesPath: string | null): string | null => {
   const candidates = [
     resourcesPath ? resolve(resourcesPath, "install-controller.sh") : null,
@@ -56,7 +59,6 @@ export const parseDeployMarker = (line: string): { url: string; apiKey: string }
   return null;
 };
 
-/** Stream installer output, resolve on the marker line, fail on exit/timeout. */
 const runInstaller = (
   child: ChildProcessWithoutNullStreams,
   describeFailure: (code: number | null, stderrTail: string) => string,
@@ -107,11 +109,6 @@ const runInstaller = (
 
 const lastLine = (tail: string): string => tail.trim().split("\n").pop() ?? "";
 
-/**
- * Install a controller onto this machine, using the installer bundled with the
- * app. Binds to loopback: a controller that exists to serve the local app has
- * no reason to listen on the network.
- */
 const deployLocalController = (
   options: ControllerDeployOptions,
   resourcesPath: string | null,
@@ -144,11 +141,10 @@ const deployLocalController = (
   );
 };
 
-/**
- * Deploy a controller either locally (bundled installer, loopback bind) or to
- * an ssh host. Streams progress lines via `onLog`; resolves with the
- * controller URL + API key parsed from the installer's final marker line.
- */
+export const decodeControllerDeployOptions = Schema.decodeUnknownOption(
+  ControllerDeployOptionsSchema,
+);
+
 export const deployController = (
   options: ControllerDeployOptions,
   resourcesPath: string | null,

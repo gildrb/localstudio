@@ -14,7 +14,7 @@ import {
 import { browserHistory } from "../browser-host/browser-history";
 import { playwrightManager } from "../browser-host/playwright";
 import { fetchReadable } from "../browser-host/reader";
-import { errorMessage } from "./helpers";
+import { decodeJsonBody, errorMessage } from "./helpers";
 
 const paneUrlOptions = () => ({
   allowPrivate: process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE === "1",
@@ -43,6 +43,21 @@ function unavailableError(): string {
   }
 }
 
+const browserUnavailable = (error = "Browser unavailable"): Response =>
+  Response.json({ ok: false, error }, { status: 503 });
+
+async function browserOperation<Data>(
+  fallback: string,
+  action: () => Promise<Data>,
+): Promise<Response> {
+  try {
+    const data = await action();
+    return Response.json(data === undefined ? { ok: true } : { ok: true, data });
+  } catch (error) {
+    return Response.json({ ok: false, error: errorMessage(error, fallback) });
+  }
+}
+
 let lastFallbackUrl = "";
 
 type VerbResult = { ok: boolean; data?: unknown; error?: string };
@@ -56,7 +71,7 @@ const BrowserVerbPayloadSchema = Schema.Struct({
 });
 type BrowserVerbPayload = Omit<typeof BrowserVerbPayloadSchema.Type, "sessionId">;
 
-export async function handleBrowserVerb(request: Request, verb: string): Promise<Response> {
+export async function verb(request: Request, verb: string): Promise<Response> {
   if (!ALLOWED_VERBS.has(verb)) {
     return Response.json({ ok: false, error: `Unknown browser verb: ${verb}` }, { status: 400 });
   }
@@ -253,7 +268,7 @@ async function fallbackVerb(
   return { ok: false, error: unavailableError() };
 }
 
-export async function handleBrowserFetch(request: Request): Promise<Response> {
+export async function fetchPage(request: Request): Promise<Response> {
   const raw = new URL(request.url).searchParams.get("url");
   if (!raw) return Response.json({ error: "url is required" }, { status: 400 });
   try {
@@ -266,28 +281,18 @@ export async function handleBrowserFetch(request: Request): Promise<Response> {
   }
 }
 
-export async function handleBrowserFrame(): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: unavailableError() }, { status: 503 });
-  }
-  try {
+export async function frame(): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable(unavailableError());
+  return browserOperation("frame poll failed", async () => {
     const { frame, state } = await browserHost.pollFrame();
-    return Response.json({
-      ok: true,
-      data: {
-        frame: frame?.data ?? null,
-        url: state.url,
-        title: state.title,
-        canGoBack: state.canGoBack,
-        canGoForward: state.canGoForward,
-      },
-    });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "frame poll failed"),
-    });
-  }
+    return {
+      frame: frame?.data ?? null,
+      url: state.url,
+      title: state.title,
+      canGoBack: state.canGoBack,
+      canGoForward: state.canGoForward,
+    };
+  });
 }
 
 const MouseButtonSchema = Schema.Literals(["left", "right", "middle"]);
@@ -317,25 +322,11 @@ const KeyInputSchema = Schema.Struct({
 const InputBodySchema = Schema.Union([MouseInputSchema, WheelInputSchema, KeyInputSchema]);
 type InputBody = typeof InputBodySchema.Type;
 
-export async function handleBrowserInput(request: Request): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  let body: InputBody;
-  try {
-    body = Schema.decodeUnknownSync(InputBodySchema)(await request.json());
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
-  try {
-    await dispatchInput(body);
-    return Response.json({ ok: true });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "input dispatch failed"),
-    });
-  }
+export async function input(request: Request): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  const body: InputBody | null = await decodeJsonBody(request, InputBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
+  return browserOperation("input dispatch failed", () => dispatchInput(body));
 }
 
 async function dispatchInput(body: InputBody): Promise<void> {
@@ -464,7 +455,7 @@ async function probePort(
   }
 }
 
-export async function handleBrowserLocalhosts(request: Request): Promise<Response> {
+export async function localhosts(request: Request): Promise<Response> {
   const currentPort = parseCurrentPort(request);
   const candidates = await listListeningPorts();
   const probed = await Promise.all(
@@ -479,18 +470,9 @@ export async function handleBrowserLocalhosts(request: Request): Promise<Respons
   return Response.json({ sites });
 }
 
-export async function handleBrowserState(): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  try {
-    return Response.json({ ok: true, data: await browserHost.peekState() });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "getState failed"),
-    });
-  }
+export async function state(): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  return browserOperation("getState failed", () => browserHost.peekState());
 }
 
 const ViewportBodySchema = Schema.Struct({
@@ -498,36 +480,22 @@ const ViewportBodySchema = Schema.Struct({
   height: Schema.Union([Schema.Number, Schema.String]),
 });
 
-export async function handleBrowserViewport(request: Request): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  let body: typeof ViewportBodySchema.Type;
-  try {
-    body = Schema.decodeUnknownSync(ViewportBodySchema)(await request.json());
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
+export async function viewport(request: Request): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  const body = await decodeJsonBody(request, ViewportBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   const width = Number(body.width);
   const height = Number(body.height);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     return Response.json({ ok: false, error: "width and height are required" }, { status: 400 });
   }
-  try {
+  return browserOperation("setViewport failed", async () => {
     await browserHost.setViewport(width, height);
-    return Response.json({
-      ok: true,
-      data: { width: Math.round(width), height: Math.round(height) },
-    });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "setViewport failed"),
-    });
-  }
+    return { width: Math.round(width), height: Math.round(height) };
+  });
 }
 
-export async function handleBrowserHistory(request: Request): Promise<Response> {
+export async function history(request: Request): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const limit = Number(params.get("limit") ?? 50);
   const visitedOnly = params.get("visited") === "1";
@@ -556,19 +524,15 @@ function enginesPayload() {
   };
 }
 
-export async function handleBrowserEngines(): Promise<Response> {
+export async function engines(): Promise<Response> {
   return Response.json({ ok: true, data: enginesPayload() });
 }
 
 const BrowserEngineBodySchema = Schema.Struct({ engine: Schema.String });
 
-export async function handleBrowserEngineSelect(request: Request): Promise<Response> {
-  let body: typeof BrowserEngineBodySchema.Type;
-  try {
-    body = Schema.decodeUnknownSync(BrowserEngineBodySchema)(await request.json());
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
+export async function selectEngine(request: Request): Promise<Response> {
+  const body = await decodeJsonBody(request, BrowserEngineBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   if (!isBrowserEngineId(body.engine)) {
     return Response.json({ ok: false, error: "unknown browser engine" }, { status: 400 });
   }

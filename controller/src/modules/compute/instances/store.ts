@@ -86,8 +86,6 @@ const pidAlive = (pid: number): boolean => {
   }
 };
 
-/* ── placement lock ──────────────────────────────────────────────────────── */
-
 // Reservation is a read-modify-write over the record set, so two concurrent launches
 // could otherwise both see the same free devices. exo's build-lock recipe: create with
 // "wx" (atomic on every OS), holder pid inside, stale iff the holder is dead — SIGKILL
@@ -118,9 +116,7 @@ const lockIsStale = (lockPath: string): boolean => {
 const releaseLock = (lockPath: string): void => {
   try {
     rmSync(lockPath);
-  } catch {
-    /* already gone */
-  }
+  } catch {}
 };
 
 const acquirePlacementLock = (lockPath: string): Effect.Effect<void, LaunchFailure> =>
@@ -140,8 +136,6 @@ const acquirePlacementLock = (lockPath: string): Effect.Effect<void, LaunchFailu
       yield* Effect.sleep(LOCK_RETRY_MS);
     }
   });
-
-/* ── store ───────────────────────────────────────────────────────────────── */
 
 export const makeInstanceStore = (dataDirectory: string): InstanceStore => {
   const directory = join(dataDirectory, "instances");
@@ -193,9 +187,7 @@ export const makeInstanceStore = (dataDirectory: string): InstanceStore => {
   const drop = (name: string): void => {
     try {
       rmSync(recordPath(name));
-    } catch {
-      /* already gone */
-    }
+    } catch {}
   };
 
   const heldDevices = (

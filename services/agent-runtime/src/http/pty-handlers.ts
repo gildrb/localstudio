@@ -33,7 +33,7 @@ function encodeBase64(text: string): string {
   return Buffer.from(text, "utf8").toString("base64");
 }
 
-export async function handlePtyOpen(request: Request): Promise<Response> {
+export async function open(request: Request): Promise<Response> {
   if (!isPtyAvailable()) {
     return jsonError(`PTY unavailable: ${ptyUnavailableReason() ?? "unknown"}`, 503);
   }
@@ -52,7 +52,7 @@ export async function handlePtyOpen(request: Request): Promise<Response> {
   }
 }
 
-export function handlePtyStream(request: Request): Response {
+export function stream(request: Request): Response {
   const id = new URL(request.url).searchParams.get("id")?.trim() ?? "";
   if (!id) return jsonError("id is required");
   return sseResponse({
@@ -77,7 +77,7 @@ export function handlePtyStream(request: Request): Response {
   });
 }
 
-export async function handlePtyInput(request: Request): Promise<Response> {
+export async function input(request: Request): Promise<Response> {
   const body = await readPtyBody(request);
   const id = body?.id?.trim();
   const data = body?.data;
@@ -86,14 +86,14 @@ export async function handlePtyInput(request: Request): Promise<Response> {
   return Response.json({ ok: writePtySession(id, data) });
 }
 
-export async function handlePtyResize(request: Request): Promise<Response> {
+export async function resize(request: Request): Promise<Response> {
   const body = await readPtyBody(request);
   const id = body?.id?.trim();
   if (!body || !id) return jsonError("id is required");
   return Response.json({ ok: resizePtySession(id, Number(body.cols), Number(body.rows)) });
 }
 
-export async function handlePtyClose(request: Request): Promise<Response> {
+export async function close(request: Request): Promise<Response> {
   const body = await readPtyBody(request);
   const id = body?.id?.trim();
   if (!body || !id) return jsonError("id is required");

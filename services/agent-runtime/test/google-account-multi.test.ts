@@ -1,10 +1,10 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { Effect } from "effect";
-import { cleanTemps, jsonResponse, tempDir } from "./test-fixtures";
+import { cleanTemps, isolatedDataDir, jsonResponse } from "./test-fixtures";
 import type { GoogleOAuthDependencies } from "../src/google-account";
 
-process.env.LOCAL_STUDIO_DATA_DIR = tempDir("google-account-");
+process.env.LOCAL_STUDIO_DATA_DIR = isolatedDataDir("google-account-");
 const google = await import("../src/google-account");
 const { GOOGLE_WORKSPACE_BINDINGS: bindings } = await import("../src/google-workspace-binding");
 afterAll(cleanTemps);

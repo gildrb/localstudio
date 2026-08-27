@@ -105,55 +105,49 @@ export class ControllerRequestStore {
     this.prune();
   }
 
-  public record(record: ControllerRequestRecord): void {
-    const durationMs = Math.max(0, Math.round(record.duration_ms));
-    this.db
-      .query(
-        `INSERT INTO controller_requests (
+  public recordEffect(record: ControllerRequestRecord): Effect.Effect<void, RepositoryError> {
+    return repositoryEffect("controller-requests.record", () => {
+      const durationMs = Math.max(0, Math.round(record.duration_ms));
+      this.db
+        .query(
+          `INSERT INTO controller_requests (
            method, path, status, duration_ms, success, error_class, error_message, user_agent
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.method.toUpperCase(),
-        record.path,
-        Math.round(record.status),
-        durationMs,
-        record.success ? 1 : 0,
-        record.error_class ?? null,
-        record.error_message ?? null,
-        record.user_agent ?? null,
-      );
-    this.maybePrune();
-  }
-
-  public recordEffect(record: ControllerRequestRecord): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("controller-requests.record", () => this.record(record));
-  }
-
-  public recordFunctionCall(record: ControllerFunctionCallRecord): void {
-    const durationMs = Math.max(0, Math.round(record.duration_ms));
-    this.db
-      .query(
-        `INSERT INTO controller_function_calls (
-           function_name, duration_ms, success, error_class, error_message
-         ) VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.function_name,
-        durationMs,
-        record.success ? 1 : 0,
-        record.error_class ?? null,
-        record.error_message ?? null,
-      );
-    this.maybePrune();
+        )
+        .run(
+          record.method.toUpperCase(),
+          record.path,
+          Math.round(record.status),
+          durationMs,
+          record.success ? 1 : 0,
+          record.error_class ?? null,
+          record.error_message ?? null,
+          record.user_agent ?? null,
+        );
+      this.maybePrune();
+    });
   }
 
   public recordFunctionCallEffect(
     record: ControllerFunctionCallRecord,
   ): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("controller-function-calls.record", () =>
-      this.recordFunctionCall(record),
-    );
+    return repositoryEffect("controller-function-calls.record", () => {
+      const durationMs = Math.max(0, Math.round(record.duration_ms));
+      this.db
+        .query(
+          `INSERT INTO controller_function_calls (
+           function_name, duration_ms, success, error_class, error_message
+         ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          record.function_name,
+          durationMs,
+          record.success ? 1 : 0,
+          record.error_class ?? null,
+          record.error_message ?? null,
+        );
+      this.maybePrune();
+    });
   }
 
   public aggregate(): ControllerUsageStats {

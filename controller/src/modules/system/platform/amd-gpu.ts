@@ -11,56 +11,39 @@ const AmdSmiValueSchema = Schema.Union([
   Schema.Literal("N/A"),
   Schema.Null,
 ]);
+const OptionalAmdSmiValueSchema = Schema.optional(AmdSmiValueSchema);
 
-type AmdSmiValue =
-  | { readonly value?: number | undefined; readonly unit?: string | undefined }
-  | "N/A"
-  | null;
+type AmdSmiValue = typeof AmdSmiValueSchema.Type;
 
 const AmdSmiMetricGpuSchema = Schema.Struct({
   gpu: Schema.optional(Schema.Number),
   mem_usage: Schema.optional(
     Schema.Struct({
-      total_vram: Schema.optional(AmdSmiValueSchema),
-      used_vram: Schema.optional(AmdSmiValueSchema),
-      free_vram: Schema.optional(AmdSmiValueSchema),
+      total_vram: OptionalAmdSmiValueSchema,
+      used_vram: OptionalAmdSmiValueSchema,
+      free_vram: OptionalAmdSmiValueSchema,
     }),
   ),
-  usage: Schema.optional(Schema.Struct({ gfx_activity: Schema.optional(AmdSmiValueSchema) })),
+  usage: Schema.optional(Schema.Struct({ gfx_activity: OptionalAmdSmiValueSchema })),
   temperature: Schema.optional(
     Schema.Struct({
-      hotspot: Schema.optional(AmdSmiValueSchema),
-      edge: Schema.optional(AmdSmiValueSchema),
+      hotspot: OptionalAmdSmiValueSchema,
+      edge: OptionalAmdSmiValueSchema,
     }),
   ),
-  power: Schema.optional(Schema.Struct({ socket_power: Schema.optional(AmdSmiValueSchema) })),
+  power: Schema.optional(Schema.Struct({ socket_power: OptionalAmdSmiValueSchema })),
 });
 
-interface AmdSmiMetricGpu {
-  readonly gpu?: number | undefined;
-  readonly mem_usage?:
-    | {
-        readonly total_vram?: AmdSmiValue | undefined;
-        readonly used_vram?: AmdSmiValue | undefined;
-        readonly free_vram?: AmdSmiValue | undefined;
-      }
-    | undefined;
-  readonly usage?: { readonly gfx_activity?: AmdSmiValue | undefined } | undefined;
-  readonly temperature?:
-    | { readonly hotspot?: AmdSmiValue | undefined; readonly edge?: AmdSmiValue | undefined }
-    | undefined;
-  readonly power?: { readonly socket_power?: AmdSmiValue | undefined } | undefined;
-}
+type AmdSmiMetricGpu = typeof AmdSmiMetricGpuSchema.Type;
 
 const AmdSmiStaticGpuSchema = Schema.Struct({
   gpu: Schema.optional(Schema.Number),
   asic: Schema.optional(Schema.Struct({ market_name: Schema.optional(Schema.String) })),
 });
 
-interface AmdSmiStaticGpu {
-  readonly gpu?: number | undefined;
-  readonly asic?: { readonly market_name?: string | undefined } | undefined;
-}
+type AmdSmiStaticGpu = typeof AmdSmiStaticGpuSchema.Type;
+const AmdSmiMetricResponseSchema = Schema.Struct({ gpu_data: Schema.Array(AmdSmiMetricGpuSchema) });
+const AmdSmiStaticResponseSchema = Schema.Struct({ gpu_data: Schema.Array(AmdSmiStaticGpuSchema) });
 
 type RocmSmiParsed = {
   index: number;
@@ -90,8 +73,7 @@ const readAmdSmiValueNumber = (value: AmdSmiValue | undefined): number | null =>
 
 export const parseAmdSmiMetricJson = (jsonText: string): AmdSmiMetricGpu[] => {
   try {
-    const schema = Schema.Struct({ gpu_data: Schema.Array(AmdSmiMetricGpuSchema) });
-    const decoded = Schema.decodeUnknownOption(schema)(JSON.parse(jsonText));
+    const decoded = Schema.decodeUnknownOption(AmdSmiMetricResponseSchema)(JSON.parse(jsonText));
     return Option.isSome(decoded) ? [...decoded.value.gpu_data] : [];
   } catch {
     return [];
@@ -100,8 +82,7 @@ export const parseAmdSmiMetricJson = (jsonText: string): AmdSmiMetricGpu[] => {
 
 export const parseAmdSmiStaticJson = (jsonText: string): AmdSmiStaticGpu[] => {
   try {
-    const schema = Schema.Struct({ gpu_data: Schema.Array(AmdSmiStaticGpuSchema) });
-    const decoded = Schema.decodeUnknownOption(schema)(JSON.parse(jsonText));
+    const decoded = Schema.decodeUnknownOption(AmdSmiStaticResponseSchema)(JSON.parse(jsonText));
     return Option.isSome(decoded) ? [...decoded.value.gpu_data] : [];
   } catch {
     return [];
@@ -122,12 +103,8 @@ const parseRocmSmiValue = (raw: string): { value: number; unit: string } | null 
 const rocmSmiToBytes = (parsed: { value: number; unit: string } | null): number | null => {
   if (!parsed) return null;
   const unit = parsed.unit.toLowerCase();
-  if (!unit || unit === "b") return Math.round(parsed.value);
-  if (unit === "kb" || unit === "kib") return Math.round(parsed.value * 1024);
-  if (unit === "mb" || unit === "mib") return Math.round(parsed.value * 1024 ** 2);
-  if (unit === "gb" || unit === "gib") return Math.round(parsed.value * 1024 ** 3);
-  if (unit === "tb" || unit === "tib") return Math.round(parsed.value * 1024 ** 4);
-  return null;
+  const exponent = ["b", "kb", "mb", "gb", "tb"].indexOf(unit.replace("ib", "b") || "b");
+  return exponent < 0 ? null : Math.round(parsed.value * 1024 ** exponent);
 };
 
 const enrichUnitFromLabel = (
@@ -141,43 +118,37 @@ const enrichUnitFromLabel = (
   return { ...parsed, unit: match[1] ?? "" };
 };
 
-const isCardSeriesLabel = (label: string, entry: RocmSmiParsed): boolean =>
-  label.includes("card series") && entry.name === "AMD GPU";
-const isTemperatureLabel = (label: string): boolean =>
-  label.includes("temperature") && label.includes("(c)");
-const isAveragePowerLabel = (label: string): boolean =>
-  label.includes("average") && label.includes("power") && label.includes("(w)");
-const isPowerLimitLabel = (label: string): boolean =>
-  (label.includes("power cap") || label.includes("max")) && label.includes("(w)");
-
 const rocmSmiPowerField = (label: string): "power_draw_w" | "power_limit_w" | null => {
-  if (isAveragePowerLabel(label)) return "power_draw_w";
-  if (isPowerLimitLabel(label)) return "power_limit_w";
-  return null;
+  if (label.includes("average") && label.includes("power") && label.includes("(w)")) {
+    return "power_draw_w";
+  }
+  return (label.includes("power cap") || label.includes("max")) && label.includes("(w)")
+    ? "power_limit_w"
+    : null;
 };
 
+const shouldUpdateRocmName = (entry: RocmSmiParsed, label: string): boolean =>
+  label.includes("card model") || (entry.name === "AMD GPU" && label.includes("card series"));
+
 const updateRocmSmiEntry = (entry: RocmSmiParsed, label: string, valueText: string): void => {
-  if (label.includes("card model") || isCardSeriesLabel(label, entry)) {
+  if (shouldUpdateRocmName(entry, label)) {
     entry.name = valueText;
     return;
   }
-  if (label.includes("total vram")) {
-    entry.memory_total_bytes = rocmSmiToBytes(
-      enrichUnitFromLabel(parseRocmSmiValue(valueText), label),
-    );
-    return;
-  }
-  if (label.includes("used vram")) {
-    entry.memory_used_bytes = rocmSmiToBytes(
-      enrichUnitFromLabel(parseRocmSmiValue(valueText), label),
-    );
+  const memoryField = label.includes("total vram")
+    ? "memory_total_bytes"
+    : label.includes("used vram")
+      ? "memory_used_bytes"
+      : null;
+  if (memoryField) {
+    entry[memoryField] = rocmSmiToBytes(enrichUnitFromLabel(parseRocmSmiValue(valueText), label));
     return;
   }
   if (label.includes("gpu use")) {
     entry.utilization_pct = parseRocmSmiValue(valueText.replace("%", "").trim())?.value ?? null;
     return;
   }
-  if (isTemperatureLabel(label)) {
+  if (label.includes("temperature") && label.includes("(c)")) {
     entry.temp_c = parseRocmSmiValue(valueText.replace(/c$/i, "").trim())?.value ?? null;
     return;
   }
@@ -305,25 +276,19 @@ export const getGpuInfoFromRocmSmi = (): Effect.Effect<GpuInfo[]> =>
     if (parsed.length === 0) return [];
 
     const toMb = (bytes: number): number => Math.max(0, Math.round(bytes / 1024 ** 2));
-    return parsed.map((gpu) => {
-      const totalBytes = gpu.memory_total_bytes ?? 0;
-      const usedBytes = gpu.memory_used_bytes ?? 0;
-      const freeBytes = Math.max(0, totalBytes - usedBytes);
-      const utilization = Math.max(0, Math.round(gpu.utilization_pct ?? 0));
-      const temperatureC = Math.max(0, Math.round(gpu.temp_c ?? 0));
-      const powerDraw = Math.max(0, Number(gpu.power_draw_w ?? 0));
-      const powerLimit = Math.max(0, Number(gpu.power_limit_w ?? 0));
-
-      return {
+    return parsed.map(
+      (gpu): GpuInfo => ({
         index: gpu.index,
         name: gpu.name || "AMD GPU",
-        memory_total_mb: toMb(totalBytes),
-        memory_used_mb: toMb(usedBytes),
-        memory_free_mb: toMb(freeBytes),
-        utilization_pct: utilization,
-        temp_c: temperatureC,
-        power_draw: powerDraw,
-        power_limit: powerLimit,
-      } satisfies GpuInfo;
-    });
+        memory_total_mb: toMb(gpu.memory_total_bytes ?? 0),
+        memory_used_mb: toMb(gpu.memory_used_bytes ?? 0),
+        memory_free_mb: toMb(
+          Math.max(0, (gpu.memory_total_bytes ?? 0) - (gpu.memory_used_bytes ?? 0)),
+        ),
+        utilization_pct: Math.max(0, Math.round(gpu.utilization_pct ?? 0)),
+        temp_c: Math.max(0, Math.round(gpu.temp_c ?? 0)),
+        power_draw: Math.max(0, Number(gpu.power_draw_w ?? 0)),
+        power_limit: Math.max(0, Number(gpu.power_limit_w ?? 0)),
+      }),
+    );
   });

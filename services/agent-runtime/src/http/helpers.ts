@@ -3,6 +3,17 @@ import type { UnparsedValue, UnknownRecord } from "../../../../shared/agent/guar
 
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
 
+export async function decodeJsonBody<S extends Schema.ConstraintDecoder<unknown>>(
+  request: Request,
+  schema: S,
+): Promise<S["Type"] | null> {
+  try {
+    return Schema.decodeUnknownSync(schema)(await request.json());
+  } catch {
+    return null;
+  }
+}
+
 export function jsonError(message: string, status = 400): Response {
   return Response.json({ error: message }, { status });
 }

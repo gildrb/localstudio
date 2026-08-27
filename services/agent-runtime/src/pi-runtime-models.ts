@@ -1,5 +1,4 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { getApiSettings, type ApiSettings } from "./settings-service";
@@ -44,10 +43,16 @@ const JsonValueSchema = Schema.suspend(
     ]),
 );
 
-const ThinkingLevelMapSchema = Schema.Record(
-  Schema.Literals(AGENT_THINKING_LEVELS),
-  Schema.NullOr(Schema.String),
-);
+const thinkingLevelValue = Schema.NullOr(Schema.String);
+const ThinkingLevelMapSchema = Schema.Struct({
+  off: Schema.optional(thinkingLevelValue),
+  minimal: Schema.optional(thinkingLevelValue),
+  low: Schema.optional(thinkingLevelValue),
+  medium: Schema.optional(thinkingLevelValue),
+  high: Schema.optional(thinkingLevelValue),
+  xhigh: Schema.optional(thinkingLevelValue),
+  max: Schema.optional(thinkingLevelValue),
+});
 
 const PiProviderModelSchema = Schema.Struct({
   id: Schema.String,
@@ -98,9 +103,8 @@ function baseProviderName(name: string): string {
 }
 
 async function loadUserPiProviders(): Promise<UserPiProviders> {
-  const modelsPath = userPiModelsPath();
-  if (!existsSync(modelsPath)) return {};
   try {
+    const modelsPath = userPiModelsPath();
     const parsed = Schema.decodeUnknownSync(
       Schema.Struct({ providers: Schema.optional(UserPiProvidersSchema) }),
     )(JSON.parse(await readFile(modelsPath, "utf-8")));
@@ -126,6 +130,7 @@ function userPiModelToAgentModel(
   const name = model.name ?? rawId;
   const inputs = model.input ?? ["text"];
   const reasoning = model.reasoning ?? inferReasoningSupport(rawId);
+  const contextWindow = model.contextWindow ?? 128_000;
   return {
     id: `${qualifiedProviderId}/${rawId}`,
     rawId,
@@ -133,8 +138,8 @@ function userPiModelToAgentModel(
     provider: "local-studio",
     providerId: qualifiedProviderId,
     controllerName: providerName,
-    contextWindow: model.contextWindow ?? 128_000,
-    maxTokens: model.maxTokens ?? 65_536,
+    contextWindow,
+    maxTokens: model.maxTokens ?? Math.min(contextWindow, 65_536),
     reasoning,
     thinkingLevels: supportedPiThinkingLevels(model, reasoning, providerCompat),
     vision: resolveModelVision({ identifiers: [rawId], modalities: [inputs] }),
@@ -281,9 +286,8 @@ function mergeControllers(
 }
 
 async function loadPersistedControllers(agentDir: string): Promise<PiControllerModelsRequest[]> {
-  const file = controllersPath(agentDir);
-  if (!existsSync(file)) return [];
   try {
+    const file = controllersPath(agentDir);
     return [
       ...Schema.decodeUnknownSync(PersistedControllersSchema)(
         JSON.parse(await readFile(file, "utf-8")),
@@ -499,7 +503,8 @@ export async function refreshPiModels(
     );
   });
   const writtenAgentDir = await writePiModelsConfig(controllerModels, userPiProviders);
-  const providerModels = await collectProviderAgentModels();
+  await refreshProviderHub().catch(() => undefined);
+  const providerModels = await listProviderAgentModels();
 
   const allModels = [...models, ...userPiModels, ...providerModels];
   if (allModels.length === 0 && controllerError) {
@@ -507,18 +512,9 @@ export async function refreshPiModels(
   }
   return { models: allModels, agentDir: writtenAgentDir };
 }
-async function collectProviderAgentModels(): Promise<AgentModel[]> {
-  await refreshProviderHub().catch(() => undefined);
-  return listProviderAgentModels();
-}
-
 function isDeepSeekReasoningModel(model: AgentModel): boolean {
   const id = `${model.id} ${model.rawId ?? ""} ${model.name}`.toLowerCase();
   return model.reasoning && id.includes("deepseek");
-}
-
-function isControllerBackedModel(model: AgentModel): boolean {
-  return Boolean(model.controllerUrl);
 }
 
 function isInklingReasoningModel(model: AgentModel): boolean {
@@ -547,7 +543,7 @@ const CONTROLLER_THINKING_LEVEL_MAP = {
 
 export function modelsToPiModels(models: AgentModel[]) {
   return models.map((model) => {
-    const deepSeekReasoning = isDeepSeekReasoningModel(model) && !isControllerBackedModel(model);
+    const deepSeekReasoning = isDeepSeekReasoningModel(model) && !model.controllerUrl;
     const inklingReasoning = isInklingReasoningModel(model);
     const compat: OpenAICompletionsCompat = deepSeekReasoning
       ? {

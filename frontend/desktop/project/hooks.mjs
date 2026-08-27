@@ -34,23 +34,28 @@ function stagedPaths() {
 
 function validateSnapshot(directory, files) {
   installSnapshot(directory);
-  const canonicalJson = "shared/model-recommendations.json";
-  const canonicalPath = path.join(directory, canonicalJson);
-  if (!existsSync(canonicalPath)) throw Error(`Missing canonical model data: ${canonicalJson}`);
-  const canonicalSource = readFileSync(canonicalPath, "utf8");
-  let canonicalData;
-  try {
-    canonicalData = JSON.parse(canonicalSource);
-  } catch (error) {
-    throw Error(`Invalid canonical model data: ${canonicalJson}`, { cause: error });
-  }
-  const terminalNewline = canonicalSource.endsWith("\n") ? "\n" : "";
-  if (canonicalSource !== `${JSON.stringify(canonicalData)}${terminalNewline}`) {
-    throw Error(`${canonicalJson} must use canonical compact JSON`);
+  const canonicalJson = [
+    "controller/contracts/model-index.json",
+    "shared/model-recommendations.json",
+  ];
+  for (const file of canonicalJson) {
+    const canonicalPath = path.join(directory, file);
+    if (!existsSync(canonicalPath)) throw Error(`Missing canonical model data: ${file}`);
+    const canonicalSource = readFileSync(canonicalPath, "utf8");
+    let canonicalData;
+    try {
+      canonicalData = JSON.parse(canonicalSource);
+    } catch (error) {
+      throw Error(`Invalid canonical model data: ${file}`, { cause: error });
+    }
+    const terminalNewline = canonicalSource.endsWith("\n") ? "\n" : "";
+    if (canonicalSource !== `${JSON.stringify(canonicalData)}${terminalNewline}`) {
+      throw Error(`${file} must use canonical compact JSON`);
+    }
   }
   const formatted = files.filter(
     (file) =>
-      file !== canonicalJson &&
+      !canonicalJson.includes(file) &&
       /\.(?:css|js|jsx|json|md|mjs|ts|tsx)$/.test(file) &&
       existsSync(path.join(directory, file)),
   );
@@ -89,19 +94,20 @@ function validateSnapshot(directory, files) {
       );
     }
   }
-  if (files.some((file) => /^(frontend\/src|shared)\//.test(file))) {
-    execute("bun", ["run", "format:check"], frontend);
-    execute("bun", ["run", "typecheck"], frontend);
-  }
-  if (files.some((file) => /^(frontend\/desktop|shared)\//.test(file))) {
-    execute("bun", ["run", "typecheck:desktop"], frontend);
-    execute("bun", ["run", "typecheck:extensions"], frontend);
-  }
-  if (files.some((file) => /^(controller|shared)\//.test(file))) {
-    execute("bun", ["run", "typecheck"], path.join(directory, "controller"));
-  }
-  if (files.some((file) => /^(services\/agent-runtime|shared)\//.test(file))) {
-    execute("bun", ["run", "check"], path.join(directory, "services", "agent-runtime"));
+  const checks = [
+    [/^(frontend\/src|shared)\//, frontend, ["format:check", "typecheck"]],
+    [/^(frontend\/desktop|shared)\//, frontend, ["typecheck:desktop", "typecheck:extensions"]],
+    [/^(controller|shared)\//, path.join(directory, "controller"), ["typecheck"]],
+    [
+      /^(services\/agent-runtime|shared)\//,
+      path.join(directory, "services", "agent-runtime"),
+      ["check"],
+    ],
+  ];
+  for (const [pattern, cwd, scripts] of checks) {
+    if (files.some((file) => pattern.test(file))) {
+      for (const script of scripts) execute("bun", ["run", script], cwd);
+    }
   }
 }
 

@@ -1,5 +1,10 @@
-import { statSync } from "node:fs";
-import { readRolloutHead, rolloutCache, scanCompleteRolloutLines } from "./rollout-cache";
+import {
+  readRolloutHead,
+  rolloutCache,
+  scanCompleteRolloutLines,
+  statRollout,
+  type RolloutStat,
+} from "./rollout-cache";
 import { isRecord, type UnknownRecord, type UnparsedValue } from "../../../shared/agent/guards";
 import { Schema } from "effect";
 
@@ -32,8 +37,7 @@ export function emptyUsageTotals(): SessionUsageTotals {
 }
 
 type CacheEntry = {
-  size: number;
-  mtimeMs: number;
+  stat: RolloutStat;
   totals: SessionUsageTotals;
   scannedBytes: number;
   head: string;
@@ -46,15 +50,47 @@ const usageDisk = rolloutCache<CacheEntry, CacheEntry>("usage-totals", {
 
 type ScanResult = { totals: SessionUsageTotals; scannedBytes: number };
 
+function canResume(
+  entry: CacheEntry | undefined,
+  stat: RolloutStat,
+  head: string,
+): entry is CacheEntry {
+  return Boolean(
+    entry?.stat &&
+    entry.head === head &&
+    entry.stat.dev === stat.dev &&
+    entry.stat.ino === stat.ino &&
+    stat.size >= entry.scannedBytes &&
+    entry.scannedBytes > 0,
+  );
+}
+
+function sameRollout(left: RolloutStat, right: RolloutStat | undefined): boolean {
+  return Boolean(
+    right &&
+    right.size === left.size &&
+    right.mtimeMs === left.mtimeMs &&
+    right.ctimeMs === left.ctimeMs &&
+    right.dev === left.dev &&
+    right.ino === left.ino,
+  );
+}
+
 async function scanFrom(
   filepath: string,
   start: number,
   seed: SessionUsageTotals,
+  endExclusive: number,
 ): Promise<ScanResult> {
   let totals = seed;
-  const scannedBytes = await scanCompleteRolloutLines(filepath, start, (line) => {
-    if (line) totals = accumulateUsageLine(totals, line);
-  });
+  const scannedBytes = await scanCompleteRolloutLines(
+    filepath,
+    start,
+    (line) => {
+      if (line) totals = accumulateUsageLine(totals, line);
+    },
+    endExclusive,
+  );
   return { totals, scannedBytes };
 }
 
@@ -115,34 +151,24 @@ export function accumulateUsageLine(totals: SessionUsageTotals, line: string): S
 }
 
 export async function readSessionUsageTotals(filepath: string): Promise<SessionUsageTotals> {
-  let stat: { size: number; mtimeMs: number };
-  try {
-    stat = statSync(filepath);
-  } catch {
-    return emptyUsageTotals();
-  }
+  const stat = statRollout(filepath);
+  if (!stat) return emptyUsageTotals();
 
   try {
     const head = await readRolloutHead(filepath);
 
     const previous = usageDisk.readStale(filepath);
 
-    const resumable =
-      previous !== undefined &&
-      previous.head === head &&
-      stat.size >= previous.scannedBytes &&
-      previous.scannedBytes > 0;
-
-    if (resumable && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs) {
-      return previous.totals;
-    }
+    const resumable = canResume(previous, stat, head);
+    if (resumable && previous.stat.ctimeMs === stat.ctimeMs) return previous.totals;
 
     const { totals, scannedBytes } = resumable
-      ? await scanFrom(filepath, previous.scannedBytes, previous.totals)
-      : await scanFrom(filepath, 0, emptyUsageTotals());
+      ? await scanFrom(filepath, previous.scannedBytes, previous.totals, stat.size)
+      : await scanFrom(filepath, 0, emptyUsageTotals(), stat.size);
 
-    const entry = { size: stat.size, mtimeMs: stat.mtimeMs, totals, scannedBytes, head };
-    usageDisk.write(filepath, stat, entry);
+    if (sameRollout(stat, statRollout(filepath))) {
+      usageDisk.write(filepath, stat, { stat, totals, scannedBytes, head });
+    }
     return totals;
   } catch {
     return emptyUsageTotals();

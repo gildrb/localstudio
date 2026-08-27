@@ -8,13 +8,6 @@ import { resolveBinary, runCommandEffect } from "../../../core/command";
 import { ENGINE_IDS, type HostProfile } from "../../compute/contracts";
 import { engineSpec } from "../../compute/engines/registry";
 
-/**
- * Runtime targets, docker-only: one row per roster engine. "Installed" means
- * the engine's pinned image is pulled; "active" means a container is running
- * from it. There is nothing else to discover — no venvs, no system installs,
- * no bundled wheels — which is the whole point.
- */
-
 const ENGINE_LABEL = {
   vllm: "vLLM",
   sglang: "SGLang",

@@ -28,56 +28,41 @@ const addCheck = (
   });
 };
 
+const monitoringProbes = {
+  "nvidia-smi": {
+    resolve: resolveNvidiaSmiBinary,
+    args: ["--query-gpu=name", "--format=csv,noheader,nounits"],
+  },
+  "amd-smi": { resolve: resolveAmdSmiBinary, args: ["version"] },
+  "rocm-smi": { resolve: resolveRocmSmiBinary, args: ["--showproductname"] },
+} as const;
+
 export const probeGpuMonitoring = (
   kind: SystemRuntimeInfo["platform"]["kind"],
   rocmTool: RuntimeRocmSmiTool | null,
 ): Effect.Effect<{ available: boolean; tool: RuntimeGpuMonitoringTool | null }> => {
-  const probe = (binary: string, args: string[]): Effect.Effect<boolean> =>
-    runCommandAsyncEffect(binary, args, { timeoutMs: 2_000 }).pipe(
-      Effect.map((result) => result.status === 0),
+  const probe = (
+    tool: keyof typeof monitoringProbes,
+  ): Effect.Effect<{ available: boolean; tool: RuntimeGpuMonitoringTool }> => {
+    const { resolve, args } = monitoringProbes[tool];
+    const binary = resolve();
+    if (!binary) return Effect.succeed({ available: false, tool });
+    return runCommandAsyncEffect(binary, [...args], { timeoutMs: 2_000 }).pipe(
+      Effect.map((result) => ({ available: result.status === 0, tool })),
     );
+  };
 
-  if (kind === "cuda") {
-    const binary = resolveNvidiaSmiBinary();
-    if (!binary) return Effect.succeed({ available: false, tool: "nvidia-smi" });
-    return probe(binary, ["--query-gpu=name", "--format=csv,noheader,nounits"]).pipe(
-      Effect.map((available) => ({ available, tool: "nvidia-smi" as const })),
-    );
-  }
-
-  if (kind === "rocm") {
-    const preferred = rocmTool ?? (resolveAmdSmiBinary() ? "amd-smi" : null);
-
-    if (preferred === "amd-smi") {
-      const binary = resolveAmdSmiBinary();
-      if (!binary) return Effect.succeed({ available: false, tool: "amd-smi" });
-      return probe(binary, ["version"]).pipe(
-        Effect.map((available) => ({ available, tool: "amd-smi" as const })),
-      );
+  if (kind === "cuda") return probe("nvidia-smi");
+  if (kind !== "rocm") return Effect.succeed({ available: false, tool: null });
+  const preferred = rocmTool ?? (resolveAmdSmiBinary() ? "amd-smi" : null);
+  if (preferred) return probe(preferred);
+  return Effect.gen(function* () {
+    for (const tool of ["amd-smi", "rocm-smi"] as const) {
+      const result = yield* probe(tool);
+      if (result.available) return result;
     }
-
-    if (preferred === "rocm-smi") {
-      const binary = resolveRocmSmiBinary();
-      if (!binary) return Effect.succeed({ available: false, tool: "rocm-smi" });
-      return probe(binary, ["--showproductname"]).pipe(
-        Effect.map((available) => ({ available, tool: "rocm-smi" as const })),
-      );
-    }
-
-    const amd = resolveAmdSmiBinary();
-    const rocm = resolveRocmSmiBinary();
-    return Effect.gen(function* () {
-      if (amd && (yield* probe(amd, ["version"]))) {
-        return { available: true, tool: "amd-smi" as const };
-      }
-      if (rocm && (yield* probe(rocm, ["--showproductname"]))) {
-        return { available: true, tool: "rocm-smi" as const };
-      }
-      return { available: false, tool: null };
-    });
-  }
-
-  return Effect.succeed({ available: false, tool: null });
+    return { available: false, tool: null };
+  });
 };
 
 type CompatibilityReportArguments = {

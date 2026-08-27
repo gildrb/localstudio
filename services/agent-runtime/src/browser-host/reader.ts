@@ -148,6 +148,11 @@ function htmlToReadable(html: string, baseUrl: string) {
   return { title, text };
 }
 
+function escapeHtmlElementContent(value: string): string {
+  // A literal "<" is the only markup opener during one HTML parse in element-data context.
+  return value.replaceAll("<", "&lt;");
+}
+
 function isMarkdownResponse(url: string, contentType: string): boolean {
   return /\b(markdown|mdx?)\b/i.test(contentType) || /\.(md|mdx|markdown)(?:[?#].*)?$/i.test(url);
 }
@@ -155,17 +160,6 @@ function isMarkdownResponse(url: string, contentType: string): boolean {
 function markdownTitle(markdown: string, fallback: string): string {
   const heading = markdown.match(/^\s*#\s+(.+)$/m)?.[1]?.trim();
   return heading || fallback;
-}
-
-function cleanMarkdown(markdown: string): string {
-  return markdown
-    .replace(/<img\b[^>]*\balt=["']([^"']*)["'][^>]*>/gi, (_match, alt: string) =>
-      alt.trim() ? alt.trim() : "",
-    )
-    .replace(/<\/?(p|div|span|center|picture|source)\b[^>]*>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .trim();
 }
 
 async function fetchBoundedUrl(
@@ -303,12 +297,12 @@ function renderReadable(response: BoundedResponse, fallbackUrl: string): ReaderR
   const finalUrl = response.url || fallbackUrl;
   if (contentType.startsWith("text/html") || contentType.includes("xhtml")) {
     const { title, text } = htmlToReadable(response.body, finalUrl);
-    return { url: finalUrl, title, text, markdown: text, contentType };
+    return { url: finalUrl, title, text, markdown: escapeHtmlElementContent(text), contentType };
   }
   if (contentType.startsWith("text/") || contentType.includes("application/json")) {
     const text = response.body.slice(0, MAX_BYTES);
     if (isMarkdownResponse(finalUrl, contentType)) {
-      const markdown = cleanMarkdown(text);
+      const markdown = escapeHtmlElementContent(text).trim();
       return {
         url: finalUrl,
         title: markdownTitle(markdown, finalUrl),

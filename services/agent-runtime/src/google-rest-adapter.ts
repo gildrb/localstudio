@@ -7,6 +7,8 @@ import {
 
 type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
 
+const OptionalString = Schema.optional(Schema.String);
+
 const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
   Schema.Union([
     Schema.Null,
@@ -19,31 +21,19 @@ const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
 );
 const decodeJson = Schema.decodeUnknownSync(JsonSchema);
 
-type ToolArguments = {
-  query?: string;
-  max_results?: number;
-  page_token?: string;
-  thread_id?: string;
-  message_id?: string;
-  calendar_id?: string;
-  time_min?: string;
-  time_max?: string;
-  event_id?: string;
-  calendar_ids?: readonly string[];
-};
-
 const ToolArgumentsSchema = Schema.Struct({
-  query: Schema.optional(Schema.String),
+  query: OptionalString,
   max_results: Schema.optional(Schema.Number),
-  page_token: Schema.optional(Schema.String),
-  thread_id: Schema.optional(Schema.String),
-  message_id: Schema.optional(Schema.String),
-  calendar_id: Schema.optional(Schema.String),
-  time_min: Schema.optional(Schema.String),
-  time_max: Schema.optional(Schema.String),
-  event_id: Schema.optional(Schema.String),
+  page_token: OptionalString,
+  thread_id: OptionalString,
+  message_id: OptionalString,
+  calendar_id: OptionalString,
+  time_min: OptionalString,
+  time_max: OptionalString,
+  event_id: OptionalString,
   calendar_ids: Schema.optional(Schema.Array(Schema.String)),
 });
+type ToolArguments = typeof ToolArgumentsSchema.Type;
 const decodeToolArguments = Schema.decodeUnknownSync(ToolArgumentsSchema);
 
 type RestRequest = {
@@ -145,27 +135,27 @@ type GmailMessage = {
 };
 
 const GmailHeaderSchema = Schema.Struct({
-  name: Schema.optional(Schema.String),
-  value: Schema.optional(Schema.String),
+  name: OptionalString,
+  value: OptionalString,
 });
-const GmailBodySchema = Schema.Struct({ data: Schema.optional(Schema.String) });
+const GmailBodySchema = Schema.Struct({ data: OptionalString });
 const GmailPartSchema: Schema.Codec<GmailPart, GmailPart> = Schema.suspend(() =>
   Schema.Struct({
-    mimeType: Schema.optional(Schema.String),
+    mimeType: OptionalString,
     body: Schema.optional(GmailBodySchema),
     parts: Schema.optional(Schema.Array(GmailPartSchema)),
     headers: Schema.optional(Schema.Array(GmailHeaderSchema)),
   }),
 );
 const GmailMessageSchema = Schema.Struct({
-  id: Schema.optional(Schema.String),
-  threadId: Schema.optional(Schema.String),
+  id: OptionalString,
+  threadId: OptionalString,
   labelIds: Schema.optional(Schema.Array(Schema.String)),
-  snippet: Schema.optional(Schema.String),
+  snippet: OptionalString,
   payload: Schema.optional(GmailPartSchema),
 });
 const GmailThreadSchema = Schema.Struct({
-  id: Schema.optional(Schema.String),
+  id: OptionalString,
   messages: Schema.optional(Schema.Array(GmailMessageSchema)),
 });
 const decodeGmailMessage = Schema.decodeUnknownSync(GmailMessageSchema);
@@ -385,7 +375,7 @@ function requestUrl(base: string, request: RestRequest): string {
 }
 
 const GoogleErrorResponseSchema = Schema.Struct({
-  error: Schema.optional(Schema.Struct({ message: Schema.optional(Schema.String) })),
+  error: Schema.optional(Schema.Struct({ message: OptionalString })),
 });
 const decodeGoogleErrorResponse = Schema.decodeUnknownOption(GoogleErrorResponseSchema);
 

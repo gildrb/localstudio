@@ -78,13 +78,9 @@ const CommandTemplateIndexSchema = Schema.Literals([0, 1, 2, 3]);
 const IndexSchema = Schema.Int;
 const NullableNumber = Schema.NullOr(Schema.Number);
 const NullableIndex = Schema.NullOr(IndexSchema);
-const HardwareSchema = Schema.Tuple([
-  Schema.String,
-  Schema.Number,
-  Schema.Number,
-  Schema.Boolean,
-  Schema.Boolean,
-]);
+const TenthsSchema = Schema.Int;
+const NullableTenths = Schema.NullOr(TenthsSchema);
+const HardwareSchema = Schema.Tuple([Schema.String, Schema.Number, Schema.Number, Schema.Boolean]);
 const CompactNoteSchema = Schema.NullOr(
   Schema.Union([
     Schema.Tuple([Schema.Literal(0)]),
@@ -92,30 +88,39 @@ const CompactNoteSchema = Schema.NullOr(
     Schema.Tuple([Schema.Literal(2), Schema.String]),
   ]),
 );
-const CompactBenchmarkSchema = Schema.Tuple([
-  IndexSchema,
-  NullableNumber,
-  NullableNumber,
-  NullableNumber,
-  NullableNumber,
-  NullableNumber,
-  NullableIndex,
-  NullableIndex,
+/** Benchmark speeds use exact tenths. TTFT is omitted because this publication has no TTFT data. */
+const CompactBenchmarkSchema = Schema.Union([
+  Schema.Tuple([
+    IndexSchema,
+    NullableTenths,
+    NullableTenths,
+    NullableTenths,
+    IndexSchema,
+    NullableIndex,
+  ]),
+  Schema.Tuple([
+    IndexSchema,
+    NullableTenths,
+    NullableTenths,
+    NullableTenths,
+    IndexSchema,
+    NullableIndex,
+    IndexSchema,
+  ]),
 ]);
 const CompactModelSchema = Schema.Tuple([
   IndexSchema,
   Schema.String,
   Schema.NullOr(Schema.String),
   IndexSchema,
-  Schema.String,
-  Schema.Number,
+  Schema.NullOr(Schema.String),
+  TenthsSchema,
   IndexSchema,
   CommandTemplateIndexSchema,
   Schema.Array(IndexSchema),
   Schema.Number,
   Schema.Array(CompactBenchmarkSchema),
-  NullableNumber,
-  NullableNumber,
+  NullableIndex,
   NullableIndex,
   CompactNoteSchema,
 ]);
@@ -130,6 +135,7 @@ const CompactFileSchema = Schema.Struct({
   d: Schema.Array(Schema.String),
   b: Schema.Array(Schema.String),
   p: Schema.Array(Schema.String),
+  c: Schema.Array(NullableNumber),
   m: Schema.Array(CompactModelSchema),
   t: Schema.Array(Schema.String),
   f: Schema.Array(Schema.Array(IndexSchema)),
@@ -201,7 +207,7 @@ const dictionaryValue = <T>(values: readonly T[], index: number, category: strin
   return value;
 };
 
-const decodeNotes = (note: CompactModel[14]): readonly string[] => {
+const decodeNotes = (note: CompactModel[13]): readonly string[] => {
   if (note === null) return [];
   switch (note[0]) {
     case 0:
@@ -214,13 +220,15 @@ const decodeNotes = (note: CompactModel[14]): readonly string[] => {
 };
 
 const compact: CompactFile = Schema.decodeUnknownSync(CompactFileSchema)(compactSource);
+const defaultBenchmarkNote = "mlx 0.31.3";
+const fromTenths = (value: number | null): number | null => (value === null ? null : value / 10);
 const hardware: readonly HardwareTarget[] = compact.h.map((target) => ({
   id: target[0],
   label: target[0],
   minMemoryGb: target[1],
   gpuCount: target[2],
   unifiedMemory: target[3],
-  tested: target[4],
+  tested: true,
 }));
 
 const decodeBenchmark = (
@@ -229,13 +237,16 @@ const decodeBenchmark = (
 ): BenchmarkRecord => ({
   hardwareId: dictionaryValue(hardware, benchmark[0], "hardware").id,
   engine,
-  decodeTps: benchmark[1],
-  decodeTps32k: benchmark[2],
-  prefillTps: benchmark[3],
-  ttftMs: benchmark[4],
-  contextTokens: benchmark[5],
-  measuredAt: benchmark[6] === null ? null : dictionaryValue(compact.d, benchmark[6], "date"),
-  notes: benchmark[7] === null ? null : dictionaryValue(compact.b, benchmark[7], "benchmark note"),
+  decodeTps: fromTenths(benchmark[1]),
+  decodeTps32k: fromTenths(benchmark[2]),
+  prefillTps: fromTenths(benchmark[3]),
+  ttftMs: null,
+  contextTokens: dictionaryValue(compact.c, benchmark[4], "context token count"),
+  measuredAt: benchmark[5] === null ? null : dictionaryValue(compact.d, benchmark[5], "date"),
+  notes:
+    benchmark[6] === undefined
+      ? defaultBenchmarkNote
+      : dictionaryValue(compact.b, benchmark[6], "benchmark note"),
 });
 
 export const bundledModelRecommendationsSource: ModelRecommendationsFile = {
@@ -258,25 +269,35 @@ export const bundledModelRecommendationsSource: ModelRecommendationsFile = {
           ),
         ),
       ].join(" ");
+      const filesizeGb = model[5] / 10;
+      const benchmarks = model[10].map((benchmark) =>
+        decodeBenchmark(benchmark, commandTemplate.engine),
+      );
+      const expectedPrefill =
+        model[11] === null
+          ? null
+          : dictionaryValue(benchmarks, model[11], "expected prefill benchmark").prefillTps;
       return [
         hfId,
         {
           name: model[2] ?? model[1],
           quant: dictionaryValue(compact.q, model[3], "quantization"),
-          filesize: model[4],
-          filesizeGb: model[5],
+          filesize: model[4] ?? `${Math.round(filesizeGb)}gb`,
+          filesizeGb,
           hardware: dictionaryValue(compact.y, model[6], "hardware set").map((index) =>
             dictionaryValue(hardware, index, "hardware"),
           ),
           commands: { [commandTemplate.engine]: command },
           rank: model[9],
-          benchmarks: model[10].map((benchmark) =>
-            decodeBenchmark(benchmark, commandTemplate.engine),
-          ),
-          expectSpeed: { decodeTps: model[11], prefillTps: model[12], source: "measured" },
+          benchmarks,
+          expectSpeed: {
+            decodeTps: dictionaryValue(benchmarks, 0, "expected decode benchmark").decodeTps,
+            prefillTps: expectedPrefill,
+            source: "measured",
+          },
           params:
-            model[13] === null ? null : dictionaryValue(compact.p, model[13], "parameter count"),
-          notes: decodeNotes(model[14]),
+            model[12] === null ? null : dictionaryValue(compact.p, model[12], "parameter count"),
+          notes: decodeNotes(model[13]),
         },
       ];
     }),

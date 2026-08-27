@@ -5,7 +5,7 @@ import { browserHost } from "../browser-host/browser-host";
 import { listProjectsFromStore, resolveAllowedWorkspace } from "../projects-store";
 import { listArchivedSessionMetadata, setSessionArchived } from "../session-metadata-store";
 import { listSessions, loadSession } from "../sessions-store";
-import { errorMessage, jsonError } from "./helpers";
+import { decodeJsonBody, errorMessage, jsonError } from "./helpers";
 
 function parseRelativeSince(value: string | null): Date | null {
   if (!value) return null;
@@ -40,16 +40,10 @@ function archiveOptions(searchParams: URLSearchParams): ArchiveOptions {
   return options;
 }
 
-function positiveInteger(value: string | null): number | undefined {
+function integerAtLeast(value: string | null, minimum: number): number | undefined {
   if (value === null) return undefined;
   const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function nonNegativeInteger(value: string | null): number | undefined {
-  if (value === null) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : undefined;
 }
 
 function idsFrom(searchParams: URLSearchParams): string[] | undefined {
@@ -69,14 +63,14 @@ function existingWorkspace(value: string): string | Response {
   }
 }
 
-export async function handleSessionsList(request: Request): Promise<Response> {
+export async function list(request: Request): Promise<Response> {
   const searchParams = new URL(request.url).searchParams;
   const cwdParam = searchParams.get("cwd")?.trim() ?? "";
   if (!cwdParam) return jsonError("cwd is required");
   const cwd = existingWorkspace(cwdParam);
   if (cwd instanceof Response) return cwd;
   const limitValue = searchParams.get("limit");
-  const limit = positiveInteger(limitValue);
+  const limit = integerAtLeast(limitValue, 1);
   if (limitValue !== null && limit === undefined)
     return jsonError("limit must be a positive integer");
   const sinceValue = searchParams.get("since");
@@ -92,7 +86,7 @@ export async function handleSessionsList(request: Request): Promise<Response> {
   return Response.json({ sessions });
 }
 
-export async function handleAllSessions(request: Request): Promise<Response> {
+export async function listAll(request: Request): Promise<Response> {
   const searchParams = new URL(request.url).searchParams;
   const since = parseRelativeSince(searchParams.get("since")) ?? undefined;
   const archive = archiveOptions(searchParams);
@@ -156,15 +150,15 @@ function validSessionId(value: string): boolean {
   return /^[A-Za-z0-9._:-]{1,256}$/.test(value);
 }
 
-export async function handleSessionGet(request: Request, id: string): Promise<Response> {
+export async function get(request: Request, id: string): Promise<Response> {
   if (!validSessionId(id)) return jsonError("session id is invalid");
   const searchParams = new URL(request.url).searchParams;
   const cwdValue = searchParams.get("cwd")?.trim() ?? "";
   if (!cwdValue) return jsonError("cwd is required");
   const cwd = existingWorkspace(cwdValue);
   if (cwd instanceof Response) return cwd;
-  const tail = nonNegativeInteger(searchParams.get("tail"));
-  const before = nonNegativeInteger(searchParams.get("before"));
+  const tail = integerAtLeast(searchParams.get("tail"), 0);
+  const before = integerAtLeast(searchParams.get("before"), 0);
   const { events, cursor, meta } = await loadSession(cwd, id, { tail, before });
   return Response.json({ events, cursor, meta });
 }
@@ -205,10 +199,9 @@ async function resolveArchiveContext(
   return { cwd, summary };
 }
 
-export async function handleSessionPatch(request: Request, id: string): Promise<Response> {
+export async function patch(request: Request, id: string): Promise<Response> {
   if (!validSessionId(id)) return jsonError("session id is invalid");
-  const rawBody = await request.json().catch(() => null);
-  const body = Option.getOrNull(Schema.decodeUnknownOption(SessionPatchSchema)(rawBody));
+  const body = await decodeJsonBody(request, SessionPatchSchema);
   if (!body) return jsonError("archived boolean is required");
   const cwdValue = optionalString(body.cwd) ?? "";
   if (body.archived && !cwdValue) return jsonError("cwd is required to archive a session");
@@ -230,6 +223,6 @@ export async function handleSessionPatch(request: Request, id: string): Promise<
   }
 }
 
-export function handleSessionsDelete(): Response {
+export function remove(): Response {
   return jsonError("Session deletion is disabled. Archive sessions from the UI instead.", 405);
 }

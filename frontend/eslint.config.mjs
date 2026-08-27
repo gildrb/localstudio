@@ -1,6 +1,7 @@
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
+import stylex from "@stylexjs/eslint-plugin";
 
 const bannedReactEffectHookNames = [
   "use" + "Effect",
@@ -19,7 +20,11 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
+    plugins: { "@stylexjs": stylex },
     rules: {
+      "@stylexjs/no-conflicting-props": "error",
+      "@stylexjs/no-unused": "error",
+      "@stylexjs/valid-styles": "error",
       complexity: ["error", { max: 20 }],
       "max-depth": ["error", 4],
       "max-params": ["error", 5],

@@ -11,12 +11,6 @@ import { makeDockerLauncher } from "./launchers/docker";
 import type { Launcher } from "./launchers/launcher";
 import { makeComputeService, type ComputeService } from "./lifecycle";
 
-/**
- * Assembly point: telemetry + store + launchers wired into one ComputeService, plus
- * the one-active-model surface. This is the compute layer's entire footprint in
- * AppContext — there is no other state.
- */
-
 export interface Compute {
   readonly service: ComputeService;
   readonly telemetry: Telemetry;
@@ -26,7 +20,6 @@ export interface Compute {
 }
 
 const DOCKER_PROBE_TIMEOUT_MS = 5_000;
-/** Docker appearing or losing GPU passthrough mid-run is rare; refresh occasionally. */
 const DOCKER_PROBE_TTL_MS = 60_000;
 
 interface DockerStatus {

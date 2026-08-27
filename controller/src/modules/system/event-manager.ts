@@ -7,17 +7,13 @@ export interface EventData {
 }
 
 export class Event<Data extends object = object> {
-  public readonly type: string;
-  public readonly data: Data;
-  public readonly timestamp: string;
-  public readonly id: string;
+  public readonly timestamp = new Date().toISOString();
+  public readonly id = `${Date.now()}`;
 
-  public constructor(type: string, data: Data) {
-    this.type = type;
-    this.data = data;
-    this.timestamp = new Date().toISOString();
-    this.id = `${Date.now()}`;
-  }
+  public constructor(
+    public readonly type: string,
+    public readonly data: Data,
+  ) {}
 
   public toSse(): string {
     const payload = { data: this.data, timestamp: this.timestamp };
@@ -25,7 +21,7 @@ export class Event<Data extends object = object> {
   }
 }
 
-const abortEffect = (signal?: AbortSignal): Effect.Effect<void> =>
+export const abortSignalEffect = (signal?: AbortSignal): Effect.Effect<void> =>
   signal
     ? Effect.callback<void>((resume) => {
         if (signal.aborted) {
@@ -88,7 +84,7 @@ export class EventManager {
         this.releaseChannel(channel, entry),
       ).pipe(Effect.map((entry) => Stream.fromPubSub(entry.pubsub))),
     );
-    return Stream.scoped(stream).pipe(Stream.interruptWhen(abortEffect(signal)));
+    return Stream.scoped(stream).pipe(Stream.interruptWhen(abortSignalEffect(signal)));
   }
 
   public publish(event: Event, channel = "default"): Effect.Effect<void> {

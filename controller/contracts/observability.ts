@@ -84,7 +84,6 @@ export interface Metrics {
   current_power_watts?: number;
 }
 
-// VRAM calculation
 export interface VRAMCalculation {
   model_size_gb: number;
   context_memory_gb: number;

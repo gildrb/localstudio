@@ -73,34 +73,12 @@ const recipeMatchRank = (
   return 0;
 };
 
-/**
- * Determine whether a running process matches a given recipe.
- * Matching order:
- * 1) served_model_name (case-insensitive)
- * 2) normalized exact model path
- * 3) optional contains-style path match (route-specific)
- * 4) model path basename
- * @param recipe - Recipe to match against.
- * @param current - Current process info.
- * @param options - Matching options.
- * @returns True if the process matches the recipe.
- */
 export const isRecipeRunning = (
   recipe: Recipe,
   current: ProcessInfo,
   options: RecipeMatchOptions = {},
 ): boolean => recipeMatchRank(recipe, current, options) > 0;
 
-/**
- * Pick the single recipe that best explains the running process. Several
- * recipes can share a model path (e.g. three glm-5.2 recipes over one weights
- * directory), and with the contains-style fallback every one of them "runs"
- * whenever the shared path is loaded — so a boolean per recipe marks them all
- * active. This ranks the candidates (served_model_name equality, then exact
- * path equality, then the path-contains fallback, then basename) and returns
- * only the best; on a rank tie the first recipe in list order wins.
- * @returns The best-matching recipe, or null when nothing matches.
- */
 export const selectRunningRecipe = <R extends Recipe>(
   recipes: readonly R[],
   current: ProcessInfo,

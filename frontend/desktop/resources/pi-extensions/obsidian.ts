@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { constants, readFileSync } from "node:fs";
+import { mkdir, open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -20,6 +20,7 @@ const ConfigVaultSchema = Schema.Struct({
   open: Schema.optional(Schema.Boolean),
 });
 const ConfigSchema = Schema.Struct({ vaults: Schema.Record(Schema.String, ConfigVaultSchema) });
+const FsErrorSchema = Schema.Struct({ code: Schema.String });
 type Vault = typeof VaultSchema.Type;
 type NoteFile = { rel: string; abs: string; name: string; modified: string; bytes: number };
 type OpenVault = { vault: Vault; root: string };
@@ -93,7 +94,7 @@ async function openVault(vaults: Vault[], requested: string | undefined): Promis
   return { vault, root: await realpath(vault.path) };
 }
 
-function relativeNote(input: string): string {
+export function relativeNote(input: string): string {
   const trimmed = input.trim().replaceAll("\\", "/").replace(/^\/+/, "");
   const withExtension = trimmed.toLowerCase().endsWith(".md") ? trimmed : `${trimmed}.md`;
   const normalized = path.normalize(withExtension);
@@ -102,7 +103,7 @@ function relativeNote(input: string): string {
     !trimmed ||
     path.isAbsolute(normalized) ||
     segments.includes("..") ||
-    segments[0] === ".obsidian"
+    segments[0]?.toLowerCase() === ".obsidian"
   ) {
     throw new Error("Note path must stay inside the vault and outside .obsidian.");
   }
@@ -116,29 +117,97 @@ function ensureInside(root: string, target: string): void {
   }
 }
 
-async function existingNote(root: string, input: string): Promise<string> {
-  const target = await realpath(path.resolve(root, relativeNote(input)));
+type OpenNote = { handle: FileHandle; target: string; bytes: number };
+
+async function canonicalParent(root: string, target: string): Promise<string> {
   ensureInside(root, target);
-  const info = await stat(target);
-  if (!info.isFile() || info.size > MAX_NOTE_BYTES)
-    throw new Error("Note is missing or too large.");
+  const parent = await realpath(path.dirname(target));
+  ensureInside(root, parent);
+  return parent;
+}
+
+async function openNoteFile(root: string, target: string, flags: number): Promise<OpenNote> {
+  const parent = await canonicalParent(root, target);
+  const handle = await open(target, flags | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  try {
+    if ((await canonicalParent(root, target)) !== parent)
+      throw new Error("Note parent changed while opening it.");
+    const info = await handle.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.size > MAX_NOTE_BYTES)
+      throw new Error("Note is missing or too large.");
+    const canonical = await realpath(target);
+    ensureInside(root, canonical);
+    if (canonical !== target) throw new Error("Note is a symlink.");
+    const current = await stat(target);
+    if (current.dev !== info.dev || current.ino !== info.ino)
+      throw new Error("Note changed while opening it.");
+    return { handle, target, bytes: info.size };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function withNoteFile<T>(
+  root: string,
+  target: string,
+  flags: number,
+  operation: (opened: OpenNote) => Promise<T>,
+): Promise<T> {
+  const opened = await openNoteFile(root, target, flags);
+  try {
+    return await operation(opened);
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+function existingTarget(root: string, input: string): string {
+  const target = path.resolve(root, relativeNote(input));
+  ensureInside(root, target);
   return target;
 }
 
-async function listNotes(root: string): Promise<{ notes: NoteFile[]; truncated: boolean }> {
+export async function readNoteText(root: string, target: string): Promise<string> {
+  return withNoteFile(root, target, constants.O_RDONLY, async ({ handle }) => {
+    const buffer = Buffer.alloc(MAX_NOTE_BYTES + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > MAX_NOTE_BYTES) throw new Error("Note is missing or too large.");
+    return buffer.subarray(0, total).toString("utf8");
+  });
+}
+
+async function stableEntries(root: string, directory: string) {
+  const before = await realpath(directory);
+  ensureInside(root, before);
+  if (before !== directory) throw new Error("Vault directory changed or is a symlink.");
+  const entries = await readdir(before, { withFileTypes: true });
+  if ((await realpath(directory)) !== before)
+    throw new Error("Vault directory changed while listing it.");
+  return entries;
+}
+
+export async function listNotes(root: string): Promise<{ notes: NoteFile[]; truncated: boolean }> {
   const notes: NoteFile[] = [];
   const queue = [root];
   while (queue.length > 0 && notes.length < MAX_NOTES) {
     const directory = queue.shift();
     if (!directory) break;
-    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    const entries = await stableEntries(root, directory).catch(() => []);
     for (const entry of entries) {
-      if (entry.name === ".obsidian" || entry.isSymbolicLink()) continue;
+      if (entry.name.toLowerCase() === ".obsidian" || entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) queue.push(absolute);
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== ".md") continue;
-      const info = await stat(absolute).catch(() => null);
-      if (!info || info.size > MAX_NOTE_BYTES) continue;
+      const info = await withNoteFile(root, absolute, constants.O_RDONLY, ({ handle }) =>
+        handle.stat(),
+      ).catch(() => null);
+      if (!info) continue;
       notes.push({
         rel: path.relative(root, absolute),
         abs: absolute,
@@ -208,7 +277,7 @@ async function searchVault(
   const matches = [];
   for (const note of listed.notes) {
     if (normalizedFolder && !note.rel.toLowerCase().startsWith(normalizedFolder)) continue;
-    const text = await readFile(note.abs, "utf8");
+    const text = await readNoteText(opened.root, note.abs);
     const passage = excerpt(text, query);
     if (!note.name.toLowerCase().includes(query.toLowerCase()) && !passage) continue;
     matches.push({ path: note.rel, title: note.name, modified: note.modified, excerpt: passage });
@@ -232,8 +301,8 @@ async function readNote(
 ): Promise<Json> {
   const opened = await openVault(vaults, requestedVault);
   const note = await resolveNote(opened.root, requestedNote);
-  const target = await existingNote(opened.root, note.rel);
-  const parsed = frontmatter(await readFile(target, "utf8"));
+  const target = existingTarget(opened.root, note.rel);
+  const parsed = frontmatter(await readNoteText(opened.root, target));
   return decodeJson({
     vault: opened.vault.name,
     path: note.rel,
@@ -272,7 +341,7 @@ async function backlinks(
   const listed = await listNotes(opened.root);
   const matches = [];
   for (const note of listed.notes) {
-    const body = await readFile(note.abs, "utf8");
+    const body = await readNoteText(opened.root, note.abs);
     if (links(body).some((link) => link.toLowerCase() === target.name.toLowerCase())) {
       matches.push({
         path: note.rel,
@@ -289,6 +358,46 @@ async function backlinks(
   });
 }
 
+async function ensureDirectory(root: string, directory: string): Promise<void> {
+  ensureInside(root, directory);
+  if (directory === root) return;
+  await ensureDirectory(root, path.dirname(directory));
+  try {
+    await mkdir(directory);
+  } catch (error) {
+    const parsed = Schema.decodeUnknownOption(FsErrorSchema)(error);
+    if (parsed._tag === "None" || parsed.value.code !== "EEXIST") throw error;
+  }
+  const canonical = await realpath(directory);
+  ensureInside(root, canonical);
+  if (canonical !== directory) throw new Error("Note directory is a symlink.");
+}
+
+export async function createNoteFile(root: string, note: string, content: string): Promise<string> {
+  if (Buffer.byteLength(content) > MAX_NOTE_BYTES) throw new Error("Note is missing or too large.");
+  const relative = relativeNote(note);
+  const target = path.resolve(root, relative);
+  ensureInside(root, target);
+  await ensureDirectory(root, path.dirname(target));
+  await withNoteFile(
+    root,
+    target,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+    ({ handle }) => handle.writeFile(content, "utf8"),
+  );
+  return relative;
+}
+
+export async function appendNoteText(root: string, note: string, content: string): Promise<string> {
+  const target = existingTarget(root, note);
+  await withNoteFile(root, target, constants.O_WRONLY | constants.O_APPEND, ({ handle, bytes }) => {
+    if (bytes + Buffer.byteLength(content) > MAX_NOTE_BYTES)
+      throw new Error("Note is missing or too large.");
+    return handle.appendFile(content, "utf8");
+  });
+  return path.relative(root, target);
+}
+
 async function createNote(
   vaults: Vault[],
   requestedVault: string | undefined,
@@ -296,12 +405,7 @@ async function createNote(
   content: string,
 ): Promise<Json> {
   const opened = await openVault(vaults, requestedVault);
-  const relative = relativeNote(note);
-  const target = path.resolve(opened.root, relative);
-  ensureInside(opened.root, target);
-  await mkdir(path.dirname(target), { recursive: true });
-  ensureInside(opened.root, await realpath(path.dirname(target)));
-  await writeFile(target, content, { encoding: "utf8", flag: "wx" });
+  const relative = await createNoteFile(opened.root, note, content);
   return decodeJson({ vault: opened.vault.name, path: relative, created: true });
 }
 
@@ -312,13 +416,8 @@ async function appendNote(
   content: string,
 ): Promise<Json> {
   const opened = await openVault(vaults, requestedVault);
-  const target = await existingNote(opened.root, note);
-  await appendFile(target, content, "utf8");
-  return decodeJson({
-    vault: opened.vault.name,
-    path: path.relative(opened.root, target),
-    appended: true,
-  });
+  const relative = await appendNoteText(opened.root, note, content);
+  return decodeJson({ vault: opened.vault.name, path: relative, appended: true });
 }
 
 export default function registerObsidianExtension(pi: ExtensionAPI): void {

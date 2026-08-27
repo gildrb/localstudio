@@ -28,11 +28,14 @@ function requireTool(label, command, args, minimum) {
 }
 
 export function doctor() {
-  requireTool("Node.js", process.execPath, ["--version"], [22, 19, 0]);
-  requireTool("npm", "npm", ["--version"], [10, 0, 0]);
-  requireTool("Bun", "bun", ["--version"], [1, 3, 14]);
-  requireTool("Python", "python3", ["--version"], [3, 10, 0]);
-  requireTool("Git", "git", ["--version"], [2, 0, 0]);
+  for (const [label, command, minimum] of [
+    ["Node.js", process.execPath, [22, 19, 0]],
+    ["npm", "npm", [10, 0, 0]],
+    ["Bun", "bun", [1, 3, 14]],
+    ["Python", "python3", [3, 10, 0]],
+    ["Git", "git", [2, 0, 0]],
+  ])
+    requireTool(label, command, ["--version"], minimum);
   console.log("Toolchain check passed");
 }
 

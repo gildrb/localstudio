@@ -25,6 +25,7 @@ const PositiveIntegerSchema = PositiveNumberSchema.pipe(Schema.check(Schema.isIn
 const ModelDimensionSchema = Schema.Union([Schema.Number, Schema.NumberFromString]).pipe(
   Schema.check(Schema.isFinite(), Schema.isGreaterThan(0)),
 );
+const OptionalModelDimensionSchema = Schema.optionalKey(ModelDimensionSchema);
 const VramCalculatorBodySchema = Schema.Struct({
   model: Schema.String,
   context_length: PositiveNumberSchema,
@@ -32,19 +33,19 @@ const VramCalculatorBodySchema = Schema.Struct({
   kv_dtype: Schema.optionalKey(Schema.String),
 });
 const ModelConfigSchema = Schema.Struct({
-  num_hidden_layers: Schema.optionalKey(ModelDimensionSchema),
-  n_layer: Schema.optionalKey(ModelDimensionSchema),
-  num_layers: Schema.optionalKey(ModelDimensionSchema),
-  hidden_size: Schema.optionalKey(ModelDimensionSchema),
-  n_embd: Schema.optionalKey(ModelDimensionSchema),
-  d_model: Schema.optionalKey(ModelDimensionSchema),
-  dim: Schema.optionalKey(ModelDimensionSchema),
-  num_attention_heads: Schema.optionalKey(ModelDimensionSchema),
-  n_head: Schema.optionalKey(ModelDimensionSchema),
-  num_heads: Schema.optionalKey(ModelDimensionSchema),
-  num_key_value_heads: Schema.optionalKey(ModelDimensionSchema),
-  num_kv_heads: Schema.optionalKey(ModelDimensionSchema),
-  head_dim: Schema.optionalKey(ModelDimensionSchema),
+  num_hidden_layers: OptionalModelDimensionSchema,
+  n_layer: OptionalModelDimensionSchema,
+  num_layers: OptionalModelDimensionSchema,
+  hidden_size: OptionalModelDimensionSchema,
+  n_embd: OptionalModelDimensionSchema,
+  d_model: OptionalModelDimensionSchema,
+  dim: OptionalModelDimensionSchema,
+  num_attention_heads: OptionalModelDimensionSchema,
+  n_head: OptionalModelDimensionSchema,
+  num_heads: OptionalModelDimensionSchema,
+  num_key_value_heads: OptionalModelDimensionSchema,
+  num_kv_heads: OptionalModelDimensionSchema,
+  head_dim: OptionalModelDimensionSchema,
 });
 
 type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>;

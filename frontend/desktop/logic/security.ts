@@ -90,31 +90,13 @@ export function hardenWebContents(window: electron.BrowserWindow, appOrigin: str
   });
 }
 
-export function registerNavigationPolicy(appOrigin: string): void {
-  electron.app.on("web-contents-created", (_, contents: electron.WebContents) => {
-    contents.on("will-attach-webview", (_event, webPreferences, _params) => {
+export function registerNavigationPolicy(): void {
+  electron.app.on("web-contents-created", (_, contents) => {
+    contents.on("will-attach-webview", (_event, webPreferences) => {
       delete webPreferences.preload;
       webPreferences.nodeIntegration = false;
       webPreferences.contextIsolation = true;
       webPreferences.sandbox = true;
-    });
-
-    contents.on("will-navigate", (event) => {
-      // Guest WebContents (the embedded browser webview plus cross-origin
-      // iframes / OOPIFs) must be able to perform their own navigations.
-      // Keep the app shell origin-locked, but do not turn the Computer browser
-      // into a single-load preview.
-      if (
-        contents.getType() === "webview" ||
-        electron.BrowserWindow.fromWebContents(contents) == null
-      ) {
-        return;
-      }
-      const targetUrl = event.url;
-      const targetOrigin = safeOrigin(targetUrl);
-      if (!targetOrigin || targetOrigin !== appOrigin) {
-        event.preventDefault();
-      }
     });
   });
 }

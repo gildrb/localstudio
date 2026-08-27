@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -12,7 +12,7 @@ import { errorMessage, jsonError, requireAbsoluteCwd } from "@/app/api/_lib/rout
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const TerminalExecErrorSchema = Schema.Struct({
   stdout: Schema.optional(Schema.String),
@@ -20,6 +20,30 @@ const TerminalExecErrorSchema = Schema.Struct({
   code: Schema.optional(Schema.Number),
   message: Schema.optional(Schema.String),
 });
+
+function parseGitReviewCommand(command: string): string[] | null {
+  const commands = [
+    { prefix: "git restore --staged -- ", args: ["restore", "--staged", "--"] },
+    { prefix: "git restore -- ", args: ["restore", "--"] },
+    { prefix: "git add -- ", args: ["add", "--"] },
+  ];
+  const match = commands.find(({ prefix }) => command.startsWith(prefix));
+  if (!match) return null;
+  const encoded = command.slice(match.prefix.length);
+  if (!encoded.startsWith("'") || !encoded.endsWith("'")) return null;
+  const filePath = encoded.slice(1, -1).replaceAll(`'"'"'`, "'");
+  if (`'${filePath.replaceAll("'", `'"'"'`)}'` !== encoded) return null;
+  const normalized = path.normalize(filePath);
+  if (
+    !filePath ||
+    /[\0\r\n]/.test(filePath) ||
+    path.isAbsolute(filePath) ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  )
+    return null;
+  return [...match.args, normalized];
+}
 
 function assertTerminalCwd(
   request: NextRequest,
@@ -32,8 +56,6 @@ function assertTerminalCwd(
   } catch {
     return { error: jsonError("cwd not found", 404) };
   }
-  // Refuse to run shell commands rooted at the filesystem root or a system
-  // directory, even for an authenticated caller.
   try {
     assertWorkspaceRoot(cwd);
   } catch (err) {
@@ -55,8 +77,10 @@ export async function POST(request: NextRequest) {
   }
   const parsed = parseTerminalRunRequest(body);
   if (!parsed.ok) return jsonError(parsed.error);
+  const args = parseGitReviewCommand(parsed.value.command);
+  if (!args) return jsonError("Unsupported terminal command");
   try {
-    const { stdout, stderr } = await execAsync(parsed.value.command, {
+    const { stdout, stderr } = await execFileAsync("git", ["--literal-pathspecs", ...args], {
       cwd,
       maxBuffer: 2 * 1024 * 1024,
       timeout: 60_000,

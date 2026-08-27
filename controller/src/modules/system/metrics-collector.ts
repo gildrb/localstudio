@@ -14,6 +14,9 @@ import {
   emptyPeaks,
   firstMetric,
   positiveOrUndefined,
+  lifetimeMetrics,
+  roundTenth,
+  summarizeGpus,
   type SessionPeaks,
 } from "./metrics-peaks";
 import type { EventData } from "./event-manager";
@@ -86,14 +89,9 @@ const calculateAverageTtft = (
 
 const createBaseMetrics = (
   lifetimeData: Record<string, number>,
-  totalPowerWatts: number,
+  powerWatts: number,
 ): EventData => ({
-  lifetime_prompt_tokens: lifetimeData["prompt_tokens_total"] ?? 0,
-  lifetime_completion_tokens: lifetimeData["completion_tokens_total"] ?? 0,
-  lifetime_requests: lifetimeData["requests_total"] ?? 0,
-  lifetime_energy_kwh: (lifetimeData["energy_wh"] ?? 0) / 1000,
-  lifetime_uptime_hours: (lifetimeData["uptime_seconds"] ?? 0) / 3600,
-  current_power_watts: totalPowerWatts,
+  ...lifetimeMetrics(lifetimeData, powerWatts),
   kwh_per_million_input: lifetimeData["prompt_tokens_total"]
     ? (lifetimeData["energy_wh"] ?? 0) / 1000 / (lifetimeData["prompt_tokens_total"] / 1_000_000)
     : null,
@@ -119,18 +117,18 @@ const createUsageMetrics = (
     total_tokens: positiveOrUndefined(totals?.total_tokens),
     total_requests: positiveOrUndefined(totals?.total_requests),
     latency_avg: positiveOrUndefined(usageAggregate?.latency?.avg_ms),
-    avg_ttft_ms: values.avgTtftMs > 0 ? Math.round(values.avgTtftMs * 10) / 10 : (usageTtft ?? 0),
+    avg_ttft_ms: values.avgTtftMs > 0 ? roundTenth(values.avgTtftMs) : (usageTtft ?? 0),
   };
 };
 
 const createSessionMetrics = (sessionPeaks: SessionPeaks): EventData => ({
-  session_peak_prompt_throughput: Math.round(sessionPeaks.prompt_throughput * 10) / 10,
-  session_peak_generation_throughput: Math.round(sessionPeaks.generation_throughput * 10) / 10,
-  session_peak_ttft_ms: Math.round(sessionPeaks.ttft_ms * 10) / 10,
+  session_peak_prompt_throughput: roundTenth(sessionPeaks.prompt_throughput),
+  session_peak_generation_throughput: roundTenth(sessionPeaks.generation_throughput),
+  session_peak_ttft_ms: roundTenth(sessionPeaks.ttft_ms),
   session_peak_kv_cache_usage: sessionPeaks.kv_cache_usage,
   session_peak_running_requests: sessionPeaks.running_requests,
   session_peak_power_watts: Math.round(sessionPeaks.power_watts),
-  session_peak_vram_used_gb: Math.round(sessionPeaks.vram_used_gb * 10) / 10,
+  session_peak_vram_used_gb: roundTenth(sessionPeaks.vram_used_gb),
 });
 
 export const startMetricsCollector = (context: AppContext): Effect.Effect<never> => {
@@ -155,8 +153,8 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
     const current = yield* context.compute.model.findInferenceProcess();
     const gpuList = yield* getGpuInfo();
     const lifetimeStore = context.stores.lifetimeMetricsStore;
-    const totalPowerWatts = gpuList.reduce((sum, gpu) => sum + gpu.power_draw, 0);
-    yield* lifetimeStore.incrementEffect("energy_wh", totalPowerWatts * (5 / 3600));
+    const { powerWatts, powerLimitWatts, vramUsedGb, vramCapacityGb } = summarizeGpus(gpuList);
+    yield* lifetimeStore.incrementEffect("energy_wh", powerWatts * (5 / 3600));
     yield* lifetimeStore.incrementEffect(
       "uptime_seconds",
       METRICS_LIFETIME_UPTIME_INCREMENT_SECONDS,
@@ -171,10 +169,10 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
     return {
       current,
       lifetimeStore,
-      totalPowerWatts,
-      totalVramUsedGb: gpuList.reduce((sum, gpu) => sum + gpu.memory_used_mb / 1024, 0),
-      totalVramCapacityGb: gpuList.reduce((sum, gpu) => sum + gpu.memory_total_mb / 1024, 0),
-      totalPowerLimitWatts: gpuList.reduce((sum, gpu) => sum + gpu.power_limit, 0),
+      powerWatts,
+      vramUsedGb,
+      vramCapacityGb,
+      powerLimitWatts,
     };
   });
 
@@ -188,7 +186,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
       const lifetimeData = yield* snapshot.lifetimeStore.getAllEffect();
       return {
         ...snapshot,
-        baseMetrics: createBaseMetrics(lifetimeData, snapshot.totalPowerWatts),
+        baseMetrics: createBaseMetrics(lifetimeData, snapshot.powerWatts),
       };
     });
 
@@ -265,16 +263,16 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
 
   const updateSessionPeaks = (
     values: EngineValues,
-    totalPowerWatts: number,
-    totalVramUsedGb: number,
+    powerWatts: number,
+    vramUsedGb: number,
   ): void => {
     bumpPeak(sessionPeaks, "prompt_throughput", values.promptThroughput);
     bumpPeak(sessionPeaks, "generation_throughput", values.generationThroughput);
     bumpBestLower(sessionPeaks, "ttft_ms", values.avgTtftMs);
     bumpPeak(sessionPeaks, "kv_cache_usage", values.kvCacheUsage);
     bumpPeak(sessionPeaks, "running_requests", values.runningRequests);
-    bumpPeak(sessionPeaks, "power_watts", totalPowerWatts);
-    bumpPeak(sessionPeaks, "vram_used_gb", totalVramUsedGb);
+    bumpPeak(sessionPeaks, "power_watts", powerWatts);
+    bumpPeak(sessionPeaks, "vram_used_gb", vramUsedGb);
   };
 
   type RunningMetricData = {
@@ -314,38 +312,30 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
     });
 
   const createStoredPeakMetrics = (data: RunningMetricData): EventData => {
-    const sessionPeak = data.sessionPeak
-      ? {
-          session_peak_prefill_tps: data.sessionPeak.peak_prefill_tps,
-          session_peak_generation_tps: data.sessionPeak.peak_generation_tps,
-          session_peak_best_ttft_ms: data.sessionPeak.best_ttft_ms,
-        }
-      : {
-          session_peak_prefill_tps: null,
-          session_peak_generation_tps: null,
-          session_peak_best_ttft_ms: null,
-        };
-    const bestSessionPeak = data.bestSessionPeak
-      ? {
-          best_session_peak_id: data.bestSessionPeak.session_id,
-          best_session_prefill_tps: data.bestSessionPeak.peak_prefill_tps,
-          best_session_generation_tps: data.bestSessionPeak.peak_generation_tps,
-          best_session_ttft_ms: data.bestSessionPeak.best_ttft_ms,
-        }
-      : {
-          best_session_peak_id: null,
-          best_session_prefill_tps: null,
-          best_session_generation_tps: null,
-          best_session_ttft_ms: null,
-        };
-    const lifetimePeak = data.peak
-      ? {
-          peak_prefill_tps: data.peak.prefill_tps,
-          peak_generation_tps: data.peak.generation_tps,
-          peak_ttft_ms: data.peak.ttft_ms,
-        }
-      : { peak_prefill_tps: null, peak_generation_tps: null, peak_ttft_ms: null };
-    return { ...sessionPeak, ...bestSessionPeak, ...lifetimePeak };
+    const peak = data.peak ?? { prefill_tps: null, generation_tps: null, ttft_ms: null };
+    const session = data.sessionPeak ?? {
+      peak_prefill_tps: null,
+      peak_generation_tps: null,
+      best_ttft_ms: null,
+    };
+    const best = data.bestSessionPeak ?? {
+      session_id: null,
+      peak_prefill_tps: null,
+      peak_generation_tps: null,
+      best_ttft_ms: null,
+    };
+    return {
+      session_peak_prefill_tps: session.peak_prefill_tps,
+      session_peak_generation_tps: session.peak_generation_tps,
+      session_peak_best_ttft_ms: session.best_ttft_ms,
+      best_session_peak_id: best.session_id,
+      best_session_prefill_tps: best.peak_prefill_tps,
+      best_session_generation_tps: best.peak_generation_tps,
+      best_session_ttft_ms: best.best_ttft_ms,
+      peak_prefill_tps: peak.prefill_tps,
+      peak_generation_tps: peak.generation_tps,
+      peak_ttft_ms: peak.ttft_ms,
+    };
   };
 
   const createRunningMetrics = (
@@ -366,11 +356,11 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
     running_requests: values.runningRequests,
     pending_requests: values.pendingRequests,
     kv_cache_usage: values.kvCacheUsage,
-    prompt_throughput: Math.round(values.promptThroughput * 10) / 10,
-    generation_throughput: Math.round(values.generationThroughput * 10) / 10,
-    vram_used_gb: Math.round(snapshot.totalVramUsedGb * 10) / 10,
-    vram_capacity_gb: Math.round(snapshot.totalVramCapacityGb * 10) / 10,
-    power_limit_watts: Math.round(snapshot.totalPowerLimitWatts),
+    prompt_throughput: roundTenth(values.promptThroughput),
+    generation_throughput: roundTenth(values.generationThroughput),
+    vram_used_gb: roundTenth(snapshot.vramUsedGb),
+    vram_capacity_gb: roundTenth(snapshot.vramCapacityGb),
+    power_limit_watts: Math.round(snapshot.powerLimitWatts),
     session_peak_id: sessionId,
   });
 
@@ -383,7 +373,7 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
         current.served_model_name ?? current.model_path?.split("/").pop() ?? "unknown";
       const session = ensureSession(modelId);
       const values = yield* collectEngineValues(current, modelId);
-      updateSessionPeaks(values, snapshot.totalPowerWatts, snapshot.totalVramUsedGb);
+      updateSessionPeaks(values, snapshot.powerWatts, snapshot.vramUsedGb);
       const data = yield* collectRunningMetricData(session.peakId, modelId);
       yield* context.eventManager.publishMetrics(
         createRunningMetrics(snapshot, current, modelId, session.peakId, values, data),
@@ -393,18 +383,18 @@ export const startMetricsCollector = (context: AppContext): Effect.Effect<never>
   const collectIdle = (snapshot: SystemSnapshot): Effect.Effect<void, unknown> => {
     metricsSession = null;
     sessionPeaks = emptyPeaks();
-    bumpPeak(sessionPeaks, "power_watts", snapshot.totalPowerWatts);
-    bumpPeak(sessionPeaks, "vram_used_gb", snapshot.totalVramUsedGb);
+    bumpPeak(sessionPeaks, "power_watts", snapshot.powerWatts);
+    bumpPeak(sessionPeaks, "vram_used_gb", snapshot.vramUsedGb);
     return context.eventManager.publishMetrics({
       ...snapshot.baseMetrics,
       model_id: null,
       model_path: null,
       served_model_name: null,
-      vram_used_gb: Math.round(snapshot.totalVramUsedGb * 10) / 10,
-      vram_capacity_gb: Math.round(snapshot.totalVramCapacityGb * 10) / 10,
-      power_limit_watts: Math.round(snapshot.totalPowerLimitWatts),
+      vram_used_gb: roundTenth(snapshot.vramUsedGb),
+      vram_capacity_gb: roundTenth(snapshot.vramCapacityGb),
+      power_limit_watts: Math.round(snapshot.powerLimitWatts),
       session_peak_power_watts: Math.round(sessionPeaks.power_watts),
-      session_peak_vram_used_gb: Math.round(sessionPeaks.vram_used_gb * 10) / 10,
+      session_peak_vram_used_gb: roundTenth(sessionPeaks.vram_used_gb),
     });
   };
 

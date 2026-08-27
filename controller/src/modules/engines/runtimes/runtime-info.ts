@@ -16,12 +16,6 @@ import { resolveNvidiaSmiBinary } from "../../system/platform/smi-tools";
 import type { HostProfile } from "../../compute/contracts";
 import { getRuntimeTargets, runtimeTargetToBackendInfo } from "./runtime-targets";
 
-/**
- * Host runtime facts for /status and /compat: platform kind, GPU monitoring,
- * CUDA driver, and the per-engine docker-image state. Docker-only means there
- * are no python environments to probe — torch build info is gone with them.
- */
-
 const SYSTEM_RUNTIME_CACHE_TTL_MS = 30_000;
 let systemRuntimeCache: { expiresAt: number; value: SystemRuntimeInfo } | null = null;
 

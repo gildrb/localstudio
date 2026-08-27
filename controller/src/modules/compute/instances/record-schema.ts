@@ -2,13 +2,6 @@ import { Schema } from "effect";
 import { ENGINE_IDS } from "../contracts";
 const HandleReferenceSchema = Schema.Union([
   Schema.Struct({
-    kind: Schema.Literal("process"),
-    pid: Schema.Number,
-    processGroupId: Schema.NullOr(Schema.Number),
-    sessionId: Schema.NullOr(Schema.Number),
-    startToken: Schema.NullOr(Schema.String),
-  }),
-  Schema.Struct({
     kind: Schema.Literal("docker"),
     containerId: Schema.String,
     daemonId: Schema.String,
@@ -23,7 +16,6 @@ const HandleReferenceSchema = Schema.Union([
     executablePath: Schema.String,
     executableToken: Schema.String,
   }),
-  Schema.Struct({ kind: Schema.Literal("remote"), nodeId: Schema.String, name: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("pinned"), holder: Schema.String }),
 ]);
 const InstanceRecordSchema = Schema.Struct({

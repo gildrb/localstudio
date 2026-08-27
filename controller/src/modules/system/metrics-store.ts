@@ -208,24 +208,18 @@ export class PeakMetricsStore {
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           model_id = excluded.model_id,
-          peak_prefill_tps = CASE
-            WHEN excluded.peak_prefill_tps IS NULL THEN peak_metric_sessions.peak_prefill_tps
-            WHEN peak_metric_sessions.peak_prefill_tps IS NULL THEN excluded.peak_prefill_tps
-            WHEN excluded.peak_prefill_tps > peak_metric_sessions.peak_prefill_tps THEN excluded.peak_prefill_tps
-            ELSE peak_metric_sessions.peak_prefill_tps
-          END,
-          peak_generation_tps = CASE
-            WHEN excluded.peak_generation_tps IS NULL THEN peak_metric_sessions.peak_generation_tps
-            WHEN peak_metric_sessions.peak_generation_tps IS NULL THEN excluded.peak_generation_tps
-            WHEN excluded.peak_generation_tps > peak_metric_sessions.peak_generation_tps THEN excluded.peak_generation_tps
-            ELSE peak_metric_sessions.peak_generation_tps
-          END,
-          best_ttft_ms = CASE
-            WHEN excluded.best_ttft_ms IS NULL THEN peak_metric_sessions.best_ttft_ms
-            WHEN peak_metric_sessions.best_ttft_ms IS NULL THEN excluded.best_ttft_ms
-            WHEN excluded.best_ttft_ms < peak_metric_sessions.best_ttft_ms THEN excluded.best_ttft_ms
-            ELSE peak_metric_sessions.best_ttft_ms
-          END,
+          peak_prefill_tps = MAX(
+            COALESCE(excluded.peak_prefill_tps, peak_metric_sessions.peak_prefill_tps),
+            COALESCE(peak_metric_sessions.peak_prefill_tps, excluded.peak_prefill_tps)
+          ),
+          peak_generation_tps = MAX(
+            COALESCE(excluded.peak_generation_tps, peak_metric_sessions.peak_generation_tps),
+            COALESCE(peak_metric_sessions.peak_generation_tps, excluded.peak_generation_tps)
+          ),
+          best_ttft_ms = MIN(
+            COALESCE(excluded.best_ttft_ms, peak_metric_sessions.best_ttft_ms),
+            COALESCE(peak_metric_sessions.best_ttft_ms, excluded.best_ttft_ms)
+          ),
           updated_at = CURRENT_TIMESTAMP
       `,
       )
@@ -346,10 +340,6 @@ export class LifetimeMetricsStore {
     return row?.value ?? 0;
   }
 
-  public getEffect(key: string): Effect.Effect<number, RepositoryError> {
-    return repositoryEffect("lifetime-metrics.get", () => this.get(key));
-  }
-
   public getAll(): Record<string, number> {
     const rows = this.db
       .query<{ key: string; value: number }, []>("SELECT key, value FROM lifetime_metrics")
@@ -369,10 +359,6 @@ export class LifetimeMetricsStore {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
       )
       .run(key, value);
-  }
-
-  public setEffect(key: string, value: number): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("lifetime-metrics.set", () => this.set(key, value));
   }
 
   public increment(key: string, delta: number): number {
@@ -403,10 +389,6 @@ export class LifetimeMetricsStore {
     );
   }
 
-  public addEnergy(wattHours: number): Effect.Effect<void, RepositoryError> {
-    return this.incrementEffect("energy_wh", wattHours).pipe(Effect.asVoid);
-  }
-
   public addTokens(tokens: number): Effect.Effect<void, RepositoryError> {
     return this.incrementEffect("tokens_total", tokens).pipe(Effect.asVoid);
   }
@@ -417,10 +399,6 @@ export class LifetimeMetricsStore {
 
   public addCompletionTokens(tokens: number): Effect.Effect<void, RepositoryError> {
     return this.incrementEffect("completion_tokens_total", tokens).pipe(Effect.asVoid);
-  }
-
-  public addUptime(seconds: number): Effect.Effect<void, RepositoryError> {
-    return this.incrementEffect("uptime_seconds", seconds).pipe(Effect.asVoid);
   }
 
   public addRequests(count = 1): Effect.Effect<void, RepositoryError> {

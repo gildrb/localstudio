@@ -1,9 +1,14 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  resolveContainedFilePath,
+  withRegularFile,
+  resolveContainedPath,
+} from "@/features/agent/fs-store";
 import type {
   GitAction,
   GitBranch,
@@ -26,14 +31,14 @@ export function configuredGitRoots(): string[] {
 export function resolveGitCwd(input: string, roots = configuredGitRoots()): string | null {
   if (!path.isAbsolute(input)) return null;
   const candidate = path.resolve(input);
-  return roots.some((root) => {
-    const relative = path.relative(root, candidate);
-    return (
-      relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
-    );
-  })
-    ? candidate
-    : null;
+  for (const root of roots) {
+    try {
+      return resolveContainedPath(root, candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 export function assertGitCwd(
@@ -49,7 +54,7 @@ export function assertGitCwd(
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+  const { stdout } = await execFileAsync("git", ["--literal-pathspecs", ...args], {
     cwd,
     env: cleanGitEnv(),
     maxBuffer: 12 * 1024 * 1024,
@@ -210,16 +215,15 @@ export async function listWorktrees(cwd: string): Promise<GitWorktree[]> {
 function assertWorktreePath(input: string): string {
   const clean = input.trim();
   if (!clean || !path.isAbsolute(clean)) throw new Error("Invalid worktree path: must be absolute");
-  const roots = configuredGitRoots();
   const candidate = path.resolve(clean);
-  const within = roots.some((root) => {
-    const relative = path.relative(root, candidate);
-    return (
-      relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
-    );
-  });
-  if (!within) throw new Error("Invalid worktree path: outside allowed roots");
-  return candidate;
+  for (const root of configuredGitRoots()) {
+    try {
+      return resolveContainedPath(root, candidate, true);
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("Invalid worktree path: outside allowed roots");
 }
 
 function emptyGitState(isRepo: boolean): GitState {
@@ -287,6 +291,17 @@ export function numstatStats(numstat: string): GitDiffStats {
 const MAX_UNTRACKED_LINES_PER_FILE = 1000;
 const MAX_UNTRACKED_DIFF_BYTES = 1_500_000;
 
+async function readUtf8AtMost(file: FileHandle, maxBytes: number): Promise<string | null> {
+  const buffer = Buffer.alloc(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return offset > maxBytes ? null : buffer.subarray(0, offset).toString("utf8");
+}
+
 export interface UntrackedFileDiffBlock {
   block: string;
   additions: number;
@@ -327,15 +342,28 @@ async function untrackedFileDiffs(
       omitted += 1;
       continue;
     }
-    let contents: string;
+    let contents: string | null;
     try {
-      contents = await readFile(absolutePath, "utf8");
+      const target = resolveContainedFilePath(cwd, absolutePath);
+      const remaining = MAX_UNTRACKED_DIFF_BYTES - bytes;
+      contents = await withRegularFile(target, constants.O_RDONLY, ({ file, stats }) =>
+        stats.size > remaining ? Promise.resolve(null) : readUtf8AtMost(file, remaining),
+      );
     } catch {
       continue;
     }
+    if (contents === null) {
+      omitted += 1;
+      continue;
+    }
     const { block, additions: fileAdditions } = buildUntrackedFileDiffBlock(file, contents);
+    const blockBytes = Buffer.byteLength(block);
+    if (blockBytes > MAX_UNTRACKED_DIFF_BYTES - bytes) {
+      omitted += 1;
+      continue;
+    }
     additions += fileAdditions;
-    bytes += block.length;
+    bytes += blockBytes;
     blocks.push(block);
   }
   if (omitted > 0) {

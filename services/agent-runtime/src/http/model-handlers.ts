@@ -1,8 +1,5 @@
 import { Option, Schema } from "effect";
-import {
-  refreshPiModels,
-  type PiControllerModelsRequest,
-} from "../pi-runtime-models";
+import { refreshPiModels, type PiControllerModelsRequest } from "../pi-runtime-models";
 import { errorMessage, jsonError } from "./helpers";
 
 const ControllerCandidateSchema = Schema.Struct({
@@ -36,7 +33,7 @@ function parseControllers(candidates: ControllerCandidates): PiControllerModelsR
   });
 }
 
-export async function handleAgentModels(request?: Request): Promise<Response> {
+export async function models(request?: Request): Promise<Response> {
   try {
     const rawBody = request ? await request.json().catch(() => ({})) : {};
     const body = Option.getOrNull(Schema.decodeUnknownOption(AgentModelsRequestSchema)(rawBody));

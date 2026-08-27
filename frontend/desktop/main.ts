@@ -8,14 +8,14 @@ import {
   ipcMain,
   shell,
   type BrowserWindow,
+  type IpcMainInvokeEvent,
 } from "electron";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { DesktopAppState } from "./types";
 import { DESKTOP_CONFIG } from "./configs";
 import { writeJsonAtomic } from "./helpers/fs-json";
 import { log } from "./helpers/logger";
-import { isHttpUrl } from "./helpers/url";
 import { installApplicationMenu } from "./logic/app-menu";
 import { createMainWindow } from "./logic/window-manager";
 import { registerNavigationPolicy } from "./logic/security";
@@ -25,16 +25,14 @@ import {
   shouldReloadAfterFrontendRestart,
 } from "./logic/frontend-restart";
 import { getUpdateState, initializeAutoUpdates, startUpdate } from "./logic/update-manager";
-import { addProject, listProjectsWithMeta, removeProject } from "./logic/projects-store";
-import { deployController } from "./logic/controller-deploy";
+import { createProjectsStore } from "./logic/projects-store-core";
+import { decodeControllerDeployOptions, deployController } from "./logic/controller-deploy";
 import {
   getKittylitterPairingJson,
   normalizeKittylitterPairingJson,
 } from "./logic/kittylitter-pairing";
 import {
-  hideQuickPanel,
-  resetQuickPanel,
-  resizeQuickPanelToHome,
+  dismissQuickPanel,
   resizeQuickPanelToThread,
   toggleQuickPanel,
 } from "./logic/quick-panel-window";
@@ -55,10 +53,43 @@ const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
     Schema.Record(Schema.String, JsonSchema),
   ]),
 );
-const SessionPrefsSchema = Schema.Record(Schema.String, JsonSchema);
+const SessionPreferenceSchema = Schema.Struct({
+  title: Schema.optional(Schema.String.check(Schema.isMaxLength(10_000))),
+  pinned: Schema.optional(Schema.Boolean),
+  hidden: Schema.optional(Schema.Boolean),
+});
+const SessionPrefsSchema = Schema.Record(
+  Schema.String.check(Schema.isMaxLength(500)),
+  SessionPreferenceSchema,
+).check(
+  Schema.makeFilter(
+    (value) =>
+      Object.keys(value).length <= 10_000 &&
+      Buffer.byteLength(JSON.stringify(value), "utf8") <= 1_000_000,
+    { expected: "at most 10,000 session preferences and 1 MB" },
+  ),
+);
+const UiPreferencesSchema = Schema.Record(
+  Schema.String.check(Schema.isMaxLength(500)),
+  Schema.String.check(Schema.isMaxLength(100_000)),
+).check(
+  Schema.makeFilter((value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= 1_000_000, {
+    expected: "at most 1 MB of UI preferences",
+  }),
+);
 const decodeStringOption = Schema.decodeUnknownOption(Schema.String);
-const decodeSessionPrefsOption = Schema.decodeUnknownOption(SessionPrefsSchema);
-const isString = Schema.is(Schema.String);
+const decodeSessionPrefsOption = Schema.decodeUnknownOption(SessionPrefsSchema, {
+  onExcessProperty: "error",
+});
+const decodeUiPreferencesOption = Schema.decodeUnknownOption(UiPreferencesSchema);
+const PREFERENCES_FILE_MAX_BYTES = 1_000_001;
+const stringValue = (value: IpcValue | undefined): string | undefined =>
+  Option.getOrUndefined(decodeStringOption(value));
+const projects = createProjectsStore({
+  projectsFilePath: () => path.join(app.getPath("userData"), "projects.json"),
+  chatsProjectId: "chats",
+  emptyPathMessage: "Project path is required",
+});
 
 let appState: DesktopAppState = "starting";
 let mainWindow: BrowserWindow | null = null;
@@ -82,8 +113,6 @@ const RESTART_BACKOFF_WINDOW_MS = 60_000;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Read the latest app state without control-flow narrowing so it can be
-// re-checked after an `await` (e.g. shutdown started during restart backoff).
 function isAppStopping(): boolean {
   return appState === "stopping";
 }
@@ -99,15 +128,9 @@ async function processMemorySummary(): Promise<string> {
 async function bootstrap(): Promise<void> {
   if (!frontendServer) {
     frontendServer = await startFrontendServer({ onExit: handleFrontendServerExit });
-    registerNavigationPolicy(new URL(frontendServer.runtime.url).origin);
     startFrontendHealthMonitor();
   }
-  if (!mainWindow) {
-    mainWindow = createMainWindow(frontendServer.runtime.url);
-    mainWindow.on("closed", () => {
-      mainWindow = null;
-    });
-  }
+  if (!mainWindow) openMainWindow(frontendServer.runtime.url);
 
   appState = "ready";
   log.info(
@@ -123,8 +146,18 @@ function stopFrontendHealthMonitor(): void {
 }
 
 function currentRendererUrl(): string | undefined {
-  if (!mainWindow || mainWindow.isDestroyed()) return undefined;
-  return mainWindow.webContents.getURL() || undefined;
+  return mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow.webContents.getURL() || undefined
+    : undefined;
+}
+
+function openMainWindow(url: string): BrowserWindow {
+  const window = createMainWindow(url);
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  return window;
 }
 
 function startFrontendHealthMonitor(): void {
@@ -141,8 +174,6 @@ async function checkFrontendHealth(): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
   try {
-    // Any HTTP answer means the Node server is alive and serving; only a
-    // transport-level failure (process dead/hung) rejects and counts as unhealthy.
     await fetch(`${frontendServer.runtime.url}/api/desktop-health`, {
       redirect: "manual",
       signal: controller.signal,
@@ -219,10 +250,6 @@ async function restartFrontendServer(
       port,
       onExit: handleFrontendServerExit,
     });
-    // Shutdown may have begun during the fork. If so, shutdown() already cleared
-    // the health monitor and no-op'd the (mid-restart undefined) server stop —
-    // so tear this just-started server down instead of re-arming the monitor and
-    // resurrecting a server the app is trying to quit.
     if (isAppStopping()) {
       await stopFrontendServer(started).catch(() => undefined);
       return;
@@ -236,10 +263,7 @@ async function restartFrontendServer(
         await mainWindow.loadURL(resolveFrontendRestartUrl(nextUrl, rendererUrl));
       }
     } else {
-      mainWindow = createMainWindow(nextUrl);
-      mainWindow.on("closed", () => {
-        mainWindow = null;
-      });
+      openMainWindow(nextUrl);
     }
     appState = "ready";
     log.info(`Embedded frontend restarted (mode=${frontendServer.runtime.mode}, url=${nextUrl})`);
@@ -252,18 +276,12 @@ async function restartFrontendServer(
   }
 }
 
-// Resolve a renderer-supplied file reference to a real path inside the user's
-// home tree, or null. Assistant output cites files the way people write them —
-// repo-relative, "services/agent-runtime/src/foo.ts". Passing that straight to
-// realpath resolves it against the MAIN PROCESS cwd, which is the app bundle,
-// so it throws; try it as given, then against each known project root.
 function resolveHomeConfinedPath(target: IpcValue): string | null {
-  const decoded = decodeStringOption(target);
-  if (Option.isNone(decoded) || !decoded.value.trim()) return null;
-  const raw = decoded.value.trim();
+  const raw = stringValue(target)?.trim();
+  if (!raw) return null;
   const candidates = [raw];
   if (!path.isAbsolute(raw) && !raw.startsWith("~")) {
-    for (const project of listProjectsWithMeta()) {
+    for (const project of projects.listProjects()) {
       if (project.path) candidates.push(path.join(project.path, raw));
     }
   }
@@ -275,8 +293,6 @@ function resolveHomeConfinedPath(target: IpcValue): string | null {
     } catch {
       continue;
     }
-    // Confined to the user's home tree, so a crafted markdown link cannot point
-    // the renderer at /etc or a mounted disk.
     const relative = path.relative(home, resolved);
     if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
     return resolved;
@@ -284,56 +300,79 @@ function resolveHomeConfinedPath(target: IpcValue): string | null {
   return null;
 }
 
-function registerIpcHandlers(): void {
-  ipcMain.handle("desktop:get-runtime", async () => ({
-    platform: process.platform,
-    appVersion: app.getVersion(),
-    packaged: app.isPackaged,
-    releaseChannel: isDevChannelBuild ? "dev" : "stable",
-    chromeVersion: process.versions.chrome,
-    electronVersion: process.versions.electron,
-  }));
+function authorizeIpc(event: IpcMainInvokeEvent, mainOnly = false): void {
+  const frame = event.senderFrame;
+  const appOrigin = frontendServer?.runtime.url;
+  let frameOrigin: string | undefined;
+  try {
+    frameOrigin = frame ? new URL(frame.url).origin : undefined;
+  } catch {}
+  if (
+    !frame ||
+    frame !== event.sender.mainFrame ||
+    !appOrigin ||
+    frameOrigin !== new URL(appOrigin).origin ||
+    (mainOnly && event.sender !== mainWindow?.webContents)
+  ) {
+    throw new Error("Unauthorized desktop IPC sender");
+  }
+}
 
-  ipcMain.handle("desktop:open-external", async (_, url: string) => {
-    if (!isHttpUrl(url)) return false;
-    await shell.openExternal(url);
-    return true;
+function registerIpcHandlers(): void {
+  ipcMain.handle("desktop:get-runtime", async (event) => {
+    authorizeIpc(event);
+    return {
+      platform: process.platform,
+      appVersion: app.getVersion(),
+      packaged: app.isPackaged,
+      releaseChannel: isDevChannelBuild ? "dev" : "stable",
+      chromeVersion: process.versions.chrome,
+      electronVersion: process.versions.electron,
+    };
   });
 
-  // Reveal a file the assistant referenced in the OS file manager. Confined to
-  // the user's home tree (the same default as the runtime's WORKSPACE_ROOTS) so
-  // a crafted markdown link cannot point the renderer at /etc or a mounted disk.
-  ipcMain.handle("desktop:reveal-path", async (_, target: IpcValue) => {
+  ipcMain.handle("desktop:reveal-path", async (event, target: IpcValue) => {
+    authorizeIpc(event, true);
     const resolved = resolveHomeConfinedPath(target);
     if (!resolved) return false;
     shell.showItemInFolder(resolved);
     return true;
   });
 
-  // Hand a file to its default application — the only way to view formats the
-  // Files panel cannot render (PDFs, archives, media). Same home confinement.
-  ipcMain.handle("desktop:open-path", async (_, target: IpcValue) => {
+  ipcMain.handle("desktop:open-path", async (event, target: IpcValue) => {
+    authorizeIpc(event, true);
     const resolved = resolveHomeConfinedPath(target);
     if (!resolved) return false;
     const error = await shell.openPath(resolved);
     return error === "";
   });
 
-  ipcMain.handle("desktop:get-update-status", async () => getUpdateState());
-  ipcMain.handle("desktop:start-update", async () => startUpdate());
-  ipcMain.handle("desktop:get-kittylitter-pairing-json", async () => getKittylitterPairingJson());
-  ipcMain.handle("desktop:copy-kittylitter-pairing-json", async (_, pairingJson: IpcValue) => {
+  ipcMain.handle("desktop:get-update-status", async (event) => {
+    authorizeIpc(event, true);
+    return getUpdateState();
+  });
+  ipcMain.handle("desktop:start-update", async (event) => {
+    authorizeIpc(event, true);
+    return startUpdate();
+  });
+  ipcMain.handle("desktop:get-kittylitter-pairing-json", async (event) => {
+    authorizeIpc(event, true);
+    return getKittylitterPairingJson();
+  });
+  ipcMain.handle("desktop:copy-kittylitter-pairing-json", async (event, pairingJson: IpcValue) => {
+    authorizeIpc(event, true);
     try {
-      const decoded = decodeStringOption(pairingJson);
-      if (Option.isNone(decoded)) throw new Error("invalid pairing payload");
-      clipboard.writeText(normalizeKittylitterPairingJson(decoded.value));
+      const value = stringValue(pairingJson);
+      if (value === undefined) throw new Error("invalid pairing payload");
+      clipboard.writeText(normalizeKittylitterPairingJson(value));
       return { ok: true };
     } catch {
       return { ok: false, error: "Connection JSON could not be copied." };
     }
   });
 
-  ipcMain.handle("desktop:open-directory", async () => {
+  ipcMain.handle("desktop:open-directory", async (event) => {
+    authorizeIpc(event, true);
     const owner = mainWindow ?? undefined;
     const result = owner
       ? await dialog.showOpenDialog(owner, { properties: ["openDirectory", "createDirectory"] })
@@ -342,119 +381,115 @@ function registerIpcHandlers(): void {
     const selected = result.filePaths[0];
     if (!selected) return null;
     try {
-      return addProject(selected);
+      return projects.addProject(selected);
     } catch (error) {
       log.error(`Failed to add project from dialog: ${String(error)}`);
       throw error;
     }
   });
 
-  ipcMain.handle(
-    "desktop:controller-deploy",
-    async (event, options: { host: string; port?: number; installDir?: string }) => {
-      const resourcesPath = app.isPackaged
-        ? path.join(process.resourcesPath, "app", "scripts")
-        : path.join(app.getAppPath(), "..", "scripts");
-      return deployController(options, resourcesPath, (line) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("desktop:controller-deploy-log", { line });
-        }
-      });
-    },
-  );
-
-  ipcMain.handle("desktop:list-projects", async () => listProjectsWithMeta());
-
-  ipcMain.handle("desktop:add-project", async (_, directoryPath: IpcValue) => {
-    const decoded = decodeStringOption(directoryPath);
-    if (Option.isNone(decoded)) {
-      throw new Error("directoryPath must be a string");
-    }
-    return addProject(decoded.value);
+  ipcMain.handle("desktop:controller-deploy", async (event, payload: IpcValue) => {
+    authorizeIpc(event, true);
+    const options = decodeControllerDeployOptions(payload);
+    if (Option.isNone(options)) return { ok: false, error: "Invalid deploy options" };
+    const resourcesPath = app.isPackaged
+      ? path.join(process.resourcesPath, "app", "scripts")
+      : path.join(app.getAppPath(), "..", "scripts");
+    return deployController(options.value, resourcesPath, (line) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send("desktop:controller-deploy-log", { line });
+      }
+    });
   });
 
-  ipcMain.handle("desktop:remove-project", async (_, id: IpcValue) => {
-    const decoded = decodeStringOption(id);
-    if (Option.isNone(decoded)) {
-      throw new Error("id must be a string");
-    }
-    removeProject(decoded.value);
+  ipcMain.handle("desktop:list-projects", async (event) => {
+    authorizeIpc(event, true);
+    return projects.listProjects();
+  });
+
+  ipcMain.handle("desktop:add-project", async (event, directoryPath: IpcValue) => {
+    authorizeIpc(event, true);
+    const value = stringValue(directoryPath);
+    if (value === undefined) throw new Error("directoryPath must be a string");
+    return projects.addProject(value);
+  });
+
+  ipcMain.handle("desktop:remove-project", async (event, id: IpcValue) => {
+    authorizeIpc(event, true);
+    const value = stringValue(id);
+    if (value === undefined) throw new Error("id must be a string");
+    projects.removeProject(value);
     return { ok: true } as const;
   });
 
-  ipcMain.handle("desktop:load-session-prefs", async () => {
-    return readSessionPrefsFile();
+  ipcMain.handle("desktop:load-session-prefs", async (event) => {
+    authorizeIpc(event);
+    return readPreferences("session-prefs");
   });
 
-  ipcMain.handle("desktop:save-session-prefs", async (_, prefs: IpcValue) => {
+  ipcMain.handle("desktop:save-session-prefs", async (event, prefs: IpcValue) => {
+    authorizeIpc(event);
     const decoded = decodeSessionPrefsOption(prefs);
     if (Option.isNone(decoded)) {
       throw new Error("prefs must be a plain object");
     }
-    writeSessionPrefsFile(decoded.value);
+    writePreferences("session-prefs", decoded.value);
   });
 
-  ipcMain.handle("desktop:load-ui-preferences", async () => {
-    return readUiPreferencesFile();
+  ipcMain.handle("desktop:load-ui-preferences", async (event) => {
+    authorizeIpc(event, true);
+    return readPreferences("ui-preferences");
   });
 
-  ipcMain.handle("desktop:save-ui-preferences", async (_, prefs: IpcValue) => {
-    const decoded = decodeSessionPrefsOption(prefs);
-    if (Option.isNone(decoded)) {
-      throw new Error("prefs must be a plain object");
-    }
-    const stringPrefs = Object.fromEntries(
-      Object.entries(decoded.value).filter((entry): entry is [string, string] =>
-        isString(entry[1]),
-      ),
-    );
-    writeUiPreferencesFile(stringPrefs);
+  ipcMain.handle("desktop:save-ui-preferences", async (event, prefs: IpcValue) => {
+    authorizeIpc(event, true);
+    const decoded = decodeUiPreferencesOption(prefs);
+    if (Option.isNone(decoded)) throw new Error("prefs must be bounded string preferences");
+    writePreferences("ui-preferences", decoded.value);
   });
 
-  ipcMain.handle("desktop:quick-panel-expand", async () => {
+  ipcMain.handle("desktop:quick-panel-expand", async (event) => {
+    authorizeIpc(event);
     resizeQuickPanelToThread();
   });
 
-  ipcMain.handle("desktop:quick-panel-dismiss", async () => {
-    hideQuickPanel();
-    resizeQuickPanelToHome();
-    resetQuickPanel();
+  ipcMain.handle("desktop:quick-panel-dismiss", async (event) => {
+    authorizeIpc(event);
+    dismissQuickPanel();
   });
 
-  ipcMain.handle("desktop:quick-panel-get-hotkey", async () => ({
-    hotkey: quickPanelHotkey ?? getStoredQuickPanelHotkey() ?? DESKTOP_CONFIG.quickPanel.hotkey,
-    defaultHotkey: DESKTOP_CONFIG.quickPanel.hotkey,
-  }));
+  ipcMain.handle("desktop:quick-panel-get-hotkey", async (event) => {
+    authorizeIpc(event, true);
+    return {
+      hotkey: quickPanelHotkey ?? getStoredQuickPanelHotkey() ?? DESKTOP_CONFIG.quickPanel.hotkey,
+      defaultHotkey: DESKTOP_CONFIG.quickPanel.hotkey,
+    };
+  });
 
-  ipcMain.handle("desktop:quick-panel-set-hotkey", async (_, hotkey: IpcValue) =>
-    setQuickPanelHotkey(hotkey),
-  );
+  ipcMain.handle("desktop:quick-panel-set-hotkey", async (event, hotkey: IpcValue) => {
+    authorizeIpc(event, true);
+    return setQuickPanelHotkey(hotkey);
+  });
 
   ipcMain.handle(
     "desktop:focus-main-and-navigate",
-    async (_, projectId: IpcValue, sessionId?: IpcValue) => {
-      const decodedProjectId = decodeStringOption(projectId);
-      const decodedSessionId = decodeStringOption(sessionId);
-      if (Option.isNone(decodedProjectId) || !frontendServer) return;
-      const query =
-        Option.isSome(decodedSessionId) && decodedSessionId.value
-          ? `?project=${encodeURIComponent(decodedProjectId.value)}&session=${encodeURIComponent(decodedSessionId.value)}`
-          : `?project=${encodeURIComponent(decodedProjectId.value)}&new=1`;
+    async (event, projectId: IpcValue, sessionId?: IpcValue) => {
+      authorizeIpc(event);
+      const project = stringValue(projectId);
+      const session = stringValue(sessionId);
+      if (project === undefined || !frontendServer) return;
+      const query = session
+        ? `?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}`
+        : `?project=${encodeURIComponent(project)}&new=1`;
       const targetUrl = `${frontendServer.runtime.url}/agent${query}`;
       if (mainWindow && !mainWindow.isDestroyed()) {
         await mainWindow.loadURL(targetUrl);
       } else {
-        mainWindow = createMainWindow(targetUrl);
-        mainWindow.on("closed", () => {
-          mainWindow = null;
-        });
+        openMainWindow(targetUrl);
       }
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-      hideQuickPanel();
-      resizeQuickPanelToHome();
-      // The thread now lives in the main window; next quick-panel open starts fresh.
-      resetQuickPanel();
+      if (mainWindow?.isMinimized()) mainWindow.restore();
+      mainWindow?.focus();
+      dismissQuickPanel();
     },
   );
 }
@@ -466,41 +501,37 @@ function onQuickPanelHotkey(): void {
   toggleQuickPanel(frontendServer.runtime.url);
 }
 
+function tryRegisterQuickPanelHotkey(accelerator: string): boolean {
+  try {
+    return globalShortcut.register(accelerator, onQuickPanelHotkey);
+  } catch {
+    return false;
+  }
+}
+
 function registerQuickPanelHotkey(): void {
   const accelerator = getStoredQuickPanelHotkey() ?? DESKTOP_CONFIG.quickPanel.hotkey;
-  if (globalShortcut.register(accelerator, onQuickPanelHotkey)) {
+  if (tryRegisterQuickPanelHotkey(accelerator)) {
     quickPanelHotkey = accelerator;
     return;
   }
   log.warn(`Failed to register quick panel hotkey: ${accelerator}`);
-  // A stored hotkey can become unregisterable (claimed by another app, or a
-  // stale/invalid accelerator). Fall back to the default so the panel keeps
-  // a working hotkey instead of silently having none.
   const fallback = DESKTOP_CONFIG.quickPanel.hotkey;
-  if (accelerator !== fallback && globalShortcut.register(fallback, onQuickPanelHotkey)) {
+  if (accelerator !== fallback && tryRegisterQuickPanelHotkey(fallback)) {
     quickPanelHotkey = fallback;
   }
 }
 
 function setQuickPanelHotkey(hotkey: IpcValue) {
   const current = quickPanelHotkey ?? DESKTOP_CONFIG.quickPanel.hotkey;
-  const decoded = decodeStringOption(hotkey);
-  if (Option.isNone(decoded) || !decoded.value.trim()) {
-    return { ok: false, hotkey: current, error: "Hotkey must be a non-empty string" };
-  }
-  const next = decoded.value.trim();
+  const next = stringValue(hotkey)?.trim();
+  if (!next) return { ok: false, hotkey: current, error: "Hotkey must be a non-empty string" };
   if (next === quickPanelHotkey) {
     setStoredQuickPanelHotkey(next);
     return { ok: true, hotkey: next };
   }
 
-  let registered = false;
-  try {
-    registered = globalShortcut.register(next, onQuickPanelHotkey);
-  } catch {
-    registered = false; // invalid accelerator strings throw
-  }
-  if (!registered) {
+  if (!tryRegisterQuickPanelHotkey(next)) {
     return {
       ok: false,
       hotkey: current,
@@ -598,6 +629,7 @@ async function run(): Promise<void> {
   });
 
   registerIpcHandlers();
+  registerNavigationPolicy();
 
   await app.whenReady();
 
@@ -609,59 +641,35 @@ async function run(): Promise<void> {
     registerQuickPanelHotkey();
   } catch (error) {
     log.error(`Failed to bootstrap desktop app: ${String(error)}`);
-    // Surface the failure instead of vanishing from the dock with no feedback
-    // (port in use, unwritable userData, missing server.js, slow-start timeout).
     try {
       dialog.showErrorBox(
         "Local Studio failed to start",
         `${error instanceof Error ? error.message : String(error)}\n\nSee the app logs for details.`,
       );
-    } catch {
-      // dialog unavailable (very early failure) — the log above still records it.
-    }
+    } catch {}
     app.quit();
   }
 }
 
 void run();
 
-function sessionPrefsFilePath(): string {
-  return path.join(app.getPath("userData"), "session-prefs.json");
-}
+const preferencesPath = (name: "session-prefs" | "ui-preferences") =>
+  path.join(app.getPath("userData"), `${name}.json`);
 
-function uiPreferencesFilePath(): string {
-  return path.join(app.getPath("userData"), "ui-preferences.json");
-}
-
-function readSessionPrefsFile(): SessionPrefs {
-  const filePath = sessionPrefsFilePath();
+function readPreferences(name: "session-prefs"): SessionPrefs;
+function readPreferences(name: "ui-preferences"): UiPreferences;
+function readPreferences(name: "session-prefs" | "ui-preferences"): SessionPrefs {
+  const file = preferencesPath(name);
   try {
-    if (!existsSync(filePath)) return {};
-    const parsed = decodeSessionPrefsOption(JSON.parse(readFileSync(filePath, "utf8")));
-    return Option.getOrElse(parsed, () => ({}));
+    if (!existsSync(file) || statSync(file).size > PREFERENCES_FILE_MAX_BYTES) return {};
+    const value: Json = JSON.parse(readFileSync(file, "utf8"));
+    return name === "session-prefs"
+      ? Option.getOrElse(decodeSessionPrefsOption(value), () => ({}))
+      : Option.getOrElse(decodeUiPreferencesOption(value), () => ({}));
   } catch {
     return {};
   }
 }
 
-function writeSessionPrefsFile(prefs: SessionPrefs): void {
-  writeJsonAtomic(sessionPrefsFilePath(), prefs);
-}
-
-function readUiPreferencesFile(): UiPreferences {
-  const filePath = uiPreferencesFilePath();
-  try {
-    if (!existsSync(filePath)) return {};
-    const parsed = decodeSessionPrefsOption(JSON.parse(readFileSync(filePath, "utf8")));
-    if (Option.isNone(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed.value).filter((entry): entry is [string, string] => isString(entry[1])),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function writeUiPreferencesFile(prefs: UiPreferences): void {
-  writeJsonAtomic(uiPreferencesFilePath(), prefs);
-}
+const writePreferences = (name: "session-prefs" | "ui-preferences", value: SessionPrefs) =>
+  writeJsonAtomic(preferencesPath(name), value);

@@ -174,3 +174,9 @@ export function resizeQuickPanelToHome(): void {
   applyBounds(panel, anchoredBounds(panel, DESKTOP_CONFIG.quickPanel.homeWindow));
   panel.setResizable(false);
 }
+
+export function dismissQuickPanel(): void {
+  hideQuickPanel();
+  resizeQuickPanelToHome();
+  resetQuickPanel();
+}

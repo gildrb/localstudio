@@ -223,7 +223,7 @@ function validateCwd(rawCwd: string | null): string | Response {
   }
 }
 
-export async function handlePrGet(request: Request): Promise<Response> {
+export async function get(request: Request): Promise<Response> {
   const cwd = validateCwd(new URL(request.url).searchParams.get("cwd"));
   if (cwd instanceof Response) return cwd;
   try {
@@ -249,7 +249,7 @@ async function listPullRequests(cwd: string): Promise<Response> {
   }
 }
 
-export async function handlePrMerge(request: Request): Promise<Response> {
+export async function merge(request: Request): Promise<Response> {
   const body = await readJsonRequestWithinLimit(request, PR_MERGE_BODY_LIMIT_BYTES);
   if (!body.ok) return jsonError(body.error, body.status);
   const payload = fields(body.value);

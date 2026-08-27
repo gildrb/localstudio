@@ -37,20 +37,7 @@ export interface InferenceUsageTotals {
   cacheWriteTokens: number;
 }
 
-interface NonStreamingInferenceRecordInput {
-  usage: InferenceUsageInput | undefined;
-  record: Omit<
-    InferenceRequestRecord,
-    | "cache_read_tokens"
-    | "cache_write_tokens"
-    | "completion_tokens"
-    | "prompt_tokens"
-    | "reasoning_tokens"
-    | "streamed"
-  >;
-}
-
-interface StreamingInferenceRecordInput {
+interface InferenceRecordInput {
   usage: InferenceUsageInput;
   record: Omit<
     InferenceRequestRecord,
@@ -115,29 +102,10 @@ const tryRecordInference = (
       ),
     );
 
-export const recordNonStreamingInferenceUsage = (
+const recordInferenceUsage = (
   options: InferenceAccountingOptions,
-  input: NonStreamingInferenceRecordInput,
-): Effect.Effect<InferenceUsageTotals | null, unknown> => {
-  if (!input.usage) return Effect.succeed(null);
-  const totals = readUsageTotals(input.usage);
-  const record = hasBillableTokens(totals)
-    ? tryRecordInference(options, {
-        ...input.record,
-        prompt_tokens: totals.promptTokens,
-        completion_tokens: totals.completionTokens,
-        reasoning_tokens: totals.reasoningTokens,
-        cache_read_tokens: totals.cacheReadTokens,
-        cache_write_tokens: totals.cacheWriteTokens,
-        streamed: false,
-      })
-    : Effect.void;
-  return addLifetimeUsage(options.stores, totals).pipe(Effect.andThen(record), Effect.as(totals));
-};
-
-export const recordStreamingInferenceUsage = (
-  options: InferenceAccountingOptions,
-  input: StreamingInferenceRecordInput,
+  input: InferenceRecordInput,
+  streamed: boolean,
 ): Effect.Effect<InferenceUsageTotals, unknown> => {
   const totals = readUsageTotals(input.usage);
   const record = hasBillableTokens(totals)
@@ -148,8 +116,21 @@ export const recordStreamingInferenceUsage = (
         reasoning_tokens: totals.reasoningTokens,
         cache_read_tokens: totals.cacheReadTokens,
         cache_write_tokens: totals.cacheWriteTokens,
-        streamed: true,
+        streamed,
       })
     : Effect.void;
   return addLifetimeUsage(options.stores, totals).pipe(Effect.andThen(record), Effect.as(totals));
 };
+
+export const recordNonStreamingInferenceUsage = (
+  options: InferenceAccountingOptions,
+  input: Omit<InferenceRecordInput, "usage"> & { usage: InferenceUsageInput | undefined },
+): Effect.Effect<InferenceUsageTotals | null, unknown> =>
+  input.usage
+    ? recordInferenceUsage(options, { ...input, usage: input.usage }, false)
+    : Effect.succeed(null);
+
+export const recordStreamingInferenceUsage = (
+  options: InferenceAccountingOptions,
+  input: InferenceRecordInput,
+): Effect.Effect<InferenceUsageTotals, unknown> => recordInferenceUsage(options, input, true);

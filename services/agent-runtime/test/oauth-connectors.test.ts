@@ -1,15 +1,15 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { cleanTemps, jsonResponse, tempDir } from "./test-fixtures";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { cleanTemps, isolatedDataDir, jsonResponse } from "./test-fixtures";
 import type { OAuthConnectorDependencies } from "../src/oauth-connectors";
 import type { OAuthConnectorAuthDefinition } from "../src/oauth-connector-contract";
 import type { ConnectorConfig } from "../src/connectors-service";
 
-process.env.LOCAL_STUDIO_DATA_DIR = tempDir("oauth-connectors-");
+process.env.LOCAL_STUDIO_DATA_DIR = isolatedDataDir("oauth-connectors-");
 const oauth = await import("../src/oauth-connectors");
 const { resolveConnectorTarget } = await import("../src/connector-pool");
-const { listConnectors } = await import("../src/connectors-service");
+const { listConnectors, resolveConnectorsFilePath } = await import("../src/connectors-service");
 
 type State = {
   polls: number;
@@ -99,10 +99,22 @@ const deps = (now: number, kind: "oauth-device" | "oauth-pkce"): OAuthConnectorD
   random: randomBytes,
   definitions: { github: definition(kind) },
 });
+const deviceDeps = (now = T0) => deps(now, "oauth-device");
 const status = (kind: "oauth-device" | "oauth-pkce" = "oauth-device") =>
   oauth.getOAuthConnectorStatus("github", deps(T0, kind));
 const rows = async () => (await listConnectors()).find(({ id }) => id === "github");
 const tokens = () => readFileSync(oauth.resolveOAuthTokensFilePath(), "utf8");
+async function connectDevice(): Promise<void> {
+  state.allow = true;
+  await oauth.beginOAuthConnectorAuthorization("github", deviceDeps());
+  await oauth.oauthConnectorFlowSettled("github");
+}
+beforeEach(async () => {
+  rmSync(oauth.resolveOAuthTokensFilePath(), { force: true });
+  rmSync(resolveConnectorsFilePath(), { force: true });
+  Object.assign(state, { polls: 0, allow: false, deny: false, refreshes: [], challenge: null });
+  await oauth.saveOAuthConnectorClient("github", "test-client-id");
+});
 afterAll(() => {
   server.stop(true);
   cleanTemps();
@@ -110,7 +122,7 @@ afterAll(() => {
 
 test("device flow polls, persists, and exposes status", async () => {
   await oauth.saveOAuthConnectorClient("github", "test-client-id");
-  const begun = await oauth.beginOAuthConnectorAuthorization("github", deps(T0, "oauth-device"));
+  const begun = await oauth.beginOAuthConnectorAuthorization("github", deviceDeps());
   if (begun.flow !== "device") throw new Error("expected device flow");
   expect(begun.userCode).toBe("ABCD-1234");
   expect(begun.verificationUri).toBe(`${base}/activate`);
@@ -129,6 +141,7 @@ test("device flow polls, persists, and exposes status", async () => {
 });
 
 test("token storage is private and status redacts secrets", async () => {
+  await connectDevice();
   const file = oauth.resolveOAuthTokensFilePath();
   expect(existsSync(file)).toBe(true);
   expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -140,6 +153,7 @@ test("token storage is private and status redacts secrets", async () => {
 });
 
 test("connecting writes a disabled OAuth connector row without token env", async () => {
+  await connectDevice();
   const row = await rows();
   expect(row).toBeDefined();
   expect(row?.auth).toEqual({ type: "oauth", provider: "github", account: "octocat" });
@@ -150,15 +164,17 @@ test("connecting writes a disabled OAuth connector row without token env", async
 });
 
 test("pool injects access tokens but not refresh tokens", async () => {
+  await connectDevice();
   const row = await rows();
   if (!row) throw new Error("github row missing");
-  const target = await resolveConnectorTarget(row, undefined, deps(T0, "oauth-device"));
+  const target = await resolveConnectorTarget(row, undefined, deviceDeps());
   if (target.transport !== "stdio") throw new Error("expected stdio target");
   expect(target.env?.GITHUB_PERSONAL_ACCESS_TOKEN).toBe("gho_device_access_1");
   expect(JSON.stringify(target)).not.toContain("ghr_refresh_1");
 });
 
 test("provider impostor rows get no token", async () => {
+  await connectDevice();
   const row: ConnectorConfig = {
     id: "not-github",
     name: "impostor",
@@ -167,12 +183,13 @@ test("provider impostor rows get no token", async () => {
     auth: { type: "oauth", provider: "github", account: "octocat" },
     enabled: true,
   };
-  expect(await oauth.oauthConnectorSpawnEnv(row, deps(T0, "oauth-device"))).toEqual({});
+  expect(await oauth.oauthConnectorSpawnEnv(row, deviceDeps())).toEqual({});
 });
 
 test("expiring tokens refresh once and persist rotation", async () => {
+  await connectDevice();
   const at = T0 + HOUR - 30_000;
-  expect(await oauth.freshOAuthConnectorAccessToken("github", deps(at, "oauth-device"))).toBe(
+  expect(await oauth.freshOAuthConnectorAccessToken("github", deviceDeps(at))).toBe(
     "gho_refreshed_access_2",
   );
   expect(state.refreshes).toHaveLength(1);
@@ -181,15 +198,16 @@ test("expiring tokens refresh once and persist rotation", async () => {
   expect(tokens()).not.toContain("ghr_refresh_1");
   const row = await rows();
   if (!row) throw new Error("github row missing");
-  const target = await resolveConnectorTarget(row, undefined, deps(at, "oauth-device"));
+  const target = await resolveConnectorTarget(row, undefined, deviceDeps(at));
   if (target.transport !== "stdio") throw new Error("expected stdio target");
   expect(target.env?.GITHUB_PERSONAL_ACCESS_TOKEN).toBe("gho_refreshed_access_2");
   expect(state.refreshes).toHaveLength(1);
 });
 
 test("declined device flow reports failure and preserves old grant", async () => {
+  await connectDevice();
   state.deny = true;
-  await oauth.beginOAuthConnectorAuthorization("github", deps(T0, "oauth-device"));
+  await oauth.beginOAuthConnectorAuthorization("github", deviceDeps());
   await oauth.oauthConnectorFlowSettled("github");
   state.deny = false;
   const result = await status();
@@ -198,6 +216,7 @@ test("declined device flow reports failure and preserves old grant", async () =>
 });
 
 test("disconnect destroys grants and strips OAuth row state", async () => {
+  await connectDevice();
   const result = await oauth.disconnectOAuthConnector("github");
   expect(result.connected).toBe(false);
   expect(result.account).toBeNull();
@@ -206,9 +225,9 @@ test("disconnect destroys grants and strips OAuth row state", async () => {
   const row = await rows();
   expect(row?.auth).toBeUndefined();
   expect(row?.enabled).toBe(false);
-  await expect(
-    oauth.freshOAuthConnectorAccessToken("github", deps(T0, "oauth-device")),
-  ).rejects.toThrow("not connected");
+  await expect(oauth.freshOAuthConnectorAccessToken("github", deviceDeps())).rejects.toThrow(
+    "not connected",
+  );
 });
 
 test("PKCE loopback rejects forged state and verifies S256 exchange", async () => {
@@ -222,14 +241,8 @@ test("PKCE loopback rejects forged state and verifies S256 exchange", async () =
   expect(redirect).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
   state.challenge = authorize.searchParams.get("code_challenge");
   expect((await fetch(`${redirect}?state=wrong&code=pkce-code-1`)).status).toBe(400);
-  const retry = await oauth.beginOAuthConnectorAuthorization("github", deps(T0, "oauth-pkce"));
-  if (retry.flow !== "pkce") throw new Error("expected pkce flow");
-  const next = new URL(retry.authorizeUrl);
-  state.challenge = next.searchParams.get("code_challenge");
   const callback = await fetch(
-    `${next.searchParams.get("redirect_uri")}?state=${encodeURIComponent(
-      next.searchParams.get("state") ?? "",
-    )}&code=pkce-code-1`,
+    `${redirect}?state=${encodeURIComponent(authorize.searchParams.get("state") ?? "")}&code=pkce-code-1`,
   );
   expect(callback.status).toBe(200);
   expect(await callback.text()).toContain("connected");
@@ -239,6 +252,7 @@ test("PKCE loopback rejects forged state and verifies S256 exchange", async () =
 });
 
 test("replacing client ids drops their grant", async () => {
+  await connectDevice();
   await oauth.saveOAuthConnectorClient("github", "another-client-id");
   const result = await status();
   expect(result.configured).toBe(true);

@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import type {
+  ComputeEngineSpec,
   EngineSupport,
   HealthCheck,
   LaunchPlan,
@@ -7,10 +8,9 @@ import type {
   MetricMap,
   EngineRuntimeKind,
   ServingOptions,
+  HostProfile,
 } from "../contracts";
 
-/** Model directory inside a container. Every image mounts the model at the same path, so
- *  the argv is identical whether a plan runs as a process or a container. */
 export const CONTAINER_MODEL_DIR = "/models";
 
 export const health = (path: string, readyDeadlineMs: number, intervalMs = 2_000): HealthCheck => ({
@@ -41,26 +41,14 @@ export const prometheusMetrics = (prefix: string, kvName: string): MetricMap => 
   generationTokensTotal: [`${prefix}:generation_tokens_total`],
 });
 
-/* ── tuning knobs ────────────────────────────────────────────────────────── */
-
-/**
- * How one engine spells one canonical knob. `null` in a spelling table means the engine
- * has no equivalent, and the knob is dropped rather than guessed at.
- *
- * This table plus `tuningArguments` is what collapses the two structurally identical 40-line
- * argument builders (vllm-spec.ts:107-148 and sglang-spec.ts:46-92) into data.
- */
 export interface FlagSpec {
   readonly flag: string;
-  /** Emitted alongside the flag when the knob is set — vLLM's tool parser needs
-   *  `--enable-auto-tool-choice` next to it, SGLang's does not. */
   readonly companion?: string;
 }
 
 export type TuningKey = keyof ServingOptions;
 export type Spelling = Readonly<Partial<Record<TuningKey, FlagSpec>>>;
 
-/** Fixed emission order, so two engines with the same knobs produce comparable argv. */
 const TUNING_ORDER: readonly TuningKey[] = [
   "tensorParallel",
   "pipelineParallel",
@@ -75,8 +63,6 @@ const TUNING_ORDER: readonly TuningKey[] = [
   "reasoningParser",
 ];
 
-/** Parallelism of 1 is the default everywhere; emitting it only adds noise and, for some
- *  builds, forces a distributed code path that a single card does not need. */
 const PARALLEL_KEYS = new Set<TuningKey>(["tensorParallel", "pipelineParallel"]);
 
 const isNumber = Schema.is(Schema.Number);
@@ -103,15 +89,9 @@ export const tuningArguments = (options: ServingOptions, spelling: Spelling): st
   return args;
 };
 
-/** The flag key a token represents, or null when it is a value rather than a flag. */
 const flagKey = (token: string): string | null =>
   token.startsWith("--") ? (token.split("=")[0] ?? token).slice(2) : null;
 
-/**
- * Append recipe overrides so they always win: any base flag the user also supplied is
- * dropped first. Without this, both spellings reach the engine and which one applies is
- * left to argparse.
- */
 export const mergeArguments = (base: readonly string[], extra: readonly string[]): string[] => {
   const overridden = new Set(extra.map(flagKey).filter((key): key is string => key !== null));
   const merged: string[] = [];
@@ -129,8 +109,6 @@ export const mergeArguments = (base: readonly string[], extra: readonly string[]
   return [...merged, ...extra];
 };
 
-/* ── plan assembly ───────────────────────────────────────────────────────── */
-
 export const modelReference = (request: LaunchRequest): string =>
   request.runtime === "docker" ? CONTAINER_MODEL_DIR : request.modelPath;
 
@@ -139,8 +117,6 @@ export const modelMounts = (request: LaunchRequest): LaunchPlan["mounts"] =>
     ? [{ from: request.modelPath, to: CONTAINER_MODEL_DIR, readOnly: true }]
     : [];
 
-/** Containers listen on all interfaces so the published port reaches them; processes bind
- *  loopback, because the controller proxies them and nothing else should connect. */
 export const serveAddress = (request: LaunchRequest, listenPort: number): string[] => [
   "--host",
   request.runtime === "docker" ? "0.0.0.0" : "127.0.0.1",
@@ -148,10 +124,6 @@ export const serveAddress = (request: LaunchRequest, listenPort: number): string
   String(listenPort),
 ];
 
-/**
- * The shape every OpenAI-compatible server shares. `modelFlag: null` passes the model
- * positionally (vLLM's `serve <path>` form).
- */
 export const serverArguments = (
   request: LaunchRequest,
   spec: {
@@ -196,4 +168,33 @@ export const plan = (
     health: parts.health,
   };
   return image ? { ...base, image } : base;
+};
+
+export interface OpenAiEngineDefinition {
+  readonly id: ComputeEngineSpec["id"];
+  readonly defaultPort: number;
+  readonly readyDeadlineMs: number;
+  readonly metrics: MetricMap;
+  readonly image: (host: HostProfile) => string | null;
+  readonly supports: (host: HostProfile) => EngineSupport;
+  readonly arguments: Parameters<typeof serverArguments>[1];
+}
+
+export const openAiEngine = (definition: OpenAiEngineDefinition): ComputeEngineSpec => {
+  const engineHealth = health("/health", definition.readyDeadlineMs);
+  return {
+    id: definition.id,
+    defaultPort: definition.defaultPort,
+    health: engineHealth,
+    metrics: definition.metrics,
+    image: definition.image,
+    supports: definition.supports,
+    plan: (request) =>
+      plan(request, {
+        args: serverArguments(request, definition.arguments, request.port),
+        health: engineHealth,
+        listenPort: request.port,
+        image: definition.image(request.host),
+      }),
+  };
 };

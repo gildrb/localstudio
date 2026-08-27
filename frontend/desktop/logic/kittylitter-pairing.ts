@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { Effect, Schedule, Schema } from "effect";
+import { Schema } from "effect";
 import type { KittylitterPairingResult } from "../interfaces";
 
 const execFileAsync = promisify(execFile);
@@ -55,27 +55,22 @@ export const getKittylitterPairingJson = async (options?: {
 }): Promise<KittylitterPairingResult> => {
   const retries = options?.retries ?? PAIR_RETRIES;
   const retryDelayMs = options?.retryDelayMs ?? PAIR_RETRY_DELAY_MS;
-  const pairAttempt = Effect.tryPromise({
-    try: async () => {
+  let code = "unknown";
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
       const { stdout } = await execFileAsync(executablePath(), ["pair"], {
         encoding: "utf8",
         maxBuffer: 64 * 1024,
         timeout: 30_000,
       });
-      return normalizeKittylitterPairingJson(String(stdout).trim());
-    },
-    catch: (error) => (isErrorWithCode(error) ? error.code : "unknown"),
-  });
-  return Effect.runPromise(
-    pairAttempt.pipe(
-      Effect.retry(Schedule.both(Schedule.spaced(retryDelayMs), Schedule.recurs(retries))),
-      Effect.map((pairingJson): KittylitterPairingResult => ({ ok: true, pairingJson })),
-      Effect.catch((code) =>
-        Effect.succeed<KittylitterPairingResult>({
-          ok: false,
-          error: `KittyLitter is unavailable (${code}). Start the controller and try again.`,
-        }),
-      ),
-    ),
-  );
+      return { ok: true, pairingJson: normalizeKittylitterPairingJson(String(stdout).trim()) };
+    } catch (error) {
+      code = isErrorWithCode(error) ? error.code : "unknown";
+      if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+  return {
+    ok: false,
+    error: `KittyLitter is unavailable (${code}). Start the controller and try again.`,
+  };
 };
