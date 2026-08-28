@@ -38,7 +38,7 @@ import {
 } from "./logic/quick-panel-window";
 import { getStoredQuickPanelHotkey, setStoredQuickPanelHotkey } from "./logic/desktop-settings";
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+type Json = Schema.MutableJson;
 type SessionPrefs = { [key: string]: Json };
 type UiPreferences = { [key: string]: string };
 type IpcValue = Json;

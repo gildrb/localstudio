@@ -39,7 +39,7 @@ const isJsonArray = Schema.is(Schema.Array(Schema.Json));
 const isJsonObject = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 
-type JsonArgument = Schema.Schema.Type<typeof Schema.Json>;
+type JsonArgument = Schema.Json;
 
 const normalizeJsonArgument = (value: JsonArgument): RecipeExtraArgument => {
   if (isJsonArray(value)) return value.map(normalizeJsonArgument);

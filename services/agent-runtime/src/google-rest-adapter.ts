@@ -1,24 +1,12 @@
 import { Option, Schema } from "effect";
 import type { McpConnection, McpToolInfo } from "./mcp-client";
+import { JsonSchema, type Json } from "./json";
 import {
   GOOGLE_WORKSPACE_BINDINGS,
   type GoogleWorkspacePluginId,
 } from "./google-workspace-binding";
 
-type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json };
-
 const OptionalString = Schema.optional(Schema.String);
-
-const JsonSchema: Schema.Codec<Json, Json> = Schema.suspend(() =>
-  Schema.Union([
-    Schema.Null,
-    Schema.Boolean,
-    Schema.Number,
-    Schema.String,
-    Schema.Array(JsonSchema),
-    Schema.Record(Schema.String, JsonSchema),
-  ]),
-);
 const decodeJson = Schema.decodeUnknownSync(JsonSchema);
 
 const ToolArgumentsSchema = Schema.Struct({

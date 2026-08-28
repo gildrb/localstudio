@@ -61,11 +61,7 @@ export const ModelIndexSchema = Schema.Struct({
   migrated_from_sqlite: Schema.optional(Schema.String),
 });
 
-export type ModelIndexVariant = Schema.Schema.Type<typeof ModelIndexVariantSchema>;
-export type ModelIndexModel = Schema.Schema.Type<typeof ModelIndexModelSchema>;
-export type ModelIndexTier = Schema.Schema.Type<typeof ModelIndexTierSchema>;
 export type ModelIndexResponse = Schema.Schema.Type<typeof ModelIndexSchema>;
-export type ModelIndexVariantFormat = ModelIndexVariant["format"];
 
 const NullableNumber = Schema.NullOr(Schema.Number);
 /** Ordered variant row: format, repo, official, source, patterns, size, caveat. */

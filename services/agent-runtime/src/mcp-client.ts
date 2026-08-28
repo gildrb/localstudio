@@ -6,13 +6,11 @@ import {
   CallToolResultSchema,
   type CallToolRequest,
   type Tool,
-  type ToolAnnotations,
 } from "@modelcontextprotocol/sdk/types.js";
 import { BoundedStdioClientTransport } from "./mcp-stdio-transport";
 
 export { McpProtocolError } from "./mcp-stdio-transport";
 
-export type McpToolAnnotations = ToolAnnotations;
 export type McpToolInfo = Tool;
 export type McpToolArguments = NonNullable<CallToolRequest["params"]["arguments"]>;
 export type McpCallToolResult = Awaited<ReturnType<Client["callTool"]>>;

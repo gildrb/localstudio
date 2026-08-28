@@ -56,22 +56,6 @@ export interface RigsPayload {
   local_node_id: string;
 }
 
-export const RIG_HARDWARE_TYPE_LABELS = {
-  "dgx-spark": "DGX Spark",
-  "gpu-desktop": "GPU Desktop",
-  "gpu-server": "GPU Server",
-  mac: "Mac",
-  laptop: "Laptop",
-  "mini-pc": "Mini PC",
-  custom: "Custom",
-} satisfies Record<RigHardwareType, string>;
-
-export const RIG_NODE_ROLE_LABELS = {
-  head: "Head node",
-  worker: "Worker node",
-  standalone: "Standalone",
-} satisfies Record<RigNodeRole, string>;
-
 export const RigAcceleratorInputSchema = Schema.Struct({
   name: Schema.String,
   count: Schema.optional(Schema.Number),

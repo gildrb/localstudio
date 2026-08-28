@@ -6,6 +6,7 @@ import { resolveDataDir } from "./data-dir";
 import { listProviderAgentModels, refreshProviderHub } from "./provider-hub";
 import type { OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { Schema } from "effect";
+import { JsonSchema as JsonValueSchema, type JsonObject } from "./json";
 import {
   normalizeOpenAIModels,
   inferReasoningSupport,
@@ -24,24 +25,6 @@ function userPiModelsPath(): string {
     "models.json",
   );
 }
-
-type JsonValue = string | number | boolean | null | readonly JsonValue[] | JsonObject;
-
-interface JsonObject {
-  readonly [key: string]: JsonValue;
-}
-
-const JsonValueSchema = Schema.suspend(
-  (): Schema.Codec<JsonValue> =>
-    Schema.Union([
-      Schema.String,
-      Schema.Number,
-      Schema.Boolean,
-      Schema.Null,
-      Schema.Array(JsonValueSchema),
-      Schema.Record(Schema.String, JsonValueSchema),
-    ]),
-);
 
 const thinkingLevelValue = Schema.NullOr(Schema.String);
 const ThinkingLevelMapSchema = Schema.Struct({

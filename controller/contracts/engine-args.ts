@@ -1,5 +1,3 @@
-import type { Backend } from "./recipes";
-
 export type EngineArgType = "string" | "number" | "boolean";
 
 export type EngineExtraArgValue =
@@ -129,10 +127,6 @@ export type EngineArgValues = {
   [Row in (typeof ENGINE_ARG_ROWS)[number] as Row[0]]?: EngineArgValue<Row[1]>;
 };
 
-const VLLM_ONLY_FLAG_KEYS: readonly string[] = ENGINE_ARG_SPECS.filter(
-  (spec) => spec.scope === "vllm",
-).map((spec) => engineArgKey(spec.field));
-
 const SGLANG_COMPATIBLE_VLLM_KEYS: ReadonlySet<string> = new Set([
   "disable-custom-all-reduce",
   "enable-prefix-caching",
@@ -167,33 +161,6 @@ const SGLANG_COMPATIBLE_VLLM_KEYS: ReadonlySet<string> = new Set([
   "log-level",
   "log-requests",
 ]);
-
-const VLLM_ONLY_FLAG_KEY_SET: ReadonlySet<string> = new Set(VLLM_ONLY_FLAG_KEYS);
-
-const getForeignFlagKeys = (backend: Backend): ReadonlySet<string> => {
-  if (backend === "vllm") return new Set();
-  if (backend === "sglang") {
-    return new Set(
-      [...VLLM_ONLY_FLAG_KEY_SET].filter((key) => !SGLANG_COMPATIBLE_VLLM_KEYS.has(key)),
-    );
-  }
-  return VLLM_ONLY_FLAG_KEY_SET;
-};
-
-export const stripForeignFlagKeys = (
-  backend: Backend,
-  extraArgs: EngineExtraArgs | null | undefined,
-): EngineExtraArgs => {
-  const source = extraArgs ?? {};
-  const foreign = getForeignFlagKeys(backend);
-  if (foreign.size === 0) return { ...source };
-  const result: EngineExtraArgs = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (foreign.has(normalizeEngineArgKey(key))) continue;
-    result[key] = value;
-  }
-  return result;
-};
 
 export const KNOWN_VLLM_EXTRA_ARG_KEYS: ReadonlySet<string> = new Set([
   ...ENGINE_ARG_SPECS.filter((spec) => spec.scope !== "device").map((spec) =>
@@ -235,15 +202,6 @@ export const KNOWN_VLLM_EXTRA_ARG_KEYS: ReadonlySet<string> = new Set([
   "tensor-parallel-size-of-mlp",
 ]);
 
-const VLLM_EXPERIMENTAL_PREFIXES: readonly string[] = [
-  "b12x-",
-  "darkdevotion-",
-  "cute-",
-  "fuse-",
-  "rok-",
-  "swap-",
-];
-
 export const INTERNAL_RECIPE_KEYS: ReadonlySet<string> = new Set([
   ...ENGINE_ARG_SPECS.filter((spec) => spec.scope === "device").map((spec) =>
     engineArgKey(spec.field),
@@ -272,31 +230,3 @@ const JSON_STRING_ARG_KEYS: ReadonlySet<string> = new Set([
 
 export const isJsonStringArgumentKey = (key: string): boolean =>
   JSON_STRING_ARG_KEYS.has(normalizeEngineArgKey(key));
-
-const isKnownVllmExtraArgKey = (key: string): boolean => {
-  const normalized = normalizeEngineArgKey(key);
-  if (KNOWN_VLLM_EXTRA_ARG_KEYS.has(normalized)) return true;
-  if (INTERNAL_RECIPE_KEYS.has(normalized)) return true;
-  return VLLM_EXPERIMENTAL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
-};
-
-export const getUnknownVllmExtraArgKeys = (
-  extraArgs: EngineExtraArgs | null | undefined,
-): string[] => {
-  const source = extraArgs ?? {};
-  const blocked: string[] = [];
-  for (const key of Object.keys(source)) {
-    if (!isKnownVllmExtraArgKey(key)) {
-      blocked.push(key);
-    }
-  }
-  return blocked;
-};
-
-export const looksLikeNotesKey = (key: string): boolean => {
-  const normalized = normalizeEngineArgKey(key);
-  if (normalized.startsWith("benchmark-notes")) return true;
-  if (normalized.endsWith("-notes")) return true;
-  if (/^.*-\d{6,8}$/.test(normalized)) return true;
-  return false;
-};
