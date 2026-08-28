@@ -1,79 +1,61 @@
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { afterAll, beforeEach, expect, test } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
+import { cleanTemps, isolatedDataDir } from "./test-fixtures";
 
-const dataDir = mkdtempSync(path.join(tmpdir(), "connector-grants-"));
-process.env.LOCAL_STUDIO_DATA_DIR = dataDir;
-
-const {
-  EVERY_MODEL,
-  listConnectorGrants,
-  removeConnectorGrant,
-  resolveConnectorGrantsFilePath,
-  resolveGrantedTools,
-  setConnectorGrant,
-} = await import("../src/connector-grants");
+process.env.LOCAL_STUDIO_DATA_DIR = isolatedDataDir("connector-grants-");
+const grants = await import("../src/connector-grants");
 const { resolveConnectorsFilePath } = await import("../src/connectors-service");
+afterAll(cleanTemps);
+beforeEach(() => {
+  rmSync(grants.resolveConnectorGrantsFilePath(), { force: true });
+  writeFileSync(
+    resolveConnectorsFilePath(),
+    JSON.stringify({
+      connectors: [
+        { id: "notes", name: "Notes", transport: "stdio", command: "notes", enabled: true },
+      ],
+    }),
+  );
+});
 
-afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
-
-describe("connector access is granted per model", () => {
-  beforeEach(() => {
-    rmSync(resolveConnectorGrantsFilePath(), { force: true });
-    writeFileSync(
-      resolveConnectorsFilePath(),
-      JSON.stringify({
-        connectors: [
-          { id: "notes", name: "Notes", transport: "stdio", command: "notes", enabled: true },
-        ],
-      }),
-    );
+const seed = () => grants.listConnectorGrants();
+const set = (tools: string[]) =>
+  grants.setConnectorGrant({
+    modelId: "provider/model-a",
+    connectorId: "notes",
+    tools,
   });
 
-  test("enabling a connector grants every model, so nothing silently breaks", async () => {
-    const grants = await listConnectorGrants();
-    expect(grants).toHaveLength(1);
-    expect(grants[0]?.modelId).toBe(EVERY_MODEL);
-    expect(resolveGrantedTools(grants, "provider/model-a", "notes")).toBe("all");
-  });
+test("new connectors grant every model", async () => {
+  const rows = await seed();
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.modelId).toBe(grants.EVERY_MODEL);
+  expect(grants.resolveGrantedTools(rows, "provider/model-a", "notes")).toBe("all");
+});
 
-  test("a model-specific grant widens rather than narrows while the open grant stands", async () => {
-    await listConnectorGrants();
-    const grants = await setConnectorGrant({
-      modelId: "provider/model-a",
-      connectorId: "notes",
-      tools: ["read_note"],
-    });
-    expect(resolveGrantedTools(grants, "provider/model-a", "notes")).toBe("all");
-  });
+test("a specific grant does not narrow an open grant", async () => {
+  await seed();
+  expect(grants.resolveGrantedTools(await set(["read_note"]), "provider/model-a", "notes")).toBe(
+    "all",
+  );
+});
 
-  test("revoking the open grant leaves only the models named explicitly", async () => {
-    await listConnectorGrants();
-    await setConnectorGrant({
-      modelId: "provider/model-a",
-      connectorId: "notes",
-      tools: ["read_note"],
-    });
-    const grants = await removeConnectorGrant(EVERY_MODEL, "notes");
-    expect(resolveGrantedTools(grants, "provider/model-a", "notes")).toEqual(["read_note"]);
-    expect(resolveGrantedTools(grants, "provider/model-b", "notes")).toEqual([]);
-  });
+test("revoking the open grant preserves only specific models", async () => {
+  await seed();
+  await set(["read_note"]);
+  const rows = await grants.removeConnectorGrant(grants.EVERY_MODEL, "notes");
+  expect(grants.resolveGrantedTools(rows, "provider/model-a", "notes")).toEqual(["read_note"]);
+  expect(grants.resolveGrantedTools(rows, "provider/model-b", "notes")).toEqual([]);
+});
 
-  test("a revoked connector is not re-opened by the next read", async () => {
-    await listConnectorGrants();
-    await removeConnectorGrant(EVERY_MODEL, "notes");
-    expect(await listConnectorGrants()).toHaveLength(0);
-  });
+test("reads do not reopen a revoked connector", async () => {
+  await seed();
+  await grants.removeConnectorGrant(grants.EVERY_MODEL, "notes");
+  expect(await seed()).toHaveLength(0);
+});
 
-  test("an empty tool list is stored as a revocation, not as an empty grant", async () => {
-    await listConnectorGrants();
-    await removeConnectorGrant(EVERY_MODEL, "notes");
-    const grants = await setConnectorGrant({
-      modelId: "provider/model-a",
-      connectorId: "notes",
-      tools: [],
-    });
-    expect(grants).toHaveLength(0);
-  });
+test("an empty tool list is a revocation", async () => {
+  await seed();
+  await grants.removeConnectorGrant(grants.EVERY_MODEL, "notes");
+  expect(await set([])).toHaveLength(0);
 });

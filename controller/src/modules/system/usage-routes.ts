@@ -46,7 +46,7 @@ export const registerUsageRoutes = defineRoutes((app, context) => {
       }).pipe(
         Effect.flatMap(validateResponse),
         Effect.catch((error) => {
-          context.logger.error(`[Usage] Error fetching usage stats: ${(error as Error).message}`);
+          context.logger.error(`[Usage] Error fetching usage stats: ${String(error)}`);
           return withControllerUsage(context, emptyResponse(), includeController).pipe(
             Effect.flatMap(validateResponse),
           );

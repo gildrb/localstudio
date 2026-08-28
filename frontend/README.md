@@ -1,90 +1,29 @@
 # Frontend
 
-`frontend/` is the Next.js 16 and React 19 interface for Local Studio and the
-source of the macOS Electron app. The web and desktop builds share the same
-routes, agent runtime integration, controller API bridge, and UI kit.
+Shared Next.js 16/React 19 web UI and macOS Electron app.
 
-## Product Surface
+## Routes
 
-- `/` — controller and hardware status.
-- `/agent` — Workbench sessions, panes, Pi agent runtime, terminals, browser,
-  files, skills, and extensions.
-- `/configure` — overview, machines, models, integrations, and server controls.
-- `/usage` — inference and session usage.
-- `/settings` — application, connection, appearance, agent, and setup settings.
-- `/logs` — controller log sessions.
+`/` controller/hardware · `/models` models · `/agent` Workbench, panes, Pi, terminals, browser, files, skills, extensions · `/agent/automations` automations · `/configure` machines/models/integrations/server · `/usage` usage · `/settings` app settings · `/logs` controller logs · `/setup` onboarding · `/quick` quick panel · `/access` web authentication
 
-`/recipes`, `/discover`, `/integrations`, and `/server` are compatibility
-redirects into Configure. New navigation must target the canonical route.
+Redirects: `/discover`, `/recipes` → `/models`; `/integrations`, `/server` → Configure. Link canonical routes.
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Desktop["Electron main process"] --> Routes["Next.js app routes"]
-    Browser["Web browser"] --> Routes
-    Routes --> AgentApi["agent runtime proxy"]
-    Routes --> ControllerApi["controller proxy routes"]
-    AgentApi --> Pi["standalone Pi agent runtime"]
-    ControllerApi --> Controller["Local Studio controller"]
-    Configure["/configure"] --> ControllerApi
-    Workbench["/agent"] --> AgentApi
-```
+Electron/browser share Next routes/raw controller proxies. `services/agent-runtime/` executes Pi/browser-host routes; Next proxies them with `shared/agent/` shapes.
 
-The Pi execution and browser-host routes always run in the standalone
-`services/agent-runtime/` sidecar. Next proxies those routes while importing
-shared contracts and non-runtime services from the package. Shared controller
-HTTP shapes come from `@local-studio/contracts`; frontend and agent-runtime
-shapes come from `shared/agent/`.
+Global/Tailwind: `src/app/globals.css` · StyleX shell: `src/features/studio-shell.tsx` · config: `babel.config.js`, `postcss.config.mjs`
 
-## Requirements and Commands
+## Development and desktop
 
-Node.js 22.19+, npm, and a reachable controller are required for the full
-surface. The default controller URL is `http://localhost:8080`.
+Use root [setup](../README.md#setup); controller default: `http://localhost:8080`. In `frontend/`: `bun run build`, `start`, `typecheck`, `typecheck:desktop`, `lint`, `check:quality`. Plain `next start` breaks streaming.
 
-```bash
-npm ci
-npm run build
-npm run start
-npm run typecheck
-npm run typecheck:desktop
-npm run lint
-npm run check:quality
-```
+Desktop: `bun run desktop:build:main`, `desktop:start`, `desktop:pack`, `desktop:dist`. Pack is unpacked; dist makes DMG, updater ZIP, blockmap, metadata, with configured signing when available. `desktop:dist:notarized` notarizes locally. Release CI starts unsigned before isolated signing. Install: `/Applications/Local Studio.app`; id: `org.local.studio.desktop`.
 
-`npm run start` uses the repository project command; plain `next start` does not
-preserve the streaming runtime contract.
+## Controller connection
 
-## Desktop
+`shared/agent/backend-url.ts`: `BACKEND_URL` → `NEXT_PUBLIC_API_URL` → `NEXT_PUBLIC_BACKEND_URL`. Desktop preferences keep URLs local, credentials out of the controller database.
 
-```bash
-npm run desktop:build:main
-electron desktop/dist/main.js  # after npm run desktop:build:main
-npm run desktop:pack
-npm run desktop:dist
-```
+## Code map
 
-`desktop:pack` creates a fast local bundle. `desktop:dist` creates the signed
-DMG, updater ZIP, blockmaps, and update metadata. The only canonical install is
-`/Applications/Local Studio.app` with bundle id `org.local.studio.desktop`.
-Run `APPLE_KEYCHAIN_PROFILE=vllm-studio-notarize npm run
-release signing and notarization run in CI (`sign-release` in release.yml); local
-builds stay unsigned.
-
-## Controller Connection
-
-Controller URL resolution lives in `src/lib/backend-config.ts` and accepts
-`BACKEND_URL`, `NEXT_PUBLIC_BACKEND_URL`, or `LOCAL_STUDIO_BACKEND_URL`. Durable
-desktop preferences preserve controller URLs locally without copying controller
-credentials into the controller database.
-
-## Code Map
-
-- `src/app/` — thin route and API shells.
-- `src/features/agent/` — Workbench sessions, messages, workspace, and UI.
-- `src/features/configure/` — consolidated controller configuration.
-- `src/features/settings/` — application settings and runtime target controls.
-- `src/features/integrations/` — plugins, connectors, skills, accounts, and model providers.
-- `src/lib/` and `src/hooks/` — shared modules with multiple feature consumers.
-- `src/ui/` — shared primitives and ZCode design tokens.
-- `desktop/` — Electron main process, resources, signing, and packaging.
+`src/app/` route/API shells · `src/features/`, `studio*.ts(x)` features/composition · `src/lib/`, `src/hooks/` shared · `desktop/` Electron/resources/signing/packaging

@@ -5,7 +5,6 @@ import { neverFails, type DeviceProbe } from "./probe";
 
 const HWMON_ROOT = "/sys/class/hwmon";
 
-/** hwmon reports millidegrees; anything outside a plausible range is a stuck sensor. */
 const MIN_PLAUSIBLE_C = 1;
 const MAX_PLAUSIBLE_C = 150;
 
@@ -37,7 +36,7 @@ const readChip = (directory: string): readonly ThermalInfo[] => {
     try {
       return readdirSync(`${HWMON_ROOT}/${directory}`);
     } catch {
-      return [] as string[];
+      return [];
     }
   })();
   const readings: ThermalInfo[] = [];
@@ -51,11 +50,6 @@ const readChip = (directory: string): readonly ThermalInfo[] => {
   return readings;
 };
 
-/**
- * Linux CPU and chassis sensors. GPU temperature comes from the vendor tool instead, so
- * this probe never claims the "temperature" capability for accelerators — only for the
- * host readings it actually produces.
- */
 export const thermalProbe: DeviceProbe = {
   id: "thermal",
   detect: (host) => host.platform === "linux",
@@ -66,7 +60,7 @@ export const thermalProbe: DeviceProbe = {
           try {
             return readdirSync(HWMON_ROOT);
           } catch {
-            return [] as string[];
+            return [];
           }
         })();
         const thermals = directories.flatMap(readChip);

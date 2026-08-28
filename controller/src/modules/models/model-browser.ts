@@ -4,7 +4,6 @@ import { Effect, Schema } from "effect";
 import type { ModelInfo } from "./types";
 
 const MODEL_BROWSER_WEIGHT_EXTENSIONS = [".safetensors", ".bin", ".gguf"] as const;
-const MODEL_BROWSER_CONFIG_FILENAMES = ["config.json"] as const;
 const MODEL_QUANTIZATION_SIGNATURES = [
   "awq",
   "gptq",
@@ -27,10 +26,12 @@ export class ModelBrowserError extends Schema.TaggedErrorClass<ModelBrowserError
   },
 ) {}
 
+type ModelBrowserFailure = string | number | boolean | bigint | symbol | null | undefined;
+
 const modelBrowserError = (
   operation: ModelBrowserError["operation"],
   path: string,
-  source: unknown,
+  source: ModelBrowserFailure,
 ): ModelBrowserError =>
   new ModelBrowserError({
     operation,
@@ -39,19 +40,26 @@ const modelBrowserError = (
     source,
   });
 
+const ConfigMetadataSchema = Schema.Struct({
+  architectures: Schema.optional(Schema.Array(Schema.String)),
+  max_position_embeddings: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+  max_seq_len: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+  seq_length: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+  n_ctx: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+});
+
 const isWeightFile = (name: string): boolean =>
   MODEL_BROWSER_WEIGHT_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension));
 
 export const looksLikeModelDirectory = (path: string): Effect.Effect<boolean, ModelBrowserError> =>
   Effect.tryPromise({
     try: () => readdir(path, { withFileTypes: true }),
-    catch: (source) => modelBrowserError("scan", path, source),
+    catch: (source) => modelBrowserError("scan", path, String(source)),
   }).pipe(
-    Effect.map(
-      (entries) =>
-        MODEL_BROWSER_CONFIG_FILENAMES.some((configName) =>
-          entries.some((entry) => entry.isFile() && entry.name === configName),
-        ) || entries.some((entry) => entry.isFile() && isWeightFile(entry.name)),
+    Effect.map((entries) =>
+      entries.some(
+        (entry) => entry.isFile() && (entry.name === "config.json" || isWeightFile(entry.name)),
+      ),
     ),
   );
 
@@ -69,29 +77,23 @@ export const readConfigMetadata = (
   const configPath = join(modelDirectory, "config.json");
   return Effect.tryPromise({
     try: () => readFile(configPath, "utf-8"),
-    catch: (source) => modelBrowserError("read", configPath, source),
+    catch: (source) => modelBrowserError("read", configPath, String(source)),
   }).pipe(
     Effect.flatMap((content) =>
       Effect.try({
-        try: () => JSON.parse(content) as Record<string, unknown>,
-        catch: (source) => modelBrowserError("read", configPath, source),
+        try: () => Schema.decodeUnknownSync(ConfigMetadataSchema)(JSON.parse(content)),
+        catch: (source) => modelBrowserError("read", configPath, String(source)),
       }),
     ),
     Effect.map((parsed) => {
-      const architectures = parsed["architectures"];
-      const architecture =
-        Array.isArray(architectures) && architectures.length > 0 ? String(architectures[0]) : null;
+      const architecture = parsed.architectures?.[0] ?? null;
       const raw =
-        parsed["max_position_embeddings"] ??
-        parsed["max_seq_len"] ??
-        parsed["seq_length"] ??
-        parsed["n_ctx"];
-      const contextLength =
-        typeof raw === "number"
-          ? raw
-          : typeof raw === "string" && /^\d+$/.test(raw)
-            ? Number(raw)
-            : null;
+        parsed.max_position_embeddings ?? parsed.max_seq_len ?? parsed.seq_length ?? parsed.n_ctx;
+      const contextLength = Schema.is(Schema.Number)(raw)
+        ? raw
+        : Schema.is(Schema.String)(raw) && /^\d+$/.test(raw)
+          ? Number(raw)
+          : null;
       return { architecture, context_length: contextLength };
     }),
   );
@@ -104,14 +106,14 @@ export const estimateWeightsSizeBytes = (
   Effect.gen(function* () {
     const rootStats = yield* Effect.tryPromise({
       try: () => stat(modelDirectory),
-      catch: (source) => modelBrowserError("stat", modelDirectory, source),
+      catch: (source) => modelBrowserError("stat", modelDirectory, String(source)),
     });
     if (rootStats.isFile()) {
       return isWeightFile(modelDirectory) && rootStats.size > 0 ? rootStats.size : null;
     }
     const entries = yield* Effect.tryPromise({
       try: () => readdir(modelDirectory, { withFileTypes: true }),
-      catch: (source) => modelBrowserError("scan", modelDirectory, source),
+      catch: (source) => modelBrowserError("scan", modelDirectory, String(source)),
     });
     let total = 0;
     for (const entry of entries) {
@@ -124,7 +126,7 @@ export const estimateWeightsSizeBytes = (
       } else if (entry.isFile() && isWeightFile(entry.name)) {
         total += yield* Effect.tryPromise({
           try: async () => (await stat(path)).size,
-          catch: (source) => modelBrowserError("stat", path, source),
+          catch: (source) => modelBrowserError("stat", path, String(source)),
         }).pipe(Effect.catch(() => Effect.succeed(0)));
       }
     }

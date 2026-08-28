@@ -4,6 +4,8 @@ import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import { resolveDataDir } from "./data-dir";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
+import type { PersistedValue } from "./session-json-store";
 import {
   ConnectorsFileSchema,
   type ConnectorConfig,
@@ -32,29 +34,11 @@ export {
 const MASK = "••••••••";
 const SECRET_KEY_PATTERN = /token|key|secret|password|auth/i;
 
-/**
- * Whether an env/header value is a secret.
- *
- * Explicit flags win: a key present in the connector's `envSecret` /
- * `headerSecret` record is exactly as secret as the author said, so
- * "GITHUB_PAT" can be masked and "AUTH_MODE" can stay readable. Keys without a
- * flag — every entry stored before the flag existed — fall back to the name
- * heuristic that used to be the whole mechanism, so old files keep behaving.
- */
 export const isSecretConnectorKey = (
   key: string,
   flags: Readonly<Record<string, boolean>> | undefined,
 ): boolean => flags?.[key] ?? SECRET_KEY_PATTERN.test(key);
-let connectorAccess = Promise.resolve();
-
-function withConnectorAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = connectorAccess.then(operation);
-  connectorAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withConnectorAccess = createSerialAccess();
 
 function claimsGoogleWorkspace(connector: ConnectorConfig): boolean {
   return (
@@ -92,53 +76,70 @@ export function googleWorkspaceConnector(
   };
 }
 
-/**
- * Connector rows for a signed-in Google account are generated, never authored:
- * anything claiming the binding is rewritten to the shape the account layer
- * would have produced, so a hand-edited connectors.json cannot repoint the
- * mailbox tools at another host or widen them past the read-only allow list.
- *
- * Ids minted before accounts were keyed by mailbox carry no account key, so
- * they can no longer name an account or a grant. They are normalized to a
- * disabled placeholder — visible, inert, and replaced the next time that
- * mailbox is authorized — rather than throwing, which would make the whole
- * connector file unreadable.
- */
-export function protectManagedConnector(connector: ConnectorConfig): ConnectorConfig {
-  if (!claimsGoogleWorkspace(connector)) return connector;
-  const legacyService = legacyGoogleWorkspaceService(connector.id);
-  if (legacyService) {
-    return {
-      id: connector.id,
-      name: `${GOOGLE_WORKSPACE_BINDINGS[legacyService].name} (sign in again)`,
-      transport: "http",
-      url: GOOGLE_WORKSPACE_BINDINGS[legacyService].mcpEndpoint,
-      allowTools: [],
-      origin: { kind: "account-adapter", id: legacyService, binding: "google-workspace" },
-      enabled: false,
-    };
-  }
-  const identity = googleWorkspaceConnectorIdentity(connector.id);
-  const binding = identity ? GOOGLE_WORKSPACE_BINDINGS[identity.service] : null;
-  const valid =
-    identity !== null &&
-    binding !== null &&
+function legacyGoogleWorkspaceConnector(
+  connector: ConnectorConfig,
+  service: GoogleWorkspaceIdentity["service"],
+): ConnectorConfig {
+  return {
+    id: connector.id,
+    name: `${GOOGLE_WORKSPACE_BINDINGS[service].name} (sign in again)`,
+    transport: "http",
+    url: GOOGLE_WORKSPACE_BINDINGS[service].mcpEndpoint,
+    allowTools: [],
+    origin: { kind: "account-adapter", id: service, binding: "google-workspace" },
+    enabled: false,
+  };
+}
+
+function matchesManagedIdentity(
+  connector: ConnectorConfig,
+  identity: GoogleWorkspaceIdentity,
+): boolean {
+  const account = googleWorkspaceAuthAccount(identity);
+  return (
     connector.transport === "http" &&
     isGoogleWorkspaceEndpoint(identity.service, connector.url ?? "") &&
     connector.auth?.type === "oauth" &&
     connector.auth.provider === "google-workspace" &&
-    connector.auth.account === googleWorkspaceAuthAccount(identity) &&
+    connector.auth.account === account &&
     connector.origin?.kind === "account-adapter" &&
-    connector.origin.id === googleWorkspaceAuthAccount(identity) &&
-    connector.origin.binding === "google-workspace" &&
-    !connector.command &&
-    !connector.cwd &&
-    !connector.args?.length &&
-    !connector.env &&
-    !connector.headers &&
-    connector.allowTools?.length === binding.observeTools.length &&
-    binding.observeTools.every((tool, index) => connector.allowTools?.[index] === tool);
-  if (!valid || !identity) {
+    connector.origin.id === account &&
+    connector.origin.binding === "google-workspace"
+  );
+}
+
+function hasOnlyManagedFields(connector: ConnectorConfig): boolean {
+  return !(
+    connector.command ||
+    connector.cwd ||
+    connector.args?.length ||
+    connector.env ||
+    connector.headers
+  );
+}
+
+function matchesManagedTools(
+  connector: ConnectorConfig,
+  identity: GoogleWorkspaceIdentity,
+): boolean {
+  const tools = GOOGLE_WORKSPACE_BINDINGS[identity.service].observeTools;
+  return (
+    connector.allowTools?.length === tools.length &&
+    tools.every((tool, index) => connector.allowTools?.[index] === tool)
+  );
+}
+
+export function protectManagedConnector(connector: ConnectorConfig): ConnectorConfig {
+  if (!claimsGoogleWorkspace(connector)) return connector;
+  const legacyService = legacyGoogleWorkspaceService(connector.id);
+  if (legacyService) return legacyGoogleWorkspaceConnector(connector, legacyService);
+  const identity = googleWorkspaceConnectorIdentity(connector.id);
+  if (
+    !identity ||
+    !matchesManagedIdentity(connector, identity) ||
+    !hasOnlyManagedFields(connector) ||
+    !matchesManagedTools(connector, identity)
+  ) {
     throw new Error(`Managed Google Workspace connector "${connector.id}" is immutable`);
   }
   return {
@@ -151,21 +152,18 @@ export function resolveConnectorsFilePath(): string {
   return join(resolveDataDir(), "connectors.json");
 }
 
+export async function writePrivateJson(file: string, value: PersistedValue): Promise<void> {
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
+  await chmod(temporary, 0o600);
+  await rename(temporary, file);
+  await chmod(file, 0o600);
+}
+
 const CONNECTOR_ID_PATTERN = /^[a-z0-9][a-z0-9-_]{0,63}$/;
 
 export const isValidConnectorId = (id: string): boolean => CONNECTOR_ID_PATTERN.test(id);
 
-/**
- * The namespace a connector's tools are registered under.
- *
- * Mirrors what the connectors extension does when it builds `<prefix>_<tool>`
- * (desktop/resources/pi-extensions/connectors.ts). It is restated here rather
- * than shared because that file is loaded by pi from outside this package, but
- * the mapping is not free of consequence: hyphens fold to underscores, so two
- * ids that differ only in that separator produce the same prefix and the second
- * connector's tools would silently overwrite the first's. The upsert route
- * compares on this, not on the id.
- */
 export const connectorToolPrefix = (id: string): string => id.replace(/-/g, "_");
 
 export async function listConnectors(): Promise<ConnectorConfig[]> {
@@ -184,11 +182,7 @@ export async function listConnectors(): Promise<ConnectorConfig[]> {
 async function writeConnectors(connectors: ConnectorConfig[]): Promise<void> {
   resolveDataDir();
   const file = resolveConnectorsFilePath();
-  const payload = JSON.stringify({ connectors: connectors.map(protectManagedConnector) }, null, 2);
-  const tempFile = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tempFile, payload, "utf-8");
-  await chmod(tempFile, 0o600).catch(() => undefined);
-  await rename(tempFile, file);
+  await writePrivateJson(file, { connectors: connectors.map(protectManagedConnector) });
 }
 
 export function saveConnectors(connectors: ConnectorConfig[]): Promise<void> {
@@ -199,28 +193,39 @@ export async function upsertConnector(connector: ConnectorConfig): Promise<Conne
   return upsertConnectors([connector]);
 }
 
+function mergedConnectorSecrets(
+  connector: ConnectorConfig,
+  existing: ConnectorConfig | undefined,
+): Pick<ConnectorConfig, "env" | "headers" | "envSecret" | "headerSecret"> {
+  return {
+    env: mergeSecrets(connector.env, existing?.env, existing?.envSecret),
+    headers: mergeSecrets(connector.headers, existing?.headers, existing?.headerSecret),
+    envSecret: connector.envSecret ?? existing?.envSecret,
+    headerSecret: connector.headerSecret ?? existing?.headerSecret,
+  };
+}
+
+function mergeConnector(
+  connector: ConnectorConfig,
+  existing: ConnectorConfig | undefined,
+): ConnectorConfig {
+  return {
+    ...connector,
+    ...mergedConnectorSecrets(connector, existing),
+    cwd: connector.cwd ?? existing?.cwd,
+    allowTools: "allowTools" in connector ? connector.allowTools : existing?.allowTools,
+    origin: connector.origin ?? existing?.origin,
+    auth: connector.auth ?? existing?.auth,
+  };
+}
+
 export function upsertConnectors(incoming: ConnectorConfig[]): Promise<ConnectorConfig[]> {
   return withConnectorAccess(async () => {
     const connectors = await listConnectors();
     for (const candidate of incoming) {
       const connector = protectManagedConnector(candidate);
       const index = connectors.findIndex((entry) => entry.id === connector.id);
-      const existing = index === -1 ? null : connectors[index];
-      const merged: ConnectorConfig = {
-        ...connector,
-        env: mergeSecrets(connector.env, existing?.env, existing?.envSecret),
-        headers: mergeSecrets(connector.headers, existing?.headers, existing?.headerSecret),
-        envSecret: connector.envSecret ?? existing?.envSecret,
-        headerSecret: connector.headerSecret ?? existing?.headerSecret,
-        cwd: connector.cwd ?? existing?.cwd,
-        // Presence, not truthiness: an incoming connector that carries the key
-        // with an undefined value is deliberately clearing the allow list, and
-        // `??` would have handed the old restriction straight back. Callers
-        // that mean "unchanged" omit the key entirely.
-        allowTools: "allowTools" in connector ? connector.allowTools : existing?.allowTools,
-        origin: connector.origin ?? existing?.origin,
-        auth: connector.auth ?? existing?.auth,
-      };
+      const merged = mergeConnector(connector, connectors[index]);
       if (index === -1) connectors.push(merged);
       else connectors[index] = merged;
     }
@@ -230,8 +235,6 @@ export function upsertConnectors(incoming: ConnectorConfig[]): Promise<Connector
 }
 
 export function removeConnector(id: string): Promise<ConnectorConfig[]> {
-  // Legacy placeholders are deliberately removable: they are inert rows kept
-  // only so the file still parses, and clearing them is how a user tidies up.
   if (googleWorkspaceConnectorIdentity(id)) {
     return Promise.reject(
       new Error(`Managed Google Workspace connector "${id}" cannot be removed`),
@@ -244,12 +247,6 @@ export function removeConnector(id: string): Promise<ConnectorConfig[]> {
   });
 }
 
-/**
- * Restores stored values behind the mask sentinel. Only keys the *stored*
- * connector masked on read can round-trip: those are the only keys a client
- * ever saw as bullets, so bullets typed against an unmasked key are a literal
- * value, not a reference to the store.
- */
 function mergeSecrets(
   incoming: Record<string, string> | undefined,
   stored: Record<string, string> | undefined,

@@ -1,17 +1,23 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { StdioServerParameters } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Tool, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolResultSchema,
+  type CallToolRequest,
+  type Tool,
+} from "@modelcontextprotocol/sdk/types.js";
 import { BoundedStdioClientTransport } from "./mcp-stdio-transport";
 
 export { McpProtocolError } from "./mcp-stdio-transport";
 
-export type McpToolAnnotations = ToolAnnotations;
 export type McpToolInfo = Tool;
+export type McpToolArguments = NonNullable<CallToolRequest["params"]["arguments"]>;
+export type McpCallToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
 export interface McpConnection {
   listTools(): Promise<McpToolInfo[]>;
-  callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+  callTool(name: string, args: McpToolArguments): Promise<McpCallToolResult>;
   close(): void;
 }
 
@@ -35,10 +41,6 @@ export type McpTarget = StdioTarget | HttpTarget;
 
 const CLIENT_INFO = { name: "local-studio", version: "2.0.0" };
 
-// MCP children get a minimal environment, not this process's: the runtime's
-// env carries controller keys, OAuth client secrets, and session tokens that
-// no third-party server package has any business reading. A connector that
-// needs a value declares it in target.env.
 const INHERITED_ENV_KEYS = [
   "PATH",
   "HOME",
@@ -48,7 +50,6 @@ const INHERITED_ENV_KEYS = [
   "LANG",
   "LC_ALL",
   "TERM",
-  // Windows process bootstrap requires these.
   "SYSTEMROOT",
   "SystemRoot",
   "COMSPEC",
@@ -59,13 +60,14 @@ const INHERITED_ENV_KEYS = [
   "TMP",
 ] as const;
 
-const processEnvironment = (): Record<string, string> =>
-  Object.fromEntries(
-    INHERITED_ENV_KEYS.flatMap((key) => {
-      const value = process.env[key];
-      return value === undefined ? [] : [[key, value] as [string, string]];
-    }),
-  );
+const processEnvironment = () => {
+  const entries: [string, string][] = [];
+  for (const key of INHERITED_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) entries.push([key, value]);
+  }
+  return Object.fromEntries(entries);
+};
 
 const combinedSignal = (
   requestSignal: AbortSignal | null | undefined,
@@ -93,67 +95,43 @@ const authorizedFetch =
     return response.status === 401 && target.authorize ? send(true) : response;
   };
 
-const errorFrom = (error: unknown): Error =>
-  error instanceof Error ? error : new Error(String(error));
-
 class TerminalFailure {
   private error: Error | null = null;
-  private readonly rejectors = new Set<(error: Error) => void>();
+  private reject: (error: Error) => void = () => undefined;
+  private readonly failed = new Promise<never>((_, reject) => {
+    this.reject = reject;
+  });
 
   run<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.error) return Promise.reject(this.error);
-    return new Promise<T>((resolve, reject) => {
-      const rejectTerminal = (error: Error): void => {
-        this.rejectors.delete(rejectTerminal);
-        reject(error);
-      };
-      this.rejectors.add(rejectTerminal);
-      let pending: Promise<T>;
-      try {
-        pending = operation();
-      } catch (error) {
-        this.rejectors.delete(rejectTerminal);
-        reject(errorFrom(error));
-        return;
-      }
-      void pending.then(
-        (value) => {
-          this.rejectors.delete(rejectTerminal);
-          resolve(value);
-        },
-        (error: unknown) => {
-          this.rejectors.delete(rejectTerminal);
-          reject(error);
-        },
-      );
-    });
+    return this.error ? Promise.reject(this.error) : Promise.race([operation(), this.failed]);
   }
 
   fail(error: Error): Error {
-    if (this.error) return this.error;
-    this.error = error;
-    for (const reject of this.rejectors) reject(error);
-    this.rejectors.clear();
-    return error;
+    if (!this.error) {
+      this.error = error;
+      this.reject(error);
+    }
+    return this.error;
   }
 }
 
-const transportFor = (
-  target: McpTarget,
-): { transport: Transport; terminal: TerminalFailure | null } => {
+interface TransportConnection {
+  transport: Transport;
+  terminal: TerminalFailure | null;
+}
+
+const transportFor = (target: McpTarget): TransportConnection => {
   if (target.transport === "stdio") {
     const terminal = new TerminalFailure();
+    const options: StdioServerParameters = {
+      command: target.command,
+      args: target.args ?? [],
+      env: { ...processEnvironment(), ...target.env },
+      stderr: "pipe",
+      cwd: target.cwd,
+    };
     return {
-      transport: new BoundedStdioClientTransport(
-        {
-          command: target.command,
-          args: target.args ?? [],
-          env: { ...processEnvironment(), ...(target.env ?? {}) },
-          ...(target.cwd ? { cwd: target.cwd } : {}),
-          stderr: "pipe",
-        },
-        (error) => terminal.fail(error),
-      ),
+      transport: new BoundedStdioClientTransport(options, (error) => terminal.fail(error)),
       terminal,
     };
   }
@@ -190,10 +168,12 @@ class SdkMcpConnection implements McpConnection {
     });
   }
 
-  callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  callTool(name: string, args: McpToolArguments): Promise<McpCallToolResult> {
     return this.run(async () => {
       await this.connected;
-      return this.client.callTool({ name, arguments: args }, undefined, { signal: this.signal });
+      return this.client.callTool({ name, arguments: args }, CallToolResultSchema, {
+        signal: this.signal,
+      });
     });
   }
 

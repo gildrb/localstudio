@@ -1,14 +1,17 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
-import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
+import { listenOnLoopback } from "./oauth-loopback-listener";
 import { resolveDataDir } from "./data-dir";
 import {
   listConnectors,
   saveConnectors,
-  upsertConnector,
+  upsertConnectors,
+  writePrivateJson,
   type ConnectorConfig,
 } from "./connectors-service";
 import {
@@ -19,24 +22,6 @@ import {
   type OAuthAuthorizeResponse,
   type OAuthStatusResponse,
 } from "./oauth-connector-contract";
-
-/**
- * The generic OAuth engine behind click-to-connect catalog connectors.
- *
- * Two flows, both ending in the same place:
- *
- *  - device code: the provider hands back a short code the user types into the
- *    provider's own site; this process polls the token endpoint until the
- *    provider says yes. No secret, no redirect, works for public clients.
- *  - loopback + PKCE (S256): an authorization-code flow whose redirect is an
- *    ephemeral 127.0.0.1 listener owned by this process — the same shape the
- *    Google account flow uses, generalized to any provider definition.
- *
- * Tokens land in `<dataDir>/oauth-tokens.json` (0600, atomic replace), keyed
- * by connector id. The refresh token never leaves this file: what a spawned
- * MCP child receives is a fresh access token, injected into the env var the
- * server package already documents, at the moment the pool opens it.
- */
 
 export class OAuthConnectorError extends Error {
   constructor(
@@ -52,7 +37,7 @@ export type OAuthConnectorDependencies = {
   now: () => number;
   random: (size: number) => Buffer;
   requestTimeoutMs?: number;
-  /** Test seam: endpoint overrides per provider, so no flow touches the real host. */
+
   definitions?: Partial<Record<OAuthConnectorProviderId, OAuthConnectorAuthDefinition>>;
 };
 
@@ -62,23 +47,12 @@ const defaultDependencies: OAuthConnectorDependencies = {
   random: randomBytes,
 };
 
-let activeDefaults: OAuthConnectorDependencies = defaultDependencies;
-
-/**
- * Replaces the defaults used when a caller passes no dependencies — the HTTP
- * handlers, notably. Exists so a harness can drive the real routes against a
- * fake provider; nothing in production calls it.
- */
-export function setDefaultOAuthConnectorDependencies(
-  overrides: Partial<OAuthConnectorDependencies> | null,
-): void {
-  activeDefaults = overrides ? { ...defaultDependencies, ...overrides } : defaultDependencies;
-}
+const OptionalNullableString = Schema.optional(Schema.NullOr(Schema.String));
 
 const TokenRecordSchema = Schema.Struct({
   accessToken: Schema.String,
   refreshToken: Schema.optional(Schema.String),
-  /** Epoch ms. Absent for providers whose tokens do not expire (GitHub OAuth apps). */
+
   expiresAt: Schema.optional(Schema.Number),
   scopes: Schema.Array(Schema.String),
   account: Schema.optional(Schema.String),
@@ -93,6 +67,24 @@ const StoreSchema = Schema.Struct({
 
 type TokenRecord = typeof TokenRecordSchema.Type;
 type Store = typeof StoreSchema.Type;
+
+const OAuthProviderResponseSchema = Schema.Struct({
+  access_token: OptionalNullableString,
+  refresh_token: OptionalNullableString,
+  scope: OptionalNullableString,
+  error: OptionalNullableString,
+  device_code: OptionalNullableString,
+  user_code: OptionalNullableString,
+  verification_uri: OptionalNullableString,
+  expires_in: Schema.optional(Schema.NullOr(Schema.Number)),
+  interval: Schema.optional(Schema.NullOr(Schema.Number)),
+  login: OptionalNullableString,
+  name: OptionalNullableString,
+  email: OptionalNullableString,
+  sub: OptionalNullableString,
+});
+
+type OAuthProviderResponse = typeof OAuthProviderResponseSchema.Type;
 
 export function resolveOAuthTokensFilePath(): string {
   return path.join(resolveDataDir(), "oauth-tokens.json");
@@ -110,27 +102,10 @@ async function readStore(): Promise<Store> {
   }
 }
 
-async function writeStore(store: Store): Promise<void> {
-  const file = resolveOAuthTokensFilePath();
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(temporary, JSON.stringify(store, null, 2), { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, file);
-  await chmod(file, 0o600);
+function writeStore(store: Store): Promise<void> {
+  return writePrivateJson(resolveOAuthTokensFilePath(), store);
 }
-
-// One writer at a time. A device poll finishing while a disconnect runs must
-// not interleave read-modify-write cycles on the same file.
-let storeAccess = Promise.resolve();
-
-function withStoreAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = storeAccess.then(operation);
-  storeAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withStoreAccess = createSerialAccess();
 
 function updateStore(mutate: (store: Store) => Store): Promise<Store> {
   return withStoreAccess(async () => {
@@ -140,11 +115,6 @@ function updateStore(mutate: (store: Store) => Store): Promise<Store> {
   });
 }
 
-/**
- * A provider definition with test overrides applied. Everything below resolves
- * endpoints through this, so a test can stand up a fake provider without any
- * code path knowing the difference.
- */
 function definitionFor(
   provider: OAuthConnectorProvider,
   dependencies: OAuthConnectorDependencies,
@@ -171,15 +141,20 @@ async function resolveClientId(
   return definition.clientId ?? null;
 }
 
-function requestSignal(dependencies: OAuthConnectorDependencies): AbortSignal {
-  return AbortSignal.timeout(dependencies.requestTimeoutMs ?? 15_000);
+function requestSignal(
+  dependencies: OAuthConnectorDependencies,
+  cancellation?: AbortSignal,
+): AbortSignal {
+  const timeout = AbortSignal.timeout(dependencies.requestTimeoutMs ?? 15_000);
+  return cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
 }
 
 async function postForm(
   url: string,
   body: Record<string, string>,
   dependencies: OAuthConnectorDependencies,
-): Promise<Record<string, unknown>> {
+  cancellation?: AbortSignal,
+): Promise<OAuthProviderResponse> {
   let response: Response;
   try {
     response = await dependencies.fetch(url, {
@@ -189,29 +164,24 @@ async function postForm(
         "content-type": "application/x-www-form-urlencoded",
       },
       body: new URLSearchParams(body),
-      signal: requestSignal(dependencies),
+      signal: requestSignal(dependencies, cancellation),
     });
   } catch {
     throw new OAuthConnectorError(502, "The OAuth provider could not be reached");
   }
-  const parsed: unknown = await response.json().catch(() => null);
-  if (!parsed || typeof parsed !== "object") {
+  try {
+    return Schema.decodeUnknownSync(OAuthProviderResponseSchema)(await response.json());
+  } catch {
     throw new OAuthConnectorError(502, "The OAuth provider returned an unreadable response");
   }
-  return parsed as Record<string, unknown>;
 }
 
-const readString = (record: Record<string, unknown>, key: string): string | null => {
-  const value = record[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
-};
+const readString = (value: string | null | undefined): string | null =>
+  value && value.length > 0 ? value : null;
 
-const readNumber = (record: Record<string, unknown>, key: string): number | null => {
-  const value = record[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-};
+const readNumber = (value: number | null | undefined): number | null =>
+  value !== null && value !== undefined && Number.isFinite(value) ? value : null;
 
-/** GitHub separates scopes with commas, RFC 8693 with spaces; accept both. */
 const parseScopes = (raw: string | null, requested: readonly string[]): string[] => {
   const scopes = raw?.split(/[\s,]+/).filter(Boolean) ?? [];
   return scopes.length ? scopes : [...requested];
@@ -227,52 +197,44 @@ async function fetchAccountName(
       headers: {
         accept: "application/json",
         authorization: `Bearer ${accessToken}`,
-        // GitHub's API rejects requests without one.
         "user-agent": "local-studio",
       },
       signal: requestSignal(dependencies),
     });
     if (!response.ok) return null;
-    const body: unknown = await response.json().catch(() => null);
-    if (!body || typeof body !== "object") return null;
-    return readString(body as Record<string, unknown>, definition.identityField);
+    const body = Schema.decodeUnknownSync(OAuthProviderResponseSchema)(await response.json());
+    return readString(body[definition.identityField]);
   } catch {
-    // The token works even when the identity lookup does not; a connection
-    // without a display name beats a failed connect.
     return null;
   }
 }
 
 function tokenRecordFrom(
-  body: Record<string, unknown>,
+  body: OAuthProviderResponse,
   definition: OAuthConnectorAuthDefinition,
   account: string | null,
   dependencies: OAuthConnectorDependencies,
 ): TokenRecord {
-  const accessToken = readString(body, "access_token");
+  const accessToken = readString(body.access_token);
   if (!accessToken) {
     throw new OAuthConnectorError(502, "The OAuth provider returned no access token");
   }
-  const expiresIn = readNumber(body, "expires_in");
-  const refreshToken = readString(body, "refresh_token");
-  return {
+  const expiresIn = readNumber(body.expires_in);
+  const refreshToken = readString(body.refresh_token);
+  let record: TokenRecord = {
     accessToken,
-    ...(refreshToken ? { refreshToken } : {}),
-    ...(expiresIn ? { expiresAt: dependencies.now() + expiresIn * 1000 } : {}),
-    scopes: parseScopes(readString(body, "scope"), definition.scopes),
-    ...(account ? { account } : {}),
+    scopes: parseScopes(readString(body.scope), definition.scopes),
     obtainedAt: new Date(dependencies.now()).toISOString(),
   };
+  if (refreshToken) record = { ...record, refreshToken };
+  if (expiresIn) record = { ...record, expiresAt: dependencies.now() + expiresIn * 1000 };
+  if (account) record = { ...record, account };
+  return record;
 }
 
-/**
- * The moment a flow succeeds: persist the grant, then rewrite the connector
- * row so the pool can find it. The row deliberately loses any stored value
- * under `tokenEnv` — the whole point is that the env var is filled with a
- * fresh token at spawn, not read from a file that would go stale.
- */
 async function commitConnection(
   provider: OAuthConnectorProvider,
+  definition: OAuthConnectorAuthDefinition,
   record: TokenRecord,
 ): Promise<void> {
   await updateStore((store) => ({
@@ -281,27 +243,25 @@ async function commitConnection(
   }));
   const existing = (await listConnectors()).find((entry) => entry.id === provider.id);
   const cleanedEnv = { ...existing?.env };
-  delete cleanedEnv[provider.auth.tokenEnv];
+  delete cleanedEnv[definition.tokenEnv];
   const cleanedFlags = { ...existing?.envSecret };
-  delete cleanedFlags[provider.auth.tokenEnv];
-  const connector: ConnectorConfig = {
+  delete cleanedFlags[definition.tokenEnv];
+  let connector: ConnectorConfig = {
     id: provider.id,
     name: record.account ? `${provider.name} · ${record.account}` : provider.name,
     transport: "stdio",
     command: provider.connector.command,
     args: [...provider.connector.args],
-    ...(Object.keys(cleanedEnv).length ? { env: cleanedEnv } : {}),
-    ...(Object.keys(cleanedFlags).length ? { envSecret: cleanedFlags } : {}),
     auth: {
       type: "oauth",
       provider: provider.id,
       account: record.account ?? provider.id,
     },
-    // Connecting grants access; running the MCP server stays a separate,
-    // deliberate act, same as every other new connector row.
     enabled: existing?.enabled ?? false,
   };
-  await upsertConnector(connector);
+  if (Object.keys(cleanedEnv).length) connector = { ...connector, env: cleanedEnv };
+  if (Object.keys(cleanedFlags).length) connector = { ...connector, envSecret: cleanedFlags };
+  await upsertConnectors([connector]);
 }
 
 type ActiveFlow = {
@@ -311,13 +271,38 @@ type ActiveFlow = {
   verificationUri?: string;
   expiresAt: number;
   controller: AbortController;
-  /** Resolves when the background half of the flow stops, however it stops. */
+
   settled: Promise<void>;
   server?: Server;
 };
 
 const activeFlows = new Map<string, ActiveFlow>();
 const lastFlowErrors = new Map<string, string>();
+
+function ownsFlow(providerId: string, flow: ActiveFlow): boolean {
+  return activeFlows.get(providerId) === flow && !flow.controller.signal.aborted;
+}
+
+async function commitFlow(
+  provider: OAuthConnectorProvider,
+  definition: OAuthConnectorAuthDefinition,
+  body: OAuthProviderResponse,
+  flow: ActiveFlow,
+  dependencies: OAuthConnectorDependencies,
+): Promise<void> {
+  const accessToken = readString(body.access_token);
+  if (!accessToken) {
+    throw new OAuthConnectorError(502, "The OAuth provider returned no access token");
+  }
+  if (!ownsFlow(provider.id, flow)) return;
+  const account = await fetchAccountName(definition, accessToken, dependencies);
+  if (!ownsFlow(provider.id, flow)) return;
+  await commitConnection(
+    provider,
+    definition,
+    tokenRecordFrom(body, definition, account, dependencies),
+  );
+}
 
 function closeFlow(connectorId: string, expectedId?: string): void {
   const flow = activeFlows.get(connectorId);
@@ -366,11 +351,11 @@ async function pollDeviceGrant(
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
       },
       dependencies,
+      flow.controller.signal,
     );
-    const error = readString(body, "error");
+    const error = readString(body.error);
     if (error === "authorization_pending") continue;
     if (error === "slow_down") {
-      // RFC 8628: every slow_down adds 5 seconds to the interval, permanently.
       intervalMs += 5000;
       continue;
     }
@@ -379,14 +364,7 @@ async function pollDeviceGrant(
     }
     if (error === "expired_token") break;
     if (error) throw new OAuthConnectorError(502, `The OAuth provider failed: ${error}`);
-    const accessToken = readString(body, "access_token");
-    if (!accessToken) {
-      throw new OAuthConnectorError(502, "The OAuth provider returned no access token");
-    }
-    if (flow.controller.signal.aborted) return;
-    const account = await fetchAccountName(definition, accessToken, dependencies);
-    if (flow.controller.signal.aborted) return;
-    await commitConnection(provider, tokenRecordFrom(body, definition, account, dependencies));
+    await commitFlow(provider, definition, body, flow, dependencies);
     return;
   }
   throw new OAuthConnectorError(408, "The sign-in code expired before it was used");
@@ -406,11 +384,11 @@ async function beginDeviceAuthorization(
     { client_id: clientId, scope: definition.scopes.join(" ") },
     dependencies,
   );
-  const deviceCode = readString(body, "device_code");
-  const userCode = readString(body, "user_code");
-  const verificationUri = readString(body, "verification_uri");
+  const deviceCode = readString(body.device_code);
+  const userCode = readString(body.user_code);
+  const verificationUri = readString(body.verification_uri);
   if (!deviceCode || !userCode || !verificationUri) {
-    const error = readString(body, "error");
+    const error = readString(body.error);
     throw new OAuthConnectorError(
       502,
       error
@@ -418,7 +396,7 @@ async function beginDeviceAuthorization(
         : `${provider.name} returned an invalid device authorization`,
     );
   }
-  const expiresAt = dependencies.now() + (readNumber(body, "expires_in") ?? 900) * 1000;
+  const expiresAt = dependencies.now() + (readNumber(body.expires_in) ?? 900) * 1000;
   const controller = new AbortController();
   const flow: ActiveFlow = {
     id: randomUUID(),
@@ -434,12 +412,12 @@ async function beginDeviceAuthorization(
     definition,
     clientId,
     deviceCode,
-    readNumber(body, "interval") ?? 5,
+    readNumber(body.interval) ?? 5,
     expiresAt,
     flow,
     dependencies,
   )
-    .catch((error: unknown) => {
+    .catch((error) => {
       if (controller.signal.aborted) return;
       lastFlowErrors.set(
         provider.id,
@@ -468,21 +446,6 @@ function respondHtml(response: ServerResponse, success: boolean, providerName: s
   response.end(callbackPage(success, providerName));
 }
 
-function listen(server: Server): Promise<number> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("Loopback listener failed"));
-        return;
-      }
-      resolve(address.port);
-    });
-  });
-}
-
 async function beginPkceAuthorization(
   provider: OAuthConnectorProvider,
   definition: OAuthConnectorAuthDefinition,
@@ -496,7 +459,6 @@ async function beginPkceAuthorization(
   const state = dependencies.random(32).toString("base64url");
   const flowId = randomUUID();
   const controller = new AbortController();
-  // Assigned once the listener has a port; the handler only runs after that.
   let redirectUri = "";
   const server = createServer((request, response) => {
     void (async () => {
@@ -508,7 +470,6 @@ async function beginPkceAuthorization(
       const code = url.searchParams.get("code");
       if (url.searchParams.get("state") !== state || !code || controller.signal.aborted) {
         respondHtml(response, false, provider.name);
-        closeFlow(provider.id, flowId);
         return;
       }
       try {
@@ -522,14 +483,12 @@ async function beginPkceAuthorization(
             redirect_uri: redirectUri,
           },
           dependencies,
+          controller.signal,
         );
-        const accessToken = readString(body, "access_token");
-        if (!accessToken) {
-          throw new OAuthConnectorError(502, "The OAuth provider returned no access token");
-        }
-        const account = await fetchAccountName(definition, accessToken, dependencies);
-        await commitConnection(provider, tokenRecordFrom(body, definition, account, dependencies));
-        respondHtml(response, true, provider.name);
+        const flow = activeFlows.get(provider.id);
+        if (flow?.id !== flowId) return;
+        await commitFlow(provider, definition, body, flow, dependencies);
+        respondHtml(response, ownsFlow(provider.id, flow), provider.name);
       } catch (error) {
         lastFlowErrors.set(
           provider.id,
@@ -541,7 +500,7 @@ async function beginPkceAuthorization(
       }
     })();
   });
-  const port = await listen(server).catch(() => {
+  const port = await listenOnLoopback(server).catch(() => {
     throw new OAuthConnectorError(500, "Could not start the private OAuth callback");
   });
   redirectUri = `http://127.0.0.1:${port}/callback`;
@@ -554,7 +513,6 @@ async function beginPkceAuthorization(
     settled: Promise.resolve(),
     server,
   };
-  // The listener cannot wait forever on a consent tab nobody finishes.
   flow.settled = sleep(10 * 60 * 1000, controller.signal).then(() =>
     closeFlow(provider.id, flowId),
   );
@@ -574,7 +532,7 @@ async function beginPkceAuthorization(
 
 export async function beginOAuthConnectorAuthorization(
   connectorId: string,
-  dependencies: OAuthConnectorDependencies = activeDefaults,
+  dependencies: OAuthConnectorDependencies = defaultDependencies,
 ): Promise<OAuthAuthorizeResponse> {
   const provider = requireProvider(connectorId);
   const definition = definitionFor(provider, dependencies);
@@ -595,7 +553,6 @@ export function cancelOAuthConnectorAuthorization(connectorId: string): void {
   lastFlowErrors.delete(connectorId);
 }
 
-/** Test seam: the background half of the active flow, so tests can await it. */
 export function oauthConnectorFlowSettled(connectorId: string): Promise<void> {
   return activeFlows.get(connectorId)?.settled ?? Promise.resolve();
 }
@@ -611,8 +568,6 @@ export async function saveOAuthConnectorClient(
   await updateStore((store) => {
     const replacingClient = store.clients[provider.id]?.clientId !== trimmed;
     const tokens = { ...store.tokens };
-    // A token minted by one client is meaningless under another; keeping it
-    // would report "connected" while every refresh and every call fails.
     if (replacingClient) delete tokens[provider.id];
     return {
       ...store,
@@ -624,7 +579,7 @@ export async function saveOAuthConnectorClient(
 
 export async function getOAuthConnectorStatus(
   connectorId: string,
-  dependencies: OAuthConnectorDependencies = activeDefaults,
+  dependencies: OAuthConnectorDependencies = defaultDependencies,
 ): Promise<OAuthStatusResponse> {
   const provider = requireProvider(connectorId);
   const definition = definitionFor(provider, dependencies);
@@ -652,23 +607,15 @@ export async function getOAuthConnectorStatus(
   };
 }
 
-export async function disconnectOAuthConnector(
-  connectorId: string,
-): Promise<OAuthStatusResponse> {
+export async function disconnectOAuthConnector(connectorId: string): Promise<OAuthStatusResponse> {
   const provider = requireProvider(connectorId);
   closeFlow(provider.id);
   lastFlowErrors.delete(provider.id);
-  // GitHub only exposes grant revocation to confidential clients (HTTP basic
-  // auth with the client secret); a public device-flow client has no secret to
-  // present, so the honest disconnect is to destroy the local grant and stop
-  // offering the tools.
   await updateStore((store) => {
     const tokens = { ...store.tokens };
     delete tokens[provider.id];
     return { ...store, tokens };
   });
-  // Not `upsertConnector`: its merge hands the stored `auth` back when the
-  // incoming row omits it, which is exactly the field a disconnect must clear.
   const connectors = await listConnectors();
   const index = connectors.findIndex((entry) => entry.id === provider.id);
   const existing = index === -1 ? undefined : connectors[index];
@@ -680,14 +627,9 @@ export async function disconnectOAuthConnector(
   return getOAuthConnectorStatus(connectorId);
 }
 
-/**
- * The access token a spawn should carry, refreshed first when it is about to
- * expire. Serialized behind the store mutex so two connectors spawning at once
- * cannot both burn the same refresh token.
- */
 export function freshOAuthConnectorAccessToken(
   connectorId: string,
-  dependencies: OAuthConnectorDependencies = activeDefaults,
+  dependencies: OAuthConnectorDependencies = defaultDependencies,
 ): Promise<string> {
   const provider = requireProvider(connectorId);
   const definition = definitionFor(provider, dependencies);
@@ -719,18 +661,16 @@ export function freshOAuthConnectorAccessToken(
       },
       dependencies,
     );
-    if (readString(body, "error")) {
+    if (readString(body.error)) {
       throw new OAuthConnectorError(
         401,
         `The ${provider.name} connection expired; connect it again`,
       );
     }
-    const refreshed: TokenRecord = {
-      ...tokenRecordFrom(body, definition, record.account ?? null, dependencies),
-      // Some providers rotate the refresh token on every use, some omit it
-      // from the refresh response; only a returned one replaces the stored one.
-      ...(readString(body, "refresh_token") ? {} : { refreshToken: record.refreshToken }),
-    };
+    let refreshed = tokenRecordFrom(body, definition, record.account ?? null, dependencies);
+    if (!readString(body.refresh_token)) {
+      refreshed = { ...refreshed, refreshToken: record.refreshToken };
+    }
     await writeStore({
       ...store,
       tokens: { ...store.tokens, [provider.id]: refreshed },
@@ -739,15 +679,9 @@ export function freshOAuthConnectorAccessToken(
   });
 }
 
-/**
- * What the connector pool merges into a stdio child's environment: the token
- * env var and nothing else. Only a row whose id IS the provider id gets the
- * injection — a hand-edited row claiming `auth.provider: "github"` under some
- * other id names a grant it does not own and receives nothing.
- */
 export async function oauthConnectorSpawnEnv(
   connector: ConnectorConfig,
-  dependencies: OAuthConnectorDependencies = activeDefaults,
+  dependencies: OAuthConnectorDependencies = defaultDependencies,
 ): Promise<Record<string, string>> {
   const provider = oauthConnectorProvider(connector.id);
   if (!provider) return {};

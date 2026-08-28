@@ -14,18 +14,10 @@ import { applyDevices } from "./engines/devices";
 import { engineSpec, planLaunch, supportsRuntime } from "./engines/registry";
 import { toEvent } from "./failures";
 import type { Launcher } from "./launchers/launcher";
-import type { InstanceStore } from "./instances/store";
-
-/**
- * The only mutator in the compute layer. Everything it knows lives in the instance
- * records; there is no coordinator state to go stale, and cancellation is one flag per
- * name rather than an abort controller + an intent serial + a boolean racing each other.
- */
+import type { InstanceStore, Reservation } from "./instances/store";
 
 const STOP_GRACE_MS = 20_000;
 
-/** Operators tune cold-start budgets per box (large MoE + AOT compile can exceed any
- *  default); the legacy env override keeps working. */
 const readyDeadlineOverrideMs = (): number | null => {
   const raw = process.env["LOCAL_STUDIO_READY_TIMEOUT_MS"];
   const parsed = raw ? Number(raw) : NaN;
@@ -47,11 +39,8 @@ export interface ComputeLaunchInput {
   readonly recipeId: string;
   readonly runtime: EngineRuntimeKind;
   readonly deviceCount: number;
-  /** Pin the launch to these devices (recipe GPU selectors); default = any free. */
   readonly devices?: readonly DeviceId[];
-  /** Serve on exactly this port (legacy inference_port); default = engine base scan. */
   readonly portOverride?: number;
-  /** Verbatim launch argv (recipe custom launch command); replaces the engine plan. */
   readonly commandOverride?: readonly string[];
   readonly modelPath: string;
   readonly servedModelName: string;
@@ -72,9 +61,26 @@ export interface ComputeService {
   readonly cancel: (name: string) => Effect.Effect<boolean>;
   readonly stateOf: (record: InstanceRecord) => Effect.Effect<InstanceState>;
   readonly instances: () => Effect.Effect<readonly InstanceView[]>;
-  /** One supervisor pass: drop records whose handle is gone. The only reaper. */
   readonly superviseOnce: () => Effect.Effect<number>;
 }
+
+const validateLaunchSupport = (
+  input: ComputeLaunchInput,
+  host: HostProfile,
+): Effect.Effect<void, LaunchFailure> => {
+  const support = engineSpec(input.engine).supports(host);
+  if (!support.ok) {
+    return Effect.fail({ kind: "unsupported", engine: input.engine, reason: support.reason });
+  }
+  if (!supportsRuntime(input.engine, host, input.runtime)) {
+    return Effect.fail({
+      kind: "unsupported",
+      engine: input.engine,
+      reason: `runtime "${input.runtime}" not available (offers: ${support.runtimes.join(", ")})`,
+    });
+  }
+  return Effect.void;
+};
 
 export const makeComputeService = (deps: ComputeDeps): ComputeService => {
   const cancelRequested = new Set<string>();
@@ -97,7 +103,6 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
       return response !== null && response.ok;
     });
 
-  /** Liveness first, then health, then the deadline. Never stored anywhere. */
   const stateOf = (record: InstanceRecord): Effect.Effect<InstanceState> =>
     Effect.gen(function* () {
       if (record.ref === null) return "reserving";
@@ -111,7 +116,9 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
       if (record.ref === null) return true;
       const launcher = launcherOf(record);
       yield* launcher.stop(record.ref, record, STOP_GRACE_MS);
-      return !(yield* launcher.owns(record.ref, record)) && !(yield* launcher.alive(record.ref, record));
+      return (
+        !(yield* launcher.owns(record.ref, record)) && !(yield* launcher.alive(record.ref, record))
+      );
     });
 
   const failCleanup = (
@@ -119,9 +126,10 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
     failure: LaunchFailure,
   ): Effect.Effect<never, LaunchFailure> =>
     Effect.gen(function* () {
-      const cleanupRecord = failure.kind === "spawn-failed" && failure.startedReference
-        ? { ...record, ref: failure.startedReference }
-        : record;
+      const cleanupRecord =
+        failure.kind === "spawn-failed" && failure.startedReference
+          ? { ...record, ref: failure.startedReference }
+          : record;
       if (cleanupRecord !== record) deps.store.write(cleanupRecord);
       if (yield* stopRecord(cleanupRecord)) deps.store.drop(record.name);
       cancelRequested.delete(record.name);
@@ -166,21 +174,7 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
     Effect.gen(function* () {
       const host = yield* deps.host();
       const spec = engineSpec(input.engine);
-      const support = spec.supports(host);
-      if (!support.ok) {
-        return yield* Effect.fail<LaunchFailure>({
-          kind: "unsupported",
-          engine: input.engine,
-          reason: support.reason,
-        });
-      }
-      if (!supportsRuntime(input.engine, host, input.runtime)) {
-        return yield* Effect.fail<LaunchFailure>({
-          kind: "unsupported",
-          engine: input.engine,
-          reason: `runtime "${input.runtime}" not available (offers: ${support.runtimes.join(", ")})`,
-        });
-      }
+      yield* validateLaunchSupport(input, host);
 
       const existing = deps.store.read(input.name);
       if (existing) {
@@ -197,43 +191,44 @@ export const makeComputeService = (deps: ComputeDeps): ComputeService => {
 
       cancelRequested.delete(input.name);
       const candidates = input.devices ?? (yield* deps.freeDevices());
-      const record = yield* deps.store.reserve(
-        {
-          name: input.name,
-          nodeId: host.nodeId,
-          engine: input.engine,
-          recipeId: input.recipeId,
-          runtime: input.runtime,
-          candidates,
-          need: input.devices
-            ? input.devices.length
-            : Math.min(input.deviceCount, Math.max(candidates.length, 0)),
-          shareable: host.unifiedMemory && !input.devices,
-          basePort: spec.defaultPort,
-          ...(input.portOverride !== undefined ? { exactPort: input.portOverride } : {}),
-          readyDeadlineMs: readyDeadlineOverrideMs() ?? spec.health.readyDeadlineMs,
-        },
-        recordAlive,
-      );
+      const reservationBase: Reservation = {
+        name: input.name,
+        nodeId: host.nodeId,
+        engine: input.engine,
+        recipeId: input.recipeId,
+        runtime: input.runtime,
+        candidates,
+        need: input.devices
+          ? input.devices.length
+          : Math.min(input.deviceCount, Math.max(candidates.length, 0)),
+        shareable: host.unifiedMemory && !input.devices,
+        basePort: spec.defaultPort,
+        readyDeadlineMs: readyDeadlineOverrideMs() ?? spec.health.readyDeadlineMs,
+      };
+      const reservation: Reservation =
+        input.portOverride === undefined
+          ? reservationBase
+          : { ...reservationBase, exactPort: input.portOverride };
+      const record = yield* deps.store.reserve(reservation, recordAlive);
 
       yield* deps.onEvent(record.name, "launching", `${input.engine} on :${record.port}`);
 
+      const customPlanBase = {
+        kind: input.runtime,
+        argv: [...(input.commandOverride ?? [])],
+        env: input.env,
+        ports: [{ container: record.port, host: record.port }],
+        mounts: [],
+        devices: record.devices,
+        health: spec.health,
+      };
+      const customPlan = input.dockerImage
+        ? { ...customPlanBase, image: input.dockerImage }
+        : customPlanBase;
       const plan = input.commandOverride
         ? // A custom launch command is used verbatim — the recipe author owns the argv;
           // only device selection is still folded in.
-          applyDevices(
-            {
-              kind: input.runtime,
-              argv: [...input.commandOverride],
-              env: input.env,
-              ports: [{ container: record.port, host: record.port }],
-              mounts: [],
-              devices: record.devices,
-              health: spec.health,
-              ...(input.dockerImage ? { image: input.dockerImage } : {}),
-            },
-            host.accelerator,
-          )
+          applyDevices(customPlan, host.accelerator)
         : planLaunch({
             engine: input.engine,
             host,

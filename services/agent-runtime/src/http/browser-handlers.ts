@@ -1,12 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { Option, Schema } from "effect";
 import { sanitizeBrowserPaneUrl } from "../../../../shared/agent/sanitize-embedded-browser-url";
-import {
-  browserHost,
-  normalizeBrowserSessionKey,
-  type KeyInput,
-  type MouseInput,
-} from "../browser-host/browser-host";
+import { browserHost, normalizeBrowserSessionKey } from "../browser-host/browser-host";
 import {
   explicitBinaryOverride,
   isBrowserEngineId,
@@ -16,15 +12,12 @@ import {
   writeEnginePreference,
 } from "../browser-host/browser-engines";
 import { browserHistory } from "../browser-host/browser-history";
+import { allowPrivateBrowsing } from "../browser-host/network-policy";
 import { playwrightManager } from "../browser-host/playwright";
 import { fetchReadable } from "../browser-host/reader";
-import { errorMessage } from "./helpers";
+import { decodeJsonBody, errorMessage } from "./helpers";
 
-/** Same switch network-policy.ts honors — the two must agree, or a URL the
- *  navigate verb accepted dies at the pinning proxy with a confusing 403. */
-const paneUrlOptions = () => ({
-  allowPrivate: process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE === "1",
-});
+const paneUrlOptions = () => ({ allowPrivate: allowPrivateBrowsing() });
 
 const ALLOWED_VERBS = new Set([
   "navigate",
@@ -40,9 +33,6 @@ const ALLOWED_VERBS = new Set([
   "reload",
 ]);
 
-// The reason the engine could not be resolved, phrased for whoever has to fix
-// it — a missing LOCAL_STUDIO_CHROME_PATH binary reads differently from "no
-// browser installed", and the old single string blamed the wrong dial.
 function unavailableError(): string {
   try {
     resolveBrowserEngine();
@@ -52,11 +42,35 @@ function unavailableError(): string {
   }
 }
 
+const browserUnavailable = (error = "Browser unavailable"): Response =>
+  Response.json({ ok: false, error }, { status: 503 });
+
+async function browserOperation<Data>(
+  fallback: string,
+  action: () => Promise<Data>,
+): Promise<Response> {
+  try {
+    const data = await action();
+    return Response.json(data === undefined ? { ok: true } : { ok: true, data });
+  } catch (error) {
+    return Response.json({ ok: false, error: errorMessage(error, fallback) });
+  }
+}
+
 let lastFallbackUrl = "";
 
 type VerbResult = { ok: boolean; data?: unknown; error?: string };
 
-export async function handleBrowserVerb(request: Request, verb: string): Promise<Response> {
+const BrowserVerbPayloadSchema = Schema.Struct({
+  sessionId: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+  selector: Schema.optional(Schema.String),
+  value: Schema.optional(Schema.Union([Schema.String, Schema.Number, Schema.Boolean])),
+  deltaY: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+});
+type BrowserVerbPayload = Omit<typeof BrowserVerbPayloadSchema.Type, "sessionId">;
+
+export async function verb(request: Request, verb: string): Promise<Response> {
   if (!ALLOWED_VERBS.has(verb)) {
     return Response.json({ ok: false, error: `Unknown browser verb: ${verb}` }, { status: 400 });
   }
@@ -74,26 +88,19 @@ export async function handleBrowserVerb(request: Request, verb: string): Promise
 
 async function readPayload(
   request: Request,
-): Promise<{ payload: Record<string, unknown>; session: string | undefined }> {
+): Promise<{ payload: BrowserVerbPayload; session: string | undefined }> {
   try {
-    const body = (await request.json()) as Record<string, unknown> | null;
-    if (body && typeof body === "object") {
-      // sessionId scopes the verb to its agent session's isolated browser
-      // context; verbs without one (the panel's) follow the active session.
-      const { sessionId, ...rest } = body;
-      return { payload: rest, session: normalizeBrowserSessionKey(sessionId) ?? undefined };
-    }
+    const body = Schema.decodeUnknownSync(BrowserVerbPayloadSchema)(await request.json());
+    const { sessionId, ...payload } = body;
+    return { payload, session: normalizeBrowserSessionKey(sessionId) ?? undefined };
   } catch {
-    // empty body is fine
+    return { payload: {}, session: undefined };
   }
-  return { payload: {}, session: undefined };
 }
 
-// Every verb — model-issued or panel-issued, both arrive here — lands in the
-// history ring before the result goes back out.
 async function dispatchVerb(
   verb: string,
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   session: string | undefined,
   signal: AbortSignal | undefined,
 ): Promise<VerbResult> {
@@ -114,7 +121,7 @@ async function dispatchVerb(
 
 async function runVerb(
   verb: string,
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   session: string | undefined,
   signal: AbortSignal | undefined,
 ): Promise<VerbResult> {
@@ -122,30 +129,31 @@ async function runVerb(
   try {
     return await runHostVerb(verb, payload, session);
   } catch (error) {
-    // A launch/connection failure for the reading verbs still degrades to
-    // reading mode rather than failing the tool call outright.
     if (verb === "navigate" || verb === "get-text") return fallbackVerb(verb, payload, signal);
     throw error;
   }
 }
 
-function recordHistory(
-  verb: string,
-  payload: Record<string, unknown>,
-  result: VerbResult,
-): void {
-  const data = (result.data ?? {}) as { url?: unknown; title?: unknown };
+function recordHistory(verb: string, payload: BrowserVerbPayload, result: VerbResult): void {
+  const data = Option.getOrNull(
+    Schema.decodeUnknownOption(
+      Schema.Struct({
+        url: Schema.optional(Schema.String),
+        title: Schema.optional(Schema.String),
+      }),
+    )(result.data),
+  );
   browserHistory.record({
     action: verb,
-    url: typeof data.url === "string" ? data.url : undefined,
-    title: typeof data.title === "string" ? data.title : undefined,
+    url: data?.url,
+    title: data?.title,
     detail: historyDetail(verb, payload),
     ok: result.ok,
     error: result.error,
   });
 }
 
-function historyDetail(verb: string, payload: Record<string, unknown>): string | undefined {
+function historyDetail(verb: string, payload: BrowserVerbPayload): string | undefined {
   if (verb === "navigate") return String(payload.url ?? "") || undefined;
   if (verb === "click") return String(payload.selector ?? "") || undefined;
   if (verb === "fill") return `${String(payload.selector ?? "")} = ${String(payload.value ?? "")}`;
@@ -155,7 +163,7 @@ function historyDetail(verb: string, payload: Record<string, unknown>): string |
 
 async function runHostVerb(
   verb: string,
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   session: string | undefined,
 ): Promise<VerbResult> {
   switch (verb) {
@@ -198,13 +206,9 @@ async function runHostVerb(
 }
 
 async function navigateVerb(
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   session: string | undefined,
 ): Promise<VerbResult> {
-  // Pane rules: public web plus loopback (previewing local dev servers is the
-  // pane's main job); other private ranges are opt-in via the desktop's
-  // allow-private switch. The same policy is re-applied — with DNS pinning —
-  // to every request the page then makes; see browser-host/network-policy.ts.
   const url = sanitizeBrowserPaneUrl(String(payload.url ?? ""), paneUrlOptions());
   if (!url) return { ok: false, error: "valid public or localhost http(s) url required" };
   const result = await browserHost.navigate(url, session);
@@ -212,7 +216,7 @@ async function navigateVerb(
 }
 
 async function scrollVerb(
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   session: string | undefined,
 ): Promise<VerbResult> {
   const deltaY = Number(payload.deltaY ?? 0);
@@ -224,27 +228,20 @@ async function scrollVerb(
 }
 
 function selectorVerb(result: { found: boolean }): VerbResult {
-  return {
-    ok: result.found,
-    data: { found: result.found },
-    ...(result.found ? {} : { error: "selector not found" }),
-  };
+  const response: VerbResult = { ok: result.found, data: { found: result.found } };
+  if (!result.found) response.error = "selector not found";
+  return response;
 }
 
-function requireSelector(payload: Record<string, unknown>): string {
+function requireSelector(payload: BrowserVerbPayload): string {
   const selector = String(payload.selector ?? "");
   if (!selector) throw new Error("selector required");
   return selector;
 }
 
-// Chromium-unavailable fallbacks. navigate/get-url/get-text/get-html degrade to
-// reading mode (remembering the last navigated URL per process so reads work
-// without a url arg); every other verb returns the clear unavailable error. The
-// fallback honors pane rules (public + loopback) so local dev servers stay
-// previewable even when there's no headless Chromium to drive a full surface.
 async function fallbackVerb(
   verb: string,
-  payload: Record<string, unknown>,
+  payload: BrowserVerbPayload,
   signal: AbortSignal | undefined,
 ): Promise<VerbResult> {
   if (verb === "navigate") {
@@ -258,7 +255,8 @@ async function fallbackVerb(
     return { ok: true, data: { url: lastFallbackUrl, title: "" } };
   }
   if (verb === "get-text" || verb === "get-html") {
-    const url = sanitizeBrowserPaneUrl(String(payload.url ?? ""), paneUrlOptions()) || lastFallbackUrl;
+    const url =
+      sanitizeBrowserPaneUrl(String(payload.url ?? ""), paneUrlOptions()) || lastFallbackUrl;
     if (!url) return { ok: false, error: unavailableError() };
     const reader = await fetchReadable(url, signal);
     lastFallbackUrl = reader.url;
@@ -269,7 +267,7 @@ async function fallbackVerb(
   return { ok: false, error: unavailableError() };
 }
 
-export async function handleBrowserFetch(request: Request): Promise<Response> {
+export async function fetchPage(request: Request): Promise<Response> {
   const raw = new URL(request.url).searchParams.get("url");
   if (!raw) return Response.json({ error: "url is required" }, { status: 400 });
   try {
@@ -277,67 +275,57 @@ export async function handleBrowserFetch(request: Request): Promise<Response> {
     return Response.json(result);
   } catch (error) {
     const message = errorMessage(error, "Fetch failed");
-    // Only the initial url-rejection is a client error (400); resolved-host,
-    // redirect, and upstream failures are bad-gateway (502) like before.
     const status = message.startsWith("url rejected") ? 400 : 502;
     return Response.json({ error: message }, { status });
   }
 }
 
-// ─── GET /api/agent/browser/frame ─────────────────────────────────────────
-//
-// Frame poll for the visible browser panel (~10fps JSON poll instead of SSE:
-// Next's standalone server buffers locally-built event streams, and polling
-// survives buffering proxies for remote deploys).
-
-export async function handleBrowserFrame(): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: unavailableError() }, { status: 503 });
-  }
-  try {
+export async function frame(): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable(unavailableError());
+  return browserOperation("frame poll failed", async () => {
     const { frame, state } = await browserHost.pollFrame();
-    return Response.json({
-      ok: true,
-      data: {
-        frame: frame?.data ?? null,
-        url: state.url,
-        title: state.title,
-        canGoBack: state.canGoBack,
-        canGoForward: state.canGoForward,
-      },
-    });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "frame poll failed"),
-    });
-  }
+    return {
+      frame: frame?.data ?? null,
+      url: state.url,
+      title: state.title,
+      canGoBack: state.canGoBack,
+      canGoForward: state.canGoForward,
+    };
+  });
 }
 
-type InputBody =
-  | ({ kind: "mouse" } & Omit<MouseInput, "type"> & { type: MouseInput["type"] })
-  | ({ kind: "wheel" } & Omit<MouseInput, "type">)
-  | ({ kind: "key" } & KeyInput);
+const MouseButtonSchema = Schema.Literals(["left", "right", "middle"]);
+const MouseInputSchema = Schema.Struct({
+  kind: Schema.Literal("mouse"),
+  type: Schema.Literals(["down", "up", "move", "wheel"]),
+  x: Schema.Number,
+  y: Schema.Number,
+  button: Schema.optional(MouseButtonSchema),
+  clickCount: Schema.optional(Schema.Number),
+  deltaX: Schema.optional(Schema.Number),
+  deltaY: Schema.optional(Schema.Number),
+});
+const WheelInputSchema = Schema.Struct({
+  kind: Schema.Literal("wheel"),
+  x: Schema.Number,
+  y: Schema.Number,
+  deltaX: Schema.optional(Schema.Number),
+  deltaY: Schema.optional(Schema.Number),
+});
+const KeyInputSchema = Schema.Struct({
+  kind: Schema.Literal("key"),
+  type: Schema.Literals(["down", "up"]),
+  key: Schema.String,
+  code: Schema.String,
+});
+const InputBodySchema = Schema.Union([MouseInputSchema, WheelInputSchema, KeyInputSchema]);
+type InputBody = typeof InputBodySchema.Type;
 
-export async function handleBrowserInput(request: Request): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  let body: InputBody;
-  try {
-    body = (await request.json()) as InputBody;
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
-  try {
-    await dispatchInput(body);
-    return Response.json({ ok: true });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "input dispatch failed"),
-    });
-  }
+export async function input(request: Request): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  const body: InputBody | null = await decodeJsonBody(request, InputBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
+  return browserOperation("input dispatch failed", () => dispatchInput(body));
 }
 
 async function dispatchInput(body: InputBody): Promise<void> {
@@ -368,11 +356,6 @@ async function dispatchInput(body: InputBody): Promise<void> {
   });
 }
 
-// ─── GET /api/agent/browser/localhosts ────────────────────────────────────
-//
-// Discovers locally listening HTTP dev servers for the browser panel's
-// localhost picker.
-
 const execFileAsync = promisify(execFile);
 const PROBE_TIMEOUT_MS = 650;
 const LSOF_TIMEOUT_MS = 2_500;
@@ -402,7 +385,6 @@ function parseCurrentPort(request: Request): number | null {
 
 function titleFromHtml(html: string): string {
   const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim();
-  // &amp; decodes last, or "&amp;lt;" round-trips into a phantom "<".
   return title
     ? title
         .replace(/&lt;/g, "<")
@@ -434,9 +416,7 @@ async function listListeningPorts(): Promise<PortCandidate[]> {
     });
     const ports = parseLsof(stdout);
     if (ports.length > 0) return ports;
-  } catch {
-    // Fall through to common dev-server ports.
-  }
+  } catch {}
   return FALLBACK_PORTS.map((port) => ({ port }));
 }
 
@@ -474,7 +454,7 @@ async function probePort(
   }
 }
 
-export async function handleBrowserLocalhosts(request: Request): Promise<Response> {
+export async function localhosts(request: Request): Promise<Response> {
   const currentPort = parseCurrentPort(request);
   const candidates = await listListeningPorts();
   const probed = await Promise.all(
@@ -489,63 +469,32 @@ export async function handleBrowserLocalhosts(request: Request): Promise<Respons
   return Response.json({ sites });
 }
 
-// ─── GET /api/agent/browser/state ─────────────────────────────────────────
-
-export async function handleBrowserState(): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  try {
-    return Response.json({ ok: true, data: await browserHost.peekState() });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "getState failed"),
-    });
-  }
+export async function state(): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  return browserOperation("getState failed", () => browserHost.peekState());
 }
 
-// ─── POST /api/agent/browser/viewport ─────────────────────────────────────
-//
-// Sets the headless Chromium viewport so it matches the visible panel's
-// dimensions. Body: { width, height }.
+const ViewportBodySchema = Schema.Struct({
+  width: Schema.Union([Schema.Number, Schema.String]),
+  height: Schema.Union([Schema.Number, Schema.String]),
+});
 
-export async function handleBrowserViewport(request: Request): Promise<Response> {
-  if (!browserHost.isAvailable()) {
-    return Response.json({ ok: false, error: "Browser unavailable" }, { status: 503 });
-  }
-  let body: { width?: unknown; height?: unknown };
-  try {
-    body = (await request.json()) as { width?: unknown; height?: unknown };
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
+export async function viewport(request: Request): Promise<Response> {
+  if (!browserHost.isAvailable()) return browserUnavailable();
+  const body = await decodeJsonBody(request, ViewportBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   const width = Number(body.width);
   const height = Number(body.height);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     return Response.json({ ok: false, error: "width and height are required" }, { status: 400 });
   }
-  try {
+  return browserOperation("setViewport failed", async () => {
     await browserHost.setViewport(width, height);
-    return Response.json({
-      ok: true,
-      data: { width: Math.round(width), height: Math.round(height) },
-    });
-  } catch (error) {
-    return Response.json({
-      ok: false,
-      error: errorMessage(error, "setViewport failed"),
-    });
-  }
+    return { width: Math.round(width), height: Math.round(height) };
+  });
 }
 
-// ─── GET /api/agent/browser/history ───────────────────────────────────────
-//
-// The computer-use log: every browser action this runtime performed, model- or
-// panel-driven. `?limit=` bounds the reply; `?visited=1` collapses it to the
-// distinct pages in visit order.
-
-export async function handleBrowserHistory(request: Request): Promise<Response> {
+export async function history(request: Request): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const limit = Number(params.get("limit") ?? 50);
   const visitedOnly = params.get("visited") === "1";
@@ -557,12 +506,6 @@ export async function handleBrowserHistory(request: Request): Promise<Response> 
   });
 }
 
-// ─── GET /api/agent/browser/engines · POST /api/agent/browser/engine ──────
-//
-// Which Chromium-family binary the embedded browser drives. GET reports what is
-// installed and what is running; POST persists a choice and drops the live
-// context so the next action relaunches on the new engine.
-
 function enginesPayload() {
   const preference = readEnginePreference();
   const engines = listBrowserEngines();
@@ -570,8 +513,6 @@ function enginesPayload() {
   const chosen = engines.find((engine) => engine.id === preference);
   return {
     preference,
-    // True when the user picked a browser that is not installed here, so the UI
-    // can say "Brave not found — running Chromium" instead of quietly lying.
     preferenceUnavailable: preference !== "auto" && !chosen?.path,
     override: explicitBinaryOverride(),
     active: active
@@ -582,17 +523,15 @@ function enginesPayload() {
   };
 }
 
-export async function handleBrowserEngines(): Promise<Response> {
+export async function engines(): Promise<Response> {
   return Response.json({ ok: true, data: enginesPayload() });
 }
 
-export async function handleBrowserEngineSelect(request: Request): Promise<Response> {
-  let body: { engine?: unknown };
-  try {
-    body = (await request.json()) as { engine?: unknown };
-  } catch {
-    return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
-  }
+const BrowserEngineBodySchema = Schema.Struct({ engine: Schema.String });
+
+export async function selectEngine(request: Request): Promise<Response> {
+  const body = await decodeJsonBody(request, BrowserEngineBodySchema);
+  if (!body) return Response.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   if (!isBrowserEngineId(body.engine)) {
     return Response.json({ ok: false, error: "unknown browser engine" }, { status: 400 });
   }
@@ -604,7 +543,6 @@ export async function handleBrowserEngineSelect(request: Request): Promise<Respo
       error: errorMessage(error, "failed to save browser engine"),
     });
   }
-  // The running context is bound to the old binary; the next verb relaunches.
   browserHost.stop();
   return Response.json({ ok: true, data: enginesPayload() });
 }

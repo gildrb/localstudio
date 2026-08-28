@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { Schema } from "effect";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
@@ -37,21 +38,23 @@ async function isAgentRuntimeHealthy(url: string): Promise<boolean> {
   try {
     const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1_000) });
     if (!response.ok) return false;
-    const payload = (await response.json()) as { service?: unknown };
-    return payload.service === "local-studio-agent-runtime";
+    const payload = Schema.decodeUnknownOption(
+      Schema.Struct({ service: Schema.Literal("local-studio-agent-runtime") }),
+    )(await response.json());
+    return payload._tag === "Some";
   } catch {
     return false;
   }
 }
 
 async function waitForAgentRuntime(
-  child: ChildProcess,
+  child: ChildProcess | undefined,
   url: string,
   timeoutMs: number,
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (child.exitCode !== null) {
+    if (child && child.exitCode !== null) {
       throw new Error(`Agent runtime exited with code ${child.exitCode}`);
     }
     if (await isAgentRuntimeHealthy(url)) return;
@@ -84,9 +87,13 @@ export async function startAgentRuntime(
   options: StartAgentRuntimeOptions,
 ): Promise<AgentRuntimeHandle> {
   const preferredUrl = options.preferredPort ? `http://127.0.0.1:${options.preferredPort}` : null;
-  if (preferredUrl && (await isAgentRuntimeHealthy(preferredUrl))) {
-    log.info(`Using agent runtime at ${preferredUrl}`);
-    return { frontendUrl: options.frontendUrl, url: preferredUrl };
+  if (preferredUrl) {
+    if (!app.isPackaged)
+      await waitForAgentRuntime(undefined, preferredUrl, DESKTOP_CONFIG.startupTimeoutMs);
+    if (!app.isPackaged || (await isAgentRuntimeHealthy(preferredUrl))) {
+      log.info(`Using agent runtime at ${preferredUrl}`);
+      return { frontendUrl: options.frontendUrl, url: preferredUrl };
+    }
   }
 
   const entry = agentRuntimeEntry();
@@ -109,19 +116,10 @@ export async function startAgentRuntime(
       LOCAL_STUDIO_RESOURCES_PATH: process.resourcesPath,
       LOCAL_STUDIO_AGENT_CWD: process.env.LOCAL_STUDIO_AGENT_CWD || app.getPath("home"),
       LOCAL_STUDIO_FRONTEND_BASE: options.frontendUrl,
-      // The desktop app is a single user browsing their own network: LAN and
-      // tailnet (CGNAT) URLs are the embedded browser's day job here, not an
-      // SSRF surface. Shared deployments leave this unset and stay strict.
-      LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE:
-        process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE || "1",
+      LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE: process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE || "1",
     },
   });
 
-  // The Google OAuth handlers moved into this child (#431) but secrets still
-  // live behind the Electron safeStorage vault, answered over process IPC.
-  // Without a listener here every vault call times out and Connect dies with
-  // "Secure OAuth storage is unavailable" — the Next child having its own
-  // listener does not help a request sent on this channel.
   registerOAuthVault(child, DESKTOP_CONFIG.userDataDir);
 
   child.stdout?.on("data", (chunk: Buffer | string) => {

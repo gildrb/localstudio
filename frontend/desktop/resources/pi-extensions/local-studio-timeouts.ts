@@ -4,9 +4,13 @@
 // cannot resolve there — which is why isToolCallEventType (a one-line
 // `event.toolName === name` check) is inlined below instead of imported.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Schema } from "effect";
 
 const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
 const MAX_BASH_TIMEOUT_SECONDS = 900;
+const BashInputSchema = Schema.Struct({
+  timeout: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
+});
 
 function readSeconds(name: string, fallback: number): number {
   const raw = Number(process.env[name]);
@@ -23,12 +27,13 @@ export default function localStudioTimeouts(pi: ExtensionAPI) {
 
   pi.on("tool_call", (event) => {
     if (event.toolName !== "bash") return;
-    const input = event.input as { timeout?: unknown };
-    const current = Number(input.timeout);
-    if (!Number.isFinite(current) || current <= 0) {
-      input.timeout = defaultTimeout;
-      return;
-    }
-    input.timeout = Math.min(Math.trunc(current), maxTimeout);
+    const input = Schema.decodeUnknownOption(BashInputSchema)(event.input);
+    if (input._tag === "None") return;
+    const current = Number(input.value.timeout);
+    const timeout =
+      Number.isFinite(current) && current > 0
+        ? Math.min(Math.trunc(current), maxTimeout)
+        : defaultTimeout;
+    event.input = { ...input.value, timeout };
   });
 }

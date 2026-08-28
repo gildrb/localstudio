@@ -1,6 +1,9 @@
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 import { findSessionFile } from "./sessions-store";
-import { isRecord } from "../../../shared/agent/guards";
+import { isRecord, type UnparsedValue } from "../../../shared/agent/guards";
+import { Schema } from "effect";
+
+const isString = Schema.is(Schema.String);
 
 const TAIL_BYTES = 256 * 1024;
 
@@ -18,15 +21,12 @@ function readTail(filepath: string): string {
   return buffer.toString("utf8");
 }
 
-/** Flatten a pi message `content` field to its plain text. Shared with the goal
- *  driver, which reads assistant text off the live event stream rather than the
- *  transcript so it only ever sees the turn that just settled. */
-export function assistantMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
+export function assistantMessageText(content: UnparsedValue): string {
+  if (isString(content)) return content;
   if (!Array.isArray(content)) return "";
   return content
     .map((block) =>
-      isRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : "",
+      isRecord(block) && block.type === "text" && isString(block.text) ? block.text : "",
     )
     .join("");
 }
@@ -42,7 +42,7 @@ export function lastAssistantResultFromJsonl(raw: string): LastAssistantResult {
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let entry: unknown;
+    let entry: UnparsedValue;
     try {
       entry = JSON.parse(trimmed);
     } catch {
@@ -56,7 +56,7 @@ export function lastAssistantResultFromJsonl(raw: string): LastAssistantResult {
       error = null;
       continue;
     }
-    if (typeof entry.message.errorMessage === "string" && entry.message.errorMessage.trim()) {
+    if (isString(entry.message.errorMessage) && entry.message.errorMessage.trim()) {
       error = entry.message.errorMessage.trim();
     }
   }

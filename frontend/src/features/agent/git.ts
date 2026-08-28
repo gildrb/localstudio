@@ -1,9 +1,14 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import {
+  resolveContainedFilePath,
+  withRegularFile,
+  resolveContainedPath,
+} from "@/features/agent/fs-store";
 import type {
   GitAction,
   GitBranch,
@@ -26,14 +31,14 @@ export function configuredGitRoots(): string[] {
 export function resolveGitCwd(input: string, roots = configuredGitRoots()): string | null {
   if (!path.isAbsolute(input)) return null;
   const candidate = path.resolve(input);
-  return roots.some((root) => {
-    const relative = path.relative(root, candidate);
-    return (
-      relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
-    );
-  })
-    ? candidate
-    : null;
+  for (const root of roots) {
+    try {
+      return resolveContainedPath(root, candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 export function assertGitCwd(
@@ -49,7 +54,7 @@ export function assertGitCwd(
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+  const { stdout } = await execFileAsync("git", ["--literal-pathspecs", ...args], {
     cwd,
     env: cleanGitEnv(),
     maxBuffer: 12 * 1024 * 1024,
@@ -101,10 +106,6 @@ export async function loadGitState(cwd: string): Promise<GitState> {
     branch: current,
     status: statusLines(statusRaw),
     entries: statusEntries(statusRaw),
-    // `git diff HEAD` omits untracked (new) files, so a "build me a site"
-    // session that creates dozens of new files shows an empty diff while the
-    // counter says +N. Append synthesized new-file diffs so the panel reviews
-    // them like GitHub does.
     diff: untracked.diff
       ? `${diff}${diff.endsWith("\n") || !diff ? "" : "\n"}${untracked.diff}`
       : diff,
@@ -117,9 +118,6 @@ export async function loadGitState(cwd: string): Promise<GitState> {
   };
 }
 
-// git treats a leading-dash argument as an option, so a ref/branch like
-// `--upload-pack=…` would be interpreted as a flag even through execFile (which
-// only stops shell injection, not argument injection). Reject them.
 function assertNotOption(value: string, label: string): string {
   if (value.startsWith("-")) throw new Error(`Invalid ${label}: must not start with "-"`);
   return value;
@@ -164,8 +162,6 @@ export async function runGitAction(cwd: string, action: GitAction): Promise<GitS
   return loadGitState(cwd);
 }
 
-/** Local branches plus the remote branches of the repo in `cwd`, each marked
- *  with whether it is the checked-out one and whether it lives on a remote. */
 export async function listBranches(cwd: string): Promise<GitBranch[]> {
   const [branchRaw, localRaw] = await Promise.all([
     git(cwd, ["branch", "--show-current"]).catch(() => ""),
@@ -193,7 +189,6 @@ export async function listBranches(cwd: string): Promise<GitBranch[]> {
   return branches;
 }
 
-/** The linked worktrees of the repo in `cwd`, parsed from porcelain output. */
 export async function listWorktrees(cwd: string): Promise<GitWorktree[]> {
   const raw = await git(cwd, ["worktree", "list", "--porcelain"]).catch(() => "");
   const worktrees: GitWorktree[] = [];
@@ -210,29 +205,25 @@ export async function listWorktrees(cwd: string): Promise<GitWorktree[]> {
     }
   }
   if (entry) worktrees.push({ ...entry, current: false });
-  const resolvedCwd = await path.resolve(cwd);
+  const resolvedCwd = path.resolve(cwd);
   return worktrees.map((worktree) => ({
     ...worktree,
     current: path.resolve(worktree.path) === resolvedCwd,
   }));
 }
 
-/** A worktree lives outside a project root (it is a sibling leaf of the repo),
- *  but it must still resolve inside the configured git roots so a request can't
- *  point git at an arbitrary filesystem path. */
 function assertWorktreePath(input: string): string {
   const clean = input.trim();
   if (!clean || !path.isAbsolute(clean)) throw new Error("Invalid worktree path: must be absolute");
-  const roots = configuredGitRoots();
   const candidate = path.resolve(clean);
-  const within = roots.some((root) => {
-    const relative = path.relative(root, candidate);
-    return (
-      relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative))
-    );
-  });
-  if (!within) throw new Error("Invalid worktree path: outside allowed roots");
-  return candidate;
+  for (const root of configuredGitRoots()) {
+    try {
+      return resolveContainedPath(root, candidate, true);
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("Invalid worktree path: outside allowed roots");
 }
 
 function emptyGitState(isRepo: boolean): GitState {
@@ -279,7 +270,12 @@ function parseRefs(raw: string, current: string | null): GitRef[] {
     .map((name) => ({ name, current: name === current, remote: name.includes("/") }));
 }
 
-export function numstatStats(numstat: string): { additions: number; deletions: number } {
+export interface GitDiffStats {
+  additions: number;
+  deletions: number;
+}
+
+export function numstatStats(numstat: string): GitDiffStats {
   let additions = 0;
   let deletions = 0;
   for (const line of numstat.split("\n")) {
@@ -292,23 +288,29 @@ export function numstatStats(numstat: string): { additions: number; deletions: n
   return { additions, deletions };
 }
 
-// Per-file and total caps so a session that generates large bundles (e.g. an
-// 800KB data.js) can't blow up the diff payload; GitHub collapses huge files
-// too. Beyond the cap the file's content is truncated with a marker.
 const MAX_UNTRACKED_LINES_PER_FILE = 1000;
 const MAX_UNTRACKED_DIFF_BYTES = 1_500_000;
 
-/**
- * Synthesize a unified-diff block for one untracked file so it renders as a
- * GitHub-style "new file" (all additions). Binary files emit a marker instead
- * of their bytes; long files are truncated to MAX_UNTRACKED_LINES_PER_FILE.
- * `additions` is the file's true line count (matching git's working-tree count),
- * not the possibly-truncated number of rendered `+` rows.
- */
+async function readUtf8AtMost(file: FileHandle, maxBytes: number): Promise<string | null> {
+  const buffer = Buffer.alloc(maxBytes + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return offset > maxBytes ? null : buffer.subarray(0, offset).toString("utf8");
+}
+
+export interface UntrackedFileDiffBlock {
+  block: string;
+  additions: number;
+}
+
 export function buildUntrackedFileDiffBlock(
   file: string,
   contents: string,
-): { block: string; additions: number } {
+): UntrackedFileDiffBlock {
   const header = `diff --git a/${file} b/${file}\nnew file mode 100644`;
   if (contents.includes("\0")) {
     return { block: `${header}\nBinary files /dev/null and b/${file} differ\n`, additions: 0 };
@@ -340,15 +342,28 @@ async function untrackedFileDiffs(
       omitted += 1;
       continue;
     }
-    let contents: string;
+    let contents: string | null;
     try {
-      contents = await readFile(absolutePath, "utf8");
+      const target = resolveContainedFilePath(cwd, absolutePath);
+      const remaining = MAX_UNTRACKED_DIFF_BYTES - bytes;
+      contents = await withRegularFile(target, constants.O_RDONLY, ({ file, stats }) =>
+        stats.size > remaining ? Promise.resolve(null) : readUtf8AtMost(file, remaining),
+      );
     } catch {
       continue;
     }
+    if (contents === null) {
+      omitted += 1;
+      continue;
+    }
     const { block, additions: fileAdditions } = buildUntrackedFileDiffBlock(file, contents);
+    const blockBytes = Buffer.byteLength(block);
+    if (blockBytes > MAX_UNTRACKED_DIFF_BYTES - bytes) {
+      omitted += 1;
+      continue;
+    }
     additions += fileAdditions;
-    bytes += block.length;
+    bytes += blockBytes;
     blocks.push(block);
   }
   if (omitted > 0) {

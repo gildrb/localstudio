@@ -1,12 +1,6 @@
 import { HttpStatus } from "../../core/errors";
 import type { LaunchFailure } from "./contracts";
 
-/**
- * The only two renderings a LaunchFailure has. Every HTTP status and every SSE stage is
- * derived here from the tagged union — never from substring-matching an error message,
- * which is how the old path turned any message containing "cancelled" into a 400.
- */
-
 const messageOf = (failure: LaunchFailure): string => {
   switch (failure.kind) {
     case "unsupported":

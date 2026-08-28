@@ -11,7 +11,6 @@ export const LOCAL_AGENT_IDS: readonly LocalAgentId[] = [
 export interface LocalAgentTarget {
   agent: LocalAgentId;
   label: string;
-  /** Resolved config file path used for display (and, for pi/droid, writes). */
   configPath: string;
   /** Whether the config file itself already exists. */
   exists: boolean;

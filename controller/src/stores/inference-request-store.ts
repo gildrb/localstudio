@@ -37,14 +37,28 @@ interface NumberRow {
   [key: string]: number;
 }
 
-const buildModelFilter = (
-  knownModels?: ReadonlySet<string>,
-): { clause: string; params: string[] } => {
+interface UsageRow {
+  [key: string]: string | number | null;
+}
+
+interface ModelFilter {
+  clause: string;
+  params: string[];
+}
+
+const buildModelFilter = (knownModels?: ReadonlySet<string>): ModelFilter => {
   if (!knownModels || knownModels.size === 0) return { clause: "", params: [] };
   const params = [...knownModels];
   const placeholders = params.map(() => "?").join(",");
   return { clause: ` AND model IN (${placeholders})`, params };
 };
+
+const groupedUsageColumns = `
+  COUNT(*) as requests,
+  SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
+  COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
+  COALESCE(SUM(completion_tokens), 0) as completion_tokens,
+  COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens`;
 
 export class InferenceRequestStore {
   private readonly db: Database;
@@ -84,52 +98,51 @@ export class InferenceRequestStore {
     );
   }
 
-  private recordSync(record: InferenceRequestRecord): void {
-    const promptTokens = Math.max(0, Math.round(record.prompt_tokens));
-    const completionTokens = Math.max(0, Math.round(record.completion_tokens));
-    const reasoningTokens = Math.max(0, Math.round(record.reasoning_tokens ?? 0));
-    const cacheRead = Math.max(0, Math.round(record.cache_read_tokens ?? 0));
-    const cacheWrite = Math.max(0, Math.round(record.cache_write_tokens ?? 0));
-    const totalTokens = promptTokens + completionTokens;
+  public record(record: InferenceRequestRecord): Effect.Effect<void, RepositoryError> {
+    return repositoryEffect("inference-requests.record", () => {
+      const promptTokens = Math.max(0, Math.round(record.prompt_tokens));
+      const completionTokens = Math.max(0, Math.round(record.completion_tokens));
+      const reasoningTokens = Math.max(0, Math.round(record.reasoning_tokens ?? 0));
+      const cacheRead = Math.max(0, Math.round(record.cache_read_tokens ?? 0));
+      const cacheWrite = Math.max(0, Math.round(record.cache_write_tokens ?? 0));
+      const totalTokens = promptTokens + completionTokens;
 
-    this.db
-      .query(
-        `INSERT INTO inference_requests (
+      this.db
+        .query(
+          `INSERT INTO inference_requests (
            model, source, session_id, provider,
            prompt_tokens, completion_tokens, reasoning_tokens,
            cache_read_tokens, cache_write_tokens, total_tokens,
            ttft_ms, duration_ms, status, streamed
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.model,
-        record.source ?? null,
-        record.session_id ?? null,
-        record.provider ?? null,
-        promptTokens,
-        completionTokens,
-        reasoningTokens,
-        cacheRead,
-        cacheWrite,
-        totalTokens,
-        record.ttft_ms ?? null,
-        record.duration_ms ?? null,
-        record.status ?? 200,
-        record.streamed ? 1 : 0,
-      );
-  }
-
-  public record(record: InferenceRequestRecord): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("inference-requests.record", () => this.recordSync(record));
+        )
+        .run(
+          record.model,
+          record.source ?? null,
+          record.session_id ?? null,
+          record.provider ?? null,
+          promptTokens,
+          completionTokens,
+          reasoningTokens,
+          cacheRead,
+          cacheWrite,
+          totalTokens,
+          record.ttft_ms ?? null,
+          record.duration_ms ?? null,
+          record.status ?? 200,
+          record.streamed ? 1 : 0,
+        );
+    });
   }
 
   public aggregate(knownModels?: ReadonlySet<string>): UsageAggregate | null {
     const filter = buildModelFilter(knownModels);
     const params = filter.params;
 
-    const summary = this.db
-      .query<NumberRow, string[]>(
-        `SELECT
+    const summary =
+      this.db
+        .query<NumberRow, string[]>(
+          `SELECT
            COUNT(*) as total_requests,
            COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
            COALESCE(SUM(completion_tokens), 0) as completion_tokens,
@@ -152,28 +165,24 @@ export class InferenceRequestStore {
            SUM(CASE WHEN datetime(created_at) >= datetime('now', '-14 days') AND datetime(created_at) < datetime('now', '-7 days') AND status >= 200 AND status < 300 THEN 1 ELSE 0 END) as last_week_ok
          FROM inference_requests
          WHERE 1=1${filter.clause}`,
-      )
-      .get(...params) as NumberRow | null;
+        )
+        .get(...params) ?? {};
 
-    const totalRequests = toFiniteNumber(summary?.["total_requests"]);
+    const totalRequests = toFiniteNumber(summary["total_requests"]);
     if (totalRequests === 0) return null;
 
-    const promptTokens = toFiniteNumber(summary?.["prompt_tokens"]);
-    const completionTokens = toFiniteNumber(summary?.["completion_tokens"]);
+    const promptTokens = toFiniteNumber(summary["prompt_tokens"]);
+    const completionTokens = toFiniteNumber(summary["completion_tokens"]);
     const totalTokens = promptTokens + completionTokens;
-    const cacheHits = toFiniteNumber(summary?.["cache_read"]);
-    const cacheMisses = toFiniteNumber(summary?.["cache_write"]);
-    const successful = toFiniteNumber(summary?.["ok"]);
+    const cacheHits = toFiniteNumber(summary["cache_read"]);
+    const cacheMisses = toFiniteNumber(summary["cache_write"]);
+    const successful = toFiniteNumber(summary["ok"]);
 
     const byModel = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            model,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens,
+           ${groupedUsageColumns},
            AVG(duration_ms) as avg_latency_ms,
            AVG(ttft_ms) as avg_ttft_ms
          FROM inference_requests
@@ -182,17 +191,13 @@ export class InferenceRequestStore {
          ORDER BY total_tokens DESC
          LIMIT 25`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const daily = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            DATE(created_at) as date,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens,
+           ${groupedUsageColumns},
            AVG(duration_ms) as avg_latency_ms
          FROM inference_requests
          WHERE DATE(created_at) >= DATE('now', '-366 days')${filter.clause}
@@ -200,28 +205,24 @@ export class InferenceRequestStore {
          ORDER BY date DESC
          LIMIT 400`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const dailyByModel = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            DATE(created_at) as date,
            model,
-           COUNT(*) as requests,
-           SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END) as successful,
-           COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-           COALESCE(SUM(completion_tokens), 0) as completion_tokens,
-           COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) as total_tokens
+           ${groupedUsageColumns}
          FROM inference_requests
          WHERE DATE(created_at) >= DATE('now', '-366 days')${filter.clause}
          GROUP BY DATE(created_at), model
          ORDER BY date DESC
          LIMIT 10000`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const hourly = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            CAST(strftime('%H', created_at) AS INTEGER) as hour,
            COUNT(*) as requests,
@@ -232,10 +233,10 @@ export class InferenceRequestStore {
          GROUP BY strftime('%H', created_at)
          ORDER BY hour`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const peakDays = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            DATE(created_at) as date,
            COUNT(*) as requests,
@@ -246,10 +247,10 @@ export class InferenceRequestStore {
          ORDER BY requests DESC
          LIMIT 5`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const peakHours = this.db
-      .query<Record<string, unknown>, string[]>(
+      .query<UsageRow, string[]>(
         `SELECT
            CAST(strftime('%H', created_at) AS INTEGER) as hour,
            COUNT(*) as requests
@@ -259,7 +260,7 @@ export class InferenceRequestStore {
          ORDER BY requests DESC
          LIMIT 5`,
       )
-      .all(...params) as Array<Record<string, unknown>>;
+      .all(...params);
 
     const calcChangePct = (current: number, previous: number): number | null => {
       if (previous === 0) return current === 0 ? 0 : null;
@@ -275,11 +276,11 @@ export class InferenceRequestStore {
         successful_requests: successful,
         failed_requests: totalRequests - successful,
         success_rate: usageRate(successful, totalRequests),
-        unique_sessions: toFiniteNumber(summary?.["unique_sessions"]),
+        unique_sessions: toFiniteNumber(summary["unique_sessions"]),
         unique_users: 0,
       },
       latency: {
-        avg_ms: toNullableNumber(summary?.["avg_dur"]),
+        avg_ms: toNullableNumber(summary["avg_dur"]),
         p50_ms: null,
         p95_ms: null,
         p99_ms: null,
@@ -287,7 +288,7 @@ export class InferenceRequestStore {
         max_ms: null,
       },
       ttft: {
-        avg_ms: toNullableNumber(summary?.["avg_ttft"]),
+        avg_ms: toNullableNumber(summary["avg_ttft"]),
         p50_ms: null,
         p95_ms: null,
         p99_ms: null,
@@ -312,34 +313,34 @@ export class InferenceRequestStore {
       },
       week_over_week: {
         this_week: {
-          requests: toFiniteNumber(summary?.["this_week_requests"]),
-          tokens: toFiniteNumber(summary?.["this_week_tokens"]),
-          successful: toFiniteNumber(summary?.["this_week_ok"]),
+          requests: toFiniteNumber(summary["this_week_requests"]),
+          tokens: toFiniteNumber(summary["this_week_tokens"]),
+          successful: toFiniteNumber(summary["this_week_ok"]),
         },
         last_week: {
-          requests: toFiniteNumber(summary?.["last_week_requests"]),
-          tokens: toFiniteNumber(summary?.["last_week_tokens"]),
-          successful: toFiniteNumber(summary?.["last_week_ok"]),
+          requests: toFiniteNumber(summary["last_week_requests"]),
+          tokens: toFiniteNumber(summary["last_week_tokens"]),
+          successful: toFiniteNumber(summary["last_week_ok"]),
         },
         change_pct: {
           requests: calcChangePct(
-            toFiniteNumber(summary?.["this_week_requests"]),
-            toFiniteNumber(summary?.["last_week_requests"]),
+            toFiniteNumber(summary["this_week_requests"]),
+            toFiniteNumber(summary["last_week_requests"]),
           ),
           tokens: calcChangePct(
-            toFiniteNumber(summary?.["this_week_tokens"]),
-            toFiniteNumber(summary?.["last_week_tokens"]),
+            toFiniteNumber(summary["this_week_tokens"]),
+            toFiniteNumber(summary["last_week_tokens"]),
           ),
         },
       },
       recent_activity: {
-        last_hour_requests: toFiniteNumber(summary?.["last_hour"]),
-        last_24h_requests: toFiniteNumber(summary?.["last_24h"]),
-        prev_24h_requests: toFiniteNumber(summary?.["prev_24h"]),
-        last_24h_tokens: toFiniteNumber(summary?.["last_24h_tokens"]),
+        last_hour_requests: toFiniteNumber(summary["last_hour"]),
+        last_24h_requests: toFiniteNumber(summary["last_24h"]),
+        prev_24h_requests: toFiniteNumber(summary["prev_24h"]),
+        last_24h_tokens: toFiniteNumber(summary["last_24h_tokens"]),
         change_24h_pct: calcChangePct(
-          toFiniteNumber(summary?.["last_24h"]),
-          toFiniteNumber(summary?.["prev_24h"]),
+          toFiniteNumber(summary["last_24h"]),
+          toFiniteNumber(summary["prev_24h"]),
         ),
       },
       peak_days: peakDays,

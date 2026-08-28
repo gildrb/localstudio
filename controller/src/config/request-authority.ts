@@ -16,6 +16,15 @@ const normalizeIp = (value: string): string | null => {
   }
 };
 
+const invalidHostname = (candidate: string, bracketed: boolean): boolean =>
+  bracketed ||
+  candidate.length > 253 ||
+  candidate.endsWith(".") ||
+  candidate.includes(":") ||
+  candidate.includes("@") ||
+  candidate.includes("/") ||
+  candidate.includes("*");
+
 export const normalizeControllerHost = (value: string): string | null => {
   const candidate = value.trim().toLowerCase();
   const bracketed = candidate.startsWith("[") || candidate.endsWith("]");
@@ -31,15 +40,7 @@ export const normalizeControllerHost = (value: string): string | null => {
       return null;
     }
   }
-  if (
-    bracketed ||
-    candidate.length > 253 ||
-    candidate.endsWith(".") ||
-    candidate.includes(":") ||
-    candidate.includes("@") ||
-    candidate.includes("/") ||
-    candidate.includes("*")
-  ) {
+  if (invalidHostname(candidate, bracketed)) {
     return null;
   }
   return candidate.split(".").every((label) => hostnamePattern.test(label)) ? candidate : null;

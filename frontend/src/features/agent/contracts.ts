@@ -1,9 +1,7 @@
 import type { AgentImageInput } from "@shared/agent/agent-image-input";
+import { Schema } from "effect";
 
 export type { AgentImageInput };
-// The turn wire contract + generic body-field helpers live in
-// shared/agent/agent-turn.ts so the @local-studio/agent-runtime HTTP handlers
-// can share them; re-exported here for frontend callers.
 export {
   objectRecord,
   stringField,
@@ -25,14 +23,7 @@ export type {
   AgentThinkingLevel,
   AgentToolAccess,
 } from "@shared/agent/agent-turn";
-import {
-  objectRecord,
-  stringField,
-  stringArray,
-  type ParseResult,
-  type AgentTurnRuntimeStatus,
-  type AgentTurnCommandResult,
-} from "@shared/agent/agent-turn";
+import { objectRecord, stringField, stringArray, type ParseResult } from "@shared/agent/agent-turn";
 
 export type GitRef = { name: string; current: boolean; remote: boolean };
 export type GitBranch = { name: string; current: boolean; remote: boolean };
@@ -64,13 +55,29 @@ export type GitAction =
   | { action: "add_worktree"; branch: string; path: string }
   | { action: "remove_worktree"; path: string };
 
-export function parseGitAction(input: unknown): ParseResult<GitAction> {
+type AgentContractInput = typeof Schema.Unknown.Encoded;
+
+const isString = Schema.is(Schema.String);
+const isSimpleGitAction = Schema.is(Schema.Literals(["init", "push"]));
+type AgentContractBody = NonNullable<ReturnType<typeof objectRecord>>;
+
+function parseAddWorktree(body: AgentContractBody): ParseResult<GitAction> {
+  const branch = stringField(body, "branch", true);
+  if (!branch.ok) return branch;
+  const path = stringField(body, "path", true);
+  if (!path.ok) return path;
+  return {
+    ok: true,
+    value: { action: "add_worktree", branch: branch.value!, path: path.value! },
+  };
+}
+
+export function parseGitAction(input: AgentContractInput): ParseResult<GitAction> {
   const body = objectRecord(input);
-  if (!body || typeof body.action !== "string") {
+  if (!body || !isString(body.action)) {
     return { ok: false, error: "action is required" };
   }
-  if (body.action === "init") return { ok: true, value: { action: "init" } };
-  if (body.action === "push") return { ok: true, value: { action: "push" } };
+  if (isSimpleGitAction(body.action)) return { ok: true, value: { action: body.action } };
   if (body.action === "checkout") {
     const ref = stringField(body, "ref", true);
     return ref.ok ? { ok: true, value: { action: "checkout", ref: ref.value! } } : ref;
@@ -80,16 +87,7 @@ export function parseGitAction(input: unknown): ParseResult<GitAction> {
     if (!branch.ok) return branch;
     return { ok: true, value: { action: body.action, branch: branch.value! } };
   }
-  if (body.action === "add_worktree") {
-    const branch = stringField(body, "branch", true);
-    if (!branch.ok) return branch;
-    const path = stringField(body, "path", true);
-    if (!path.ok) return path;
-    return {
-      ok: true,
-      value: { action: "add_worktree", branch: branch.value!, path: path.value! },
-    };
-  }
+  if (body.action === "add_worktree") return parseAddWorktree(body);
   if (body.action === "remove_worktree") {
     const path = stringField(body, "path", true);
     return path.ok ? { ok: true, value: { action: "remove_worktree", path: path.value! } } : path;
@@ -106,41 +104,11 @@ export function parseGitAction(input: unknown): ParseResult<GitAction> {
 }
 
 export type TerminalRunRequest = { command: string };
-export type TerminalRunResult = {
-  ok: boolean;
-  command: string;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  error?: string;
-};
-
-export function parseTerminalRunRequest(input: unknown): ParseResult<TerminalRunRequest> {
+export function parseTerminalRunRequest(
+  input: AgentContractInput,
+): ParseResult<TerminalRunRequest> {
   const body = objectRecord(input);
   if (!body) return { ok: false, error: "Invalid JSON body" };
   const command = stringField(body, "command", true);
   return command.ok ? { ok: true, value: { command: command.value! } } : command;
-}
-
-export function parseAgentTurnCommandResult(input: unknown): AgentTurnCommandResult | null {
-  const payload = objectRecord(input);
-  if (!payload || payload.type !== "command") return null;
-  const outcome =
-    payload.outcome === "accepted" || payload.outcome === "queued" || payload.outcome === "rejected"
-      ? payload.outcome
-      : null;
-  const runtimeSessionId =
-    typeof payload.runtimeSessionId === "string" && payload.runtimeSessionId.trim()
-      ? payload.runtimeSessionId.trim()
-      : "";
-  if (!outcome || !runtimeSessionId) return null;
-  return {
-    type: "command",
-    outcome,
-    runtimeSessionId,
-    piSessionId: typeof payload.piSessionId === "string" ? payload.piSessionId : null,
-    active: payload.active === true,
-    status: objectRecord(payload.status) ? (payload.status as AgentTurnRuntimeStatus) : undefined,
-    error: typeof payload.error === "string" ? payload.error : undefined,
-  };
 }

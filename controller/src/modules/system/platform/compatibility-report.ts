@@ -28,70 +28,60 @@ const addCheck = (
   });
 };
 
+const monitoringProbes = {
+  "nvidia-smi": {
+    resolve: resolveNvidiaSmiBinary,
+    args: ["--query-gpu=name", "--format=csv,noheader,nounits"],
+  },
+  "amd-smi": { resolve: resolveAmdSmiBinary, args: ["version"] },
+  "rocm-smi": { resolve: resolveRocmSmiBinary, args: ["--showproductname"] },
+} as const;
+
 export const probeGpuMonitoring = (
   kind: SystemRuntimeInfo["platform"]["kind"],
   rocmTool: RuntimeRocmSmiTool | null,
 ): Effect.Effect<{ available: boolean; tool: RuntimeGpuMonitoringTool | null }> => {
-  const probe = (binary: string, args: string[]): Effect.Effect<boolean> =>
-    runCommandAsyncEffect(binary, args, { timeoutMs: 2_000 }).pipe(
-      Effect.map((result) => result.status === 0),
+  const probe = (
+    tool: keyof typeof monitoringProbes,
+  ): Effect.Effect<{ available: boolean; tool: RuntimeGpuMonitoringTool }> => {
+    const { resolve, args } = monitoringProbes[tool];
+    const binary = resolve();
+    if (!binary) return Effect.succeed({ available: false, tool });
+    return runCommandAsyncEffect(binary, [...args], { timeoutMs: 2_000 }).pipe(
+      Effect.map((result) => ({ available: result.status === 0, tool })),
     );
+  };
 
-  if (kind === "cuda") {
-    const binary = resolveNvidiaSmiBinary();
-    if (!binary) return Effect.succeed({ available: false, tool: "nvidia-smi" });
-    return probe(binary, ["--query-gpu=name", "--format=csv,noheader,nounits"]).pipe(
-      Effect.map((available) => ({ available, tool: "nvidia-smi" as const })),
-    );
-  }
-
-  if (kind === "rocm") {
-    const preferred = rocmTool ?? (resolveAmdSmiBinary() ? "amd-smi" : null);
-
-    if (preferred === "amd-smi") {
-      const binary = resolveAmdSmiBinary();
-      if (!binary) return Effect.succeed({ available: false, tool: "amd-smi" });
-      return probe(binary, ["version"]).pipe(
-        Effect.map((available) => ({ available, tool: "amd-smi" as const })),
-      );
+  if (kind === "cuda") return probe("nvidia-smi");
+  if (kind !== "rocm") return Effect.succeed({ available: false, tool: null });
+  const preferred = rocmTool ?? (resolveAmdSmiBinary() ? "amd-smi" : null);
+  if (preferred) return probe(preferred);
+  return Effect.gen(function* () {
+    for (const tool of ["amd-smi", "rocm-smi"] as const) {
+      const result = yield* probe(tool);
+      if (result.available) return result;
     }
-
-    if (preferred === "rocm-smi") {
-      const binary = resolveRocmSmiBinary();
-      if (!binary) return Effect.succeed({ available: false, tool: "rocm-smi" });
-      return probe(binary, ["--showproductname"]).pipe(
-        Effect.map((available) => ({ available, tool: "rocm-smi" as const })),
-      );
-    }
-
-    const amd = resolveAmdSmiBinary();
-    const rocm = resolveRocmSmiBinary();
-    return Effect.gen(function* () {
-      if (amd && (yield* probe(amd, ["version"]))) {
-        return { available: true, tool: "amd-smi" as const };
-      }
-      if (rocm && (yield* probe(rocm, ["--showproductname"]))) {
-        return { available: true, tool: "rocm-smi" as const };
-      }
-      return { available: false, tool: null };
-    });
-  }
-
-  return Effect.succeed({ available: false, tool: null });
+    return { available: false, tool: null };
+  });
 };
 
-export const buildCompatibilityReport = (args: {
+type CompatibilityReportArguments = {
   runtime: SystemRuntimeInfo;
   inference_port: number;
   inference_port_open: boolean;
   inference_process_known: boolean;
   gpu_monitoring: { available: boolean; tool: RuntimeGpuMonitoringTool | null };
-}): CompatibilityReport => {
-  const { runtime } = args;
-  const checks: CompatibilityCheck[] = [];
-  const gpuMonitoring = args.gpu_monitoring;
+};
 
+const addGpuChecks = (checks: CompatibilityCheck[], args: CompatibilityReportArguments): void => {
+  const { runtime } = args;
   if (runtime.gpus.count === 0) {
+    const suggestedFix =
+      runtime.platform.kind === "rocm"
+        ? "Verify ROCm is installed and GPU tools are available (amd-smi/rocm-smi)."
+        : runtime.platform.kind === "cuda"
+          ? "Verify NVIDIA drivers are installed and nvidia-smi is accessible."
+          : "Verify GPU drivers are installed and set LOCAL_STUDIO_GPU_SMI_TOOL if needed.";
     addCheck(checks, {
       id: "gpu.none-detected",
       severity: "warn",
@@ -100,15 +90,9 @@ export const buildCompatibilityReport = (args: {
         `platform.kind=${runtime.platform.kind}`,
         `gpus.count=${runtime.gpus.count}`,
       ]),
-      suggested_fix:
-        runtime.platform.kind === "rocm"
-          ? "Verify ROCm is installed and GPU tools are available (amd-smi/rocm-smi)."
-          : runtime.platform.kind === "cuda"
-            ? "Verify NVIDIA drivers are installed and nvidia-smi is accessible."
-            : "Verify GPU drivers are installed and set LOCAL_STUDIO_GPU_SMI_TOOL if needed.",
+      suggested_fix: suggestedFix,
     });
   }
-
   if (runtime.platform.kind === "rocm" && !runtime.platform.torch.torch_hip) {
     addCheck(checks, {
       id: "torch.rocm-missing-hip",
@@ -123,7 +107,13 @@ export const buildCompatibilityReport = (args: {
         "Install a ROCm-enabled PyTorch build that matches your ROCm version, and ensure the controller is using that Python environment.",
     });
   }
+};
 
+const addMonitoringChecks = (
+  checks: CompatibilityCheck[],
+  args: CompatibilityReportArguments,
+): void => {
+  const { runtime, gpu_monitoring: gpuMonitoring } = args;
   if (runtime.platform.kind === "rocm" && !gpuMonitoring.available) {
     addCheck(checks, {
       id: "gpu-monitoring.rocm-unavailable",
@@ -134,7 +124,6 @@ export const buildCompatibilityReport = (args: {
         "Ensure `amd-smi` or `rocm-smi` is installed and on PATH, or set AMD_SMI_PATH/ROCM_SMI_PATH.",
     });
   }
-
   if (runtime.platform.kind === "cuda" && !gpuMonitoring.available) {
     addCheck(checks, {
       id: "gpu-monitoring.cuda-unavailable",
@@ -146,7 +135,13 @@ export const buildCompatibilityReport = (args: {
         "Ensure NVIDIA drivers are installed and nvidia-smi is on PATH (snap-installed bun can block access).",
     });
   }
+};
 
+const addRuntimeChecks = (
+  checks: CompatibilityCheck[],
+  args: CompatibilityReportArguments,
+): void => {
+  const { runtime } = args;
   if (args.inference_port_open && !args.inference_process_known) {
     addCheck(checks, {
       id: "inference.port-in-use",
@@ -157,7 +152,6 @@ export const buildCompatibilityReport = (args: {
         "Stop the process using the inference port, or change LOCAL_STUDIO_INFERENCE_PORT to a free port.",
     });
   }
-
   if (
     !runtime.backends.vllm.installed &&
     !runtime.backends.sglang.installed &&
@@ -172,12 +166,20 @@ export const buildCompatibilityReport = (args: {
         "Install at least one backend runtime (vLLM, SGLang, llama.cpp, or MLX), then restart the controller.",
     });
   }
+};
 
+export const buildCompatibilityReport = (
+  args: CompatibilityReportArguments,
+): CompatibilityReport => {
+  const checks: CompatibilityCheck[] = [];
+  addGpuChecks(checks, args);
+  addMonitoringChecks(checks, args);
+  addRuntimeChecks(checks, args);
   return {
-    platform: { kind: runtime.platform.kind },
-    gpu_monitoring: gpuMonitoring,
-    torch: runtime.platform.torch,
-    backends: runtime.backends,
+    platform: { kind: args.runtime.platform.kind },
+    gpu_monitoring: args.gpu_monitoring,
+    torch: args.runtime.platform.torch,
+    backends: args.runtime.backends,
     checks,
   };
 };

@@ -2,10 +2,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Effect, Schema } from "effect";
-import { parseRecipe } from "./recipe-serializer";
+import { parseRecipe, recipeExtraArgumentSchema } from "./recipe-serializer";
 import type { Recipe } from "../types";
+import type { RecipeExtraArgument } from "@local-studio/contracts/recipes";
 import { openSqliteDatabase } from "../../../stores/sqlite";
-import type { ModelIndexEntry } from "../../../../contracts/model-index";
+import { ModelIndexEntrySchema, type ModelIndexEntry } from "../../../../contracts/model-index";
 
 export class RecipeStoreError extends Schema.TaggedErrorClass<RecipeStoreError>()(
   "RecipeStoreError",
@@ -16,30 +17,36 @@ export class RecipeStoreError extends Schema.TaggedErrorClass<RecipeStoreError>(
   },
 ) {}
 
-const storeError = (operation: RecipeStoreError["operation"], source: unknown): RecipeStoreError =>
+const storeError = (
+  operation: RecipeStoreError["operation"],
+  source: RecipeStoreError["source"],
+): RecipeStoreError =>
   new RecipeStoreError({
     operation,
     message: `Recipe ${operation} failed: ${String(source)}`,
     source,
   });
 
-/**
- * The overlay registry file this store owns. It is the same
- * `data_dir/model-index.json` the catalog route serves: `tiers` stay whatever
- * the operator authored (usually nothing — the bundled catalog fills in), and
- * `entries` are the launchable models, each carrying its full serve
- * configuration. One file describes both what exists and what this controller
- * can run — which is the whole point of moving recipes into the registry.
- */
 interface RegistryOverlay {
   version: number;
   updated: string;
-  intelligence_source?: string;
-  tiers: unknown[];
+  intelligence_source?: string | undefined;
+  tiers: RecipeExtraArgument[];
   entries: ModelIndexEntry[];
-  migrated_from_sqlite?: string;
-  [key: string]: unknown;
+  migrated_from_sqlite?: string | undefined;
 }
+
+const RegistryOverlaySchema = Schema.Struct({
+  version: Schema.Number,
+  updated: Schema.String,
+  intelligence_source: Schema.optional(Schema.String),
+  tiers: Schema.Array(recipeExtraArgumentSchema),
+  entries: Schema.Array(ModelIndexEntrySchema),
+  migrated_from_sqlite: Schema.optional(Schema.String),
+});
+const decodeRegistryOverlay = Schema.decodeUnknownSync(RegistryOverlaySchema, {
+  onExcessProperty: "preserve",
+});
 
 const emptyOverlay = (): RegistryOverlay => ({
   version: 1,
@@ -48,12 +55,8 @@ const emptyOverlay = (): RegistryOverlay => ({
   entries: [],
 });
 
-/** id/name live on the entry; everything else is the serve body. */
 const entryFromRecipe = (recipe: Recipe): ModelIndexEntry => {
-  const { id, name, ...serve } = recipe as unknown as Record<string, unknown> & {
-    id: string;
-    name: string;
-  };
+  const { id, name, ...serve } = recipe;
   return { id, name, serve };
 };
 
@@ -65,15 +68,6 @@ const recipeFromEntry = (entry: ModelIndexEntry): Recipe | null => {
   }
 };
 
-/**
- * Recipes, stored in the model registry.
- *
- * The interface is unchanged from the SQLite era — routes, the bridge, and the
- * proxy all keep working against list/get/save/delete — but the backing store
- * is the registry overlay. The old `recipes` table is read exactly once, to
- * migrate its rows into the overlay, and is then left untouched as the
- * rollback path.
- */
 export class RecipeStore {
   private readonly overlayPath: string;
 
@@ -95,7 +89,10 @@ export class RecipeStore {
     }
   }
 
-  static open(dataDirectory: string, sqliteDatabasePath: string): Effect.Effect<RecipeStore, RecipeStoreError> {
+  static open(
+    dataDirectory: string,
+    sqliteDatabasePath: string,
+  ): Effect.Effect<RecipeStore, RecipeStoreError> {
     return Effect.try({
       try: () => new RecipeStore(dataDirectory, sqliteDatabasePath),
       catch: (source) => (source instanceof RecipeStoreError ? source : storeError("open", source)),
@@ -104,13 +101,11 @@ export class RecipeStore {
 
   private readOverlay(): RegistryOverlay {
     if (!existsSync(this.overlayPath)) return emptyOverlay();
-    const parsed = JSON.parse(readFileSync(this.overlayPath, "utf-8")) as Record<string, unknown>;
-    return {
+    const decoded = decodeRegistryOverlay({
       ...emptyOverlay(),
-      ...parsed,
-      tiers: Array.isArray(parsed["tiers"]) ? (parsed["tiers"] as unknown[]) : [],
-      entries: Array.isArray(parsed["entries"]) ? (parsed["entries"] as ModelIndexEntry[]) : [],
-    };
+      ...JSON.parse(readFileSync(this.overlayPath, "utf-8")),
+    });
+    return { ...decoded, tiers: [...decoded.tiers], entries: [...decoded.entries] };
   }
 
   private writeOverlay(overlay: RegistryOverlay): void {
@@ -120,11 +115,6 @@ export class RecipeStore {
     renameSync(temporary, this.overlayPath);
   }
 
-  /**
-   * One-time import of the legacy SQLite rows. Runs only while the overlay has
-   * never been stamped, tolerates both historical column layouts, skips ids
-   * the overlay already has, and never writes back to the database.
-   */
   private migrateFromSqlite(sqliteDatabasePath: string): void {
     const overlay = this.readOverlay();
     if (overlay.migrated_from_sqlite) return;
@@ -136,17 +126,20 @@ export class RecipeStore {
           .query("SELECT name FROM sqlite_master WHERE type='table' AND name='recipes'")
           .get();
         if (table) {
-          const columns = db.query("PRAGMA table_info(recipes)").all() as Array<{ name: string }>;
+          const columns = db.query<{ name: string }, []>("PRAGMA table_info(recipes)").all();
           const names = new Set(columns.map((column) => column.name));
           const column = names.has("data") ? "data" : names.has("json") ? "json" : null;
           if (column) {
-            const rows = db.query(`SELECT ${column} FROM recipes ORDER BY id`).all() as Array<
-              Record<string, string>
-            >;
+            const rows = db
+              .query<
+                { data?: string; json?: string },
+                []
+              >(`SELECT ${column} FROM recipes ORDER BY id`)
+              .all();
             const known = new Set(overlay.entries.map((entry) => entry.id));
             for (const row of rows) {
               const raw = row[column];
-              if (typeof raw !== "string") continue;
+              if (!raw) continue;
               let recipe: Recipe | null = null;
               try {
                 recipe = parseRecipe(JSON.parse(raw));
@@ -231,7 +224,7 @@ export class RecipeStore {
     }).pipe(
       Effect.flatMap((content) =>
         Effect.try({
-          try: () => JSON.parse(content) as unknown,
+          try: () => JSON.parse(content),
           catch: (source) => storeError("import", source),
         }),
       ),

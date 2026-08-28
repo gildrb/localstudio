@@ -33,11 +33,10 @@ export interface RuntimeBackendInfo {
   upgrade_command_available?: boolean;
 }
 
-export type EngineBackend = "vllm" | "sglang" | "exllamav3";
-
 export const RUNTIME_JOB_BACKENDS = ["vllm", "sglang", "exllamav3"] as const;
 
-export type RuntimeJobBackend = (typeof RUNTIME_JOB_BACKENDS)[number];
+export type EngineBackend = (typeof RUNTIME_JOB_BACKENDS)[number];
+export type RuntimeJobBackend = EngineBackend;
 
 export type RuntimeKind = "venv" | "docker" | "binary" | "system";
 
@@ -77,21 +76,6 @@ export interface RuntimeTarget {
   };
 }
 
-export interface EngineJob {
-  id: string;
-  backend: RuntimeJobBackend;
-  targetId?: string;
-  type: RuntimeJobType;
-  status: "queued" | "running" | "success" | "error" | "cancelled";
-  progress?: number;
-  message: string;
-  command?: string;
-  startedAt: string;
-  finishedAt?: string;
-  outputTail?: string;
-  error?: string;
-}
-
 export const EngineJobSchema = Schema.Struct({
   id: Schema.String,
   backend: Schema.Literals(RUNTIME_JOB_BACKENDS),
@@ -106,6 +90,14 @@ export const EngineJobSchema = Schema.Struct({
   outputTail: Schema.optional(Schema.String),
   error: Schema.optional(Schema.String),
 });
+
+type MutableExactOptional<Type> = {
+  -readonly [Key in keyof Type]: undefined extends Type[Key]
+    ? Exclude<Type[Key], undefined>
+    : Type[Key];
+};
+
+export type EngineJob = MutableExactOptional<typeof EngineJobSchema.Type>;
 
 export type RuntimePlatformKind = "cuda" | "rocm" | "metal" | "unknown";
 

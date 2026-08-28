@@ -11,7 +11,9 @@ const documentRoute = describeRoute({
   responses: { 200: { description: "Successful response" } },
 });
 
-type EffectRouteHandler = (context: Context<ControllerEnvironment>) => unknown;
+type EffectRouteHandler = (
+  context: Context<ControllerEnvironment>,
+) => ControllerEffect<Response | TypedResponse<unknown>, unknown>;
 
 type EffectRouteHandlerResult<Handler extends EffectRouteHandler> =
   ReturnType<Handler> extends ControllerEffect<infer Result, unknown>
@@ -69,8 +71,11 @@ export const defineRoutes = <Routes extends ControllerRouteApp>(
   registrar: (app: Hono<ControllerEnvironment>, context: AppContext) => Routes,
 ): typeof registrar => registrar;
 
-export const mergeRoutes = <
+export function mergeRoutes<
   const Routes extends readonly [ControllerRouteApp, ...ControllerRouteApp[]],
->(
-  ...routes: Routes
-): UnionToIntersection<Routes[number]> => routes[0] as UnionToIntersection<Routes[number]>;
+>(...routes: Routes): UnionToIntersection<Routes[number]>;
+export function mergeRoutes(
+  ...routes: [ControllerRouteApp, ...ControllerRouteApp[]]
+): ControllerRouteApp {
+  return routes[0];
+}

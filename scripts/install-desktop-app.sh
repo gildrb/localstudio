@@ -7,9 +7,12 @@ ROLLBACK_ROOT="${LOCAL_STUDIO_ROLLBACK_ROOT:-$HOME/Library/Application Support/L
 LSREGISTER="${LOCAL_STUDIO_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
 PLIST_BUDDY="${LOCAL_STUDIO_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 SKIP_RUNTIME_CLEANUP="${LOCAL_STUDIO_SKIP_RUNTIME_CLEANUP:-0}"
-RELEASE_DMG_URL="${LOCAL_STUDIO_RELEASE_DMG_URL:-https://github.com/sybil-solutions/local-studio/releases/latest/download/Local-Studio-arm64.dmg}"
+RELEASE_DMG_URL="${LOCAL_STUDIO_RELEASE_DMG_URL:-https://github.com/sybil-solutions/local-studio/releases/download/v2.15.2/Local-Studio-2.15.2-arm64.dmg}"
+RELEASE_DMG_SHA256="${LOCAL_STUDIO_RELEASE_DMG_SHA256:-3d44944da62d471f81283a9c8fbb3f4f9f6ce1f4d158014a20ab901d27972bab}"
+EXPECTED_TEAM_ID="TZ447KHNZL"
 RELEASE_TEMP=""
 RELEASE_MOUNT=""
+RELEASE_ATTACHED=0
 
 channel="stable"
 keep_backup=1
@@ -34,6 +37,14 @@ if [[ "$ROLLBACK_ROOT" != /* || "$ROLLBACK_ROOT" == "/" || "$ROLLBACK_ROOT" == "
   exit 2
 fi
 
+mkdir -p "$INSTALL_ROOT" "$ROLLBACK_ROOT"
+INSTALL_ROOT="$(cd "$INSTALL_ROOT" && pwd -P)"
+ROLLBACK_ROOT="$(cd "$ROLLBACK_ROOT" && pwd -P)"
+if [[ "$INSTALL_ROOT" == "/" || "$ROLLBACK_ROOT" == "/" || "$ROLLBACK_ROOT" == "$INSTALL_ROOT" || "$ROLLBACK_ROOT/" == "$INSTALL_ROOT/"* || "$INSTALL_ROOT/" == "$ROLLBACK_ROOT/"* ]]; then
+  echo "error: canonical install and rollback roots overlap" >&2
+  exit 2
+fi
+
 if [[ "$channel" == "dev" ]]; then
   APP_NAME="Local Studio Dev"
   APP_ID="org.local.studio.desktop.dev"
@@ -46,24 +57,9 @@ fi
 
 TARGET="$INSTALL_ROOT/$APP_NAME.app"
 ROLLBACK="$ROLLBACK_ROOT/$APP_NAME.zip"
-STAGED="$INSTALL_ROOT/.local-studio-installing-$APP_ID-$$"
-REPLACED="$INSTALL_ROOT/.local-studio-replaced-$APP_ID-$$"
-
-rollback_for_id() {
-  case "$1" in
-    org.local.studio.desktop) printf '%s/Local Studio.zip\n' "$ROLLBACK_ROOT" ;;
-    org.local.studio.desktop.dev) printf '%s/Local Studio Dev.zip\n' "$ROLLBACK_ROOT" ;;
-    *) return 1 ;;
-  esac
-}
-
-canonical_for_id() {
-  case "$1" in
-    org.local.studio.desktop) printf '%s/Local Studio.app\n' "$INSTALL_ROOT" ;;
-    org.local.studio.desktop.dev) printf '%s/Local Studio Dev.app\n' "$INSTALL_ROOT" ;;
-    *) return 1 ;;
-  esac
-}
+TRANSACTION=""
+STAGED=""
+REPLACED=""
 
 bundle_id() {
   "$PLIST_BUDDY" -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null
@@ -73,7 +69,6 @@ archive_bundle() {
   local source="$1"
   local destination="$2"
   local temporary="$destination.tmp.$$"
-
   mkdir -p "$(dirname "$destination")"
   rm -f "$temporary"
   if ! ditto -c -k --sequesterRsrc --keepParent "$source/Contents" "$temporary"; then
@@ -95,9 +90,22 @@ archive_is_valid() {
   unzip -Z1 "$archive" | awk '$0 == "Contents/Info.plist" || ($0 ~ /^Local Studio( Dev)?\.app/ && $0 ~ /\/Contents\/Info\.plist$/) { found = 1 } END { exit found ? 0 : 1 }'
 }
 
-legacy_bundles() {
-  [[ -d "$INSTALL_ROOT" ]] || return 0
-  find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -type d -iname '*Local Studio*' -print0
+archive_matches_bundle() {
+  local archive="$1" id="$2" name="$3" temporary info root
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/local-studio-archive.XXXXXX")"
+  if ditto -x -k "$archive" "$temporary"; then
+    info="$temporary/Contents/Info.plist"
+    [[ -f "$info" ]] || info="$temporary/$name.app/Contents/Info.plist"
+  fi
+  if [[ -n "$info" && -f "$info" ]]; then
+    root="${info%/Contents/Info.plist}"
+    if [[ "$(bundle_id "$root" || true)" == "$id" && -x "$root/Contents/MacOS/$name" ]] && codesign --verify --deep --strict "$root"; then
+      rm -rf "$temporary"
+      return 0
+    fi
+  fi
+  rm -rf "$temporary"
+  return 1
 }
 
 unregister_bundle_tree() {
@@ -127,46 +135,66 @@ prune_stale_launch_services() {
 
 migrate_legacy_bundles() {
   local skip_id="${1:-}"
-  local candidate id canonical archive
+  local candidate id name canonical archive
 
   while IFS= read -r -d '' candidate; do
     id="$(bundle_id "$candidate" || true)"
-    [[ "$id" == "org.local.studio.desktop" || "$id" == "org.local.studio.desktop.dev" ]] || continue
-    canonical="$(canonical_for_id "$id")"
+    case "$id" in
+      org.local.studio.desktop) name="Local Studio" ;;
+      org.local.studio.desktop.dev) name="Local Studio Dev" ;;
+      *) continue ;;
+    esac
+    canonical="$INSTALL_ROOT/$name.app"
+    archive="$ROLLBACK_ROOT/$name.zip"
     [[ "$candidate" != "$canonical" ]] || continue
-    archive="$(rollback_for_id "$id")"
 
-    if [[ "$id" != "$skip_id" ]] && ! archive_is_valid "$archive"; then
+    if [[ "$id" != "$skip_id" ]]; then
+      if archive_is_valid "$archive"; then
+        echo "==> keeping legacy bundle; rollback slot already contains other data: $candidate"
+        continue
+      fi
       echo "==> archiving legacy rollback $candidate -> $archive"
       archive_bundle "$candidate" "$archive"
+      if ! archive_matches_bundle "$archive" "$id" "$name"; then
+        echo "error: refusing to remove legacy bundle; rollback validation failed" >&2
+        rm -f "$archive"
+        continue
+      fi
     fi
 
-    echo "==> removing discoverable legacy bundle $candidate"
+    echo "==> removing legacy bundle $candidate"
     unregister_bundle_tree "$candidate"
     rm -rf "$candidate"
-  done < <(legacy_bundles)
+  done < <([[ ! -d "$INSTALL_ROOT" ]] || find "$INSTALL_ROOT" -mindepth 1 -maxdepth 1 -type d -iname '*Local Studio*' -print0)
 
   prune_stale_launch_services
 }
 
 cleanup_temporary_paths() {
-  rm -rf "$STAGED"
-  if [[ "${SWAP_VERIFIED:-0}" == "0" && -d "$REPLACED" ]]; then
-    rm -rf "$TARGET"
-    mv "$REPLACED" "$TARGET"
+  local failed=0
+  if [[ "${SWAP_VERIFIED:-0}" == "0" && -n "$REPLACED" && -d "$REPLACED" ]]; then
+    if rm -rf "$TARGET" && mv "$REPLACED" "$TARGET"; then :; else
+      echo "error: failed to restore $TARGET; replacement remains at $REPLACED" >&2
+      failed=1
+    fi
   elif [[ "${SWAP_VERIFIED:-0}" == "0" && "${TARGET_INSTALLED:-0}" == "1" ]]; then
-    rm -rf "$TARGET"
+    rm -rf "$TARGET" || { echo "error: failed to remove unverified $TARGET" >&2; failed=1; }
   fi
-  cleanup_release_source
+  [[ -z "$STAGED" ]] || rm -rf "$STAGED" || { echo "error: failed to remove $STAGED" >&2; failed=1; }
+  cleanup_release_source || failed=1
+  [[ -z "$TRANSACTION" ]] || rmdir "$TRANSACTION" 2>/dev/null || true
+  return "$failed"
 }
 
 cleanup_release_source() {
-  if [[ -n "$RELEASE_MOUNT" ]]; then
-    hdiutil detach "$RELEASE_MOUNT" -quiet || hdiutil detach "$RELEASE_MOUNT" -force -quiet || true
+  local failed=0
+  if [[ "$RELEASE_ATTACHED" == "1" ]]; then
+    if hdiutil detach "$RELEASE_MOUNT" -quiet || hdiutil detach "$RELEASE_MOUNT" -force -quiet; then RELEASE_ATTACHED=0; else failed=1; fi
   fi
-  [[ -z "$RELEASE_TEMP" ]] || rm -rf "$RELEASE_TEMP"
-  RELEASE_MOUNT=""
-  RELEASE_TEMP=""
+  if [[ "$RELEASE_ATTACHED" == "0" && -n "$RELEASE_TEMP" ]]; then
+    if rm -rf "$RELEASE_TEMP"; then RELEASE_TEMP=""; RELEASE_MOUNT=""; else failed=1; fi
+  fi
+  (( failed == 0 ))
 }
 
 if [[ "$mode" == "migrate" ]]; then
@@ -175,9 +203,11 @@ if [[ "$mode" == "migrate" ]]; then
   exit 0
 fi
 
-HAD_TARGET=0
 SWAP_VERIFIED=0
 TARGET_INSTALLED=0
+TRANSACTION="$(mktemp -d "$INSTALL_ROOT/.local-studio-install-$APP_ID.XXXXXX")"
+STAGED="$TRANSACTION/staged.app"
+REPLACED="$TRANSACTION/replaced.app"
 trap cleanup_temporary_paths EXIT
 
 if [[ "$channel" == "stable" && -z "$BUILT" ]]; then
@@ -187,9 +217,11 @@ if [[ "$channel" == "stable" && -z "$BUILT" ]]; then
   mkdir -p "$RELEASE_MOUNT"
   echo "==> downloading latest stable release"
   curl --fail --location --silent --show-error "$RELEASE_DMG_URL" --output "$release_dmg"
+  [[ "$(shasum -a 256 "$release_dmg" | awk '{print $1}')" == "$RELEASE_DMG_SHA256" ]] || { echo "error: release checksum mismatch" >&2; exit 1; }
   xcrun stapler validate "$release_dmg"
   spctl --assess --type open --context context:primary-signature "$release_dmg"
   hdiutil attach -readonly -nobrowse -mountpoint "$RELEASE_MOUNT" "$release_dmg" >/dev/null
+  RELEASE_ATTACHED=1
   BUILT="$RELEASE_MOUNT/$APP_NAME.app"
 fi
 
@@ -219,10 +251,8 @@ fi
 codesign --verify --deep --strict "$BUILT"
 if [[ "$channel" == "stable" ]]; then
   spctl --assess --type execute "$BUILT"
+  [[ "$(codesign -dv --verbose=4 "$BUILT" 2>&1 | sed -n 's/^TeamIdentifier=//p')" == "$EXPECTED_TEAM_ID" ]] || { echo "error: release publisher does not match $EXPECTED_TEAM_ID" >&2; exit 1; }
 fi
-mkdir -p "$INSTALL_ROOT" "$ROLLBACK_ROOT"
-rm -rf "$STAGED" "$REPLACED"
-
 ditto "$BUILT" "$STAGED"
 codesign --verify --deep --strict "$STAGED"
 cleanup_release_source
@@ -230,6 +260,7 @@ cleanup_release_source
 if [[ -d "$TARGET" && "$keep_backup" == "1" ]]; then
   echo "==> archiving current install -> $ROLLBACK"
   archive_bundle "$TARGET" "$ROLLBACK"
+  archive_matches_bundle "$ROLLBACK" "$APP_ID" "$APP_NAME" || { rm -f "$ROLLBACK"; echo "error: current install rollback failed strong validation" >&2; exit 1; }
 elif [[ "$keep_backup" == "0" ]]; then
   rm -f "$ROLLBACK"
 fi
@@ -237,28 +268,27 @@ fi
 if [[ "$SKIP_RUNTIME_CLEANUP" != "1" ]]; then
   echo "==> quitting $APP_NAME"
   osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    pgrep -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" >/dev/null || break
+  executable="$TARGET/Contents/MacOS/$APP_NAME"
+  for _ in {1..10}; do
+    if [[ ! -e "$executable" ]] || ! lsof -t "$executable" >/dev/null 2>&1; then break; fi
     sleep 0.5
   done
-  pkill -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" >/dev/null 2>&1 || true
-
-  while IFS= read -r volume; do
-    [[ -n "$volume" ]] || continue
-    echo "==> ejecting stale disk image $volume"
-    hdiutil detach "$volume" -quiet || hdiutil detach "$volume" -force -quiet || true
-  done < <(find /Volumes -mindepth 1 -maxdepth 1 -type d -name "$APP_NAME*" -print 2>/dev/null || true)
+  if [[ -e "$executable" ]]; then
+    while IFS= read -r pid; do [[ -z "$pid" ]] || kill "$pid" 2>/dev/null || true; done < <(lsof -t "$executable" 2>/dev/null | sort -u)
+  fi
 
   for port in 3000 8081; do
-    pid="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
-    [[ -n "$pid" ]] || continue
-    echo "==> stopping stale server on :$port (pid $pid)"
-    kill "$pid" 2>/dev/null || true
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      case "$command" in *"$TARGET/"*) ;; *) continue ;; esac
+      echo "==> stopping stale $APP_NAME server on :$port (pid $pid)"
+      kill "$pid" 2>/dev/null || true
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u)
   done
 fi
 
 if [[ -d "$TARGET" ]]; then
-  HAD_TARGET=1
   mv "$TARGET" "$REPLACED"
 fi
 
@@ -267,9 +297,12 @@ TARGET_INSTALLED=1
 codesign --verify --deep --strict "$TARGET"
 if [[ "$channel" == "stable" ]]; then
   spctl --assess --type execute "$TARGET"
+  [[ "$(codesign -dv --verbose=4 "$TARGET" 2>&1 | sed -n 's/^TeamIdentifier=//p')" == "$EXPECTED_TEAM_ID" ]] || { echo "error: installed publisher does not match $EXPECTED_TEAM_ID" >&2; exit 1; }
 fi
 SWAP_VERIFIED=1
 rm -rf "$REPLACED"
+rmdir "$TRANSACTION"
+TRANSACTION=""
 
 if [[ "$keep_backup" == "1" ]]; then
   migrate_legacy_bundles

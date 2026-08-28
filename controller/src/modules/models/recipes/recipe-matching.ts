@@ -14,6 +14,17 @@ const normalizeModelPath = (path: string): string => path.replace(/\/+$/, "");
 const isPathPrefix = (ancestor: string, descendant: string): boolean =>
   descendant === ancestor || descendant.startsWith(`${ancestor}/`);
 
+const hasAllowedPathPrefix = (
+  recipePath: string,
+  currentPath: string,
+  options: RecipeMatchOptions,
+): boolean => {
+  if (options.allowEitherPathContains) {
+    return isPathPrefix(currentPath, recipePath) || isPathPrefix(recipePath, currentPath);
+  }
+  return Boolean(options.allowCurrentContainsRecipePath && isPathPrefix(recipePath, currentPath));
+};
+
 /**
  * Rank how well a running process matches a recipe. 0 = no match; higher is
  * a more specific match:
@@ -49,15 +60,7 @@ const recipeMatchRank = (
     return 3;
   }
 
-  if (options.allowEitherPathContains) {
-    if (isPathPrefix(currentPath, recipePath) || isPathPrefix(recipePath, currentPath)) {
-      return 2;
-    }
-  } else if (options.allowCurrentContainsRecipePath) {
-    if (isPathPrefix(recipePath, currentPath)) {
-      return 2;
-    }
-  }
+  if (hasAllowedPathPrefix(recipePath, currentPath, options)) return 2;
 
   // Basename fallback ONLY when one side lacks directory context (e.g. the
   // running process reports just a filename). Comparing basenames of two full
@@ -70,34 +73,12 @@ const recipeMatchRank = (
   return 0;
 };
 
-/**
- * Determine whether a running process matches a given recipe.
- * Matching order:
- * 1) served_model_name (case-insensitive)
- * 2) normalized exact model path
- * 3) optional contains-style path match (route-specific)
- * 4) model path basename
- * @param recipe - Recipe to match against.
- * @param current - Current process info.
- * @param options - Matching options.
- * @returns True if the process matches the recipe.
- */
 export const isRecipeRunning = (
   recipe: Recipe,
   current: ProcessInfo,
   options: RecipeMatchOptions = {},
 ): boolean => recipeMatchRank(recipe, current, options) > 0;
 
-/**
- * Pick the single recipe that best explains the running process. Several
- * recipes can share a model path (e.g. three glm-5.2 recipes over one weights
- * directory), and with the contains-style fallback every one of them "runs"
- * whenever the shared path is loaded — so a boolean per recipe marks them all
- * active. This ranks the candidates (served_model_name equality, then exact
- * path equality, then the path-contains fallback, then basename) and returns
- * only the best; on a rank tie the first recipe in list order wins.
- * @returns The best-matching recipe, or null when nothing matches.
- */
 export const selectRunningRecipe = <R extends Recipe>(
   recipes: readonly R[],
   current: ProcessInfo,

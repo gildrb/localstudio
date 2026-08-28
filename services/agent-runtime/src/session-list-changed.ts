@@ -8,7 +8,7 @@ let version = 0;
 export function notifySessionListChanged(): void {
   version += 1;
   const event: SessionListChangedEvent = { type: "session_list_changed", version };
-  for (const listener of [...listeners]) listener(event);
+  for (const listener of listeners) listener(event);
 }
 
 export function subscribeSessionListChanged(listener: Listener): () => void {

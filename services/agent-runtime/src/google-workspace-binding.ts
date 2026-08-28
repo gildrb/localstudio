@@ -1,18 +1,6 @@
 export const GOOGLE_WORKSPACE_PLUGIN_IDS = ["gmail", "google-calendar"] as const;
 export type GoogleWorkspacePluginId = (typeof GOOGLE_WORKSPACE_PLUGIN_IDS)[number];
 
-/**
- * How a signed-in account's read-only tools are actually reached.
- *
- * `rest` calls the long-lived public Google REST APIs (gmail.googleapis.com,
- * calendar.googleapis.com) through an in-process adapter that speaks the same
- * tool names as the remote server. `remote-mcp` calls Google's first-party
- * Workspace MCP servers, which are a developer preview: we have never been able
- * to confirm that a self-registered Desktop OAuth client is accepted there, so
- * it stays opt-in behind an environment flag rather than being a silent
- * fallback. Switching the flag changes the OAuth audience, so an account has to
- * be re-authorized after flipping it.
- */
 export type GoogleWorkspaceTransport = "rest" | "remote-mcp";
 
 export const GOOGLE_MCP_PREVIEW_ENV = "LOCAL_STUDIO_GOOGLE_MCP_PREVIEW";
@@ -23,18 +11,18 @@ export function googleWorkspaceTransport(flag: string | undefined): GoogleWorksp
 
 type GoogleWorkspaceBinding = {
   name: string;
-  /** Google's first-party MCP preview endpoint for this service. */
+
   mcpEndpoint: string;
-  /** RFC 8707 audience the preview endpoint expects. Never sent on the REST path. */
+
   mcpResource: string;
-  /** Public REST base the in-process adapter calls. */
+
   restEndpoint: string;
   scopes: readonly string[];
   observeTools: readonly string[];
   verifyTool: string;
 };
 
-export const GOOGLE_WORKSPACE_BINDINGS: Record<GoogleWorkspacePluginId, GoogleWorkspaceBinding> = {
+export const GOOGLE_WORKSPACE_BINDINGS = {
   gmail: {
     name: "Gmail",
     mcpEndpoint: "https://gmailmcp.googleapis.com/mcp/v1",
@@ -57,7 +45,7 @@ export const GOOGLE_WORKSPACE_BINDINGS: Record<GoogleWorkspacePluginId, GoogleWo
     observeTools: ["list_events", "get_event", "list_calendars", "suggest_time"],
     verifyTool: "list_calendars",
   },
-};
+} satisfies Record<GoogleWorkspacePluginId, GoogleWorkspaceBinding>;
 
 export function googleWorkspaceEndpoint(
   service: GoogleWorkspacePluginId,
@@ -72,7 +60,6 @@ export function isGoogleWorkspaceEndpoint(service: GoogleWorkspacePluginId, url:
   return url === binding.mcpEndpoint || url === binding.restEndpoint;
 }
 
-/** The transport a stored connector row is already pointed at. */
 export function googleWorkspaceEndpointTransport(
   service: GoogleWorkspacePluginId,
   url: string,
@@ -80,22 +67,12 @@ export function googleWorkspaceEndpointTransport(
   return url === GOOGLE_WORKSPACE_BINDINGS[service].mcpEndpoint ? "remote-mcp" : "rest";
 }
 
-function isGoogleWorkspacePlugin(id: string): id is GoogleWorkspacePluginId {
-  return id === "gmail" || id === "google-calendar";
-}
-
-/**
- * Accounts are addressed by a short digest of the verified email rather than by
- * the address itself: connector ids are a restricted character set, and the
- * digest keeps a mailbox out of filenames and tool names while still being
- * stable across sign-ins.
- */
 export const GOOGLE_ACCOUNT_KEY_PATTERN = /^[0-9a-f]{10}$/;
 
-const SERVICE_SLUGS: Record<GoogleWorkspacePluginId, string> = {
+const SERVICE_SLUGS = {
   gmail: "gmail",
   "google-calendar": "calendar",
-};
+} satisfies Record<GoogleWorkspacePluginId, string>;
 
 const CONNECTOR_ID_PATTERN = /^account-google-(gmail|calendar)-([0-9a-f]{10})$/;
 
@@ -120,15 +97,10 @@ export function googleWorkspaceConnectorIdentity(id: string): GoogleWorkspaceIde
   };
 }
 
-/**
- * Connector ids minted before accounts were multi-tenant. They carry no account
- * key, so they can no longer name a grant; they are normalized to a disabled
- * placeholder on load and replaced the first time the account is authorized.
- */
-const LEGACY_GOOGLE_WORKSPACE_CONNECTOR_IDS: Record<GoogleWorkspacePluginId, string> = {
+const LEGACY_GOOGLE_WORKSPACE_CONNECTOR_IDS = {
   gmail: "account-google-gmail",
   "google-calendar": "account-google-calendar",
-};
+} satisfies Record<GoogleWorkspacePluginId, string>;
 
 export function legacyGoogleWorkspaceService(id: string): GoogleWorkspacePluginId | null {
   return (

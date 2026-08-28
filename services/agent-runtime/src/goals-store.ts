@@ -1,42 +1,36 @@
-//
-// Thread-scoped goals (the Codex model): a persistent objective attached to a
-// pi session that the runtime keeps pursuing at safe boundaries until it is
-// complete, blocked, paused, or out of budget. One JSON per pi session id.
-//
-
+import { Schema } from "effect";
 import { isRecord } from "../../../shared/agent/guards";
 import {
   GOAL_STATUSES,
   type GoalStatus,
   type SessionGoal,
 } from "../../../shared/agent/session-goal";
-import { createSessionScopedJsonStore } from "./session-json-store";
+import { createSessionScopedJsonStore, type PersistedValue } from "./session-json-store";
 
 export type { GoalStatus, SessionGoal };
 
-function positiveNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+const isString = Schema.is(Schema.String);
+const isNumber = Schema.is(Schema.Number);
+const isGoalStatus = Schema.is(Schema.Literals(GOAL_STATUSES));
+
+function positiveNumber(value: PersistedValue): number {
+  return isNumber(value) && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function normalizeGoal(value: unknown): SessionGoal {
+function normalizeGoal(value: PersistedValue): SessionGoal {
   const record = isRecord(value) ? value : {};
   const now = new Date().toISOString();
   return {
     version: 1,
-    objective: typeof record.objective === "string" ? record.objective : "",
-    status: GOAL_STATUSES.includes(record.status as GoalStatus)
-      ? (record.status as GoalStatus)
-      : "active",
+    objective: isString(record.objective) ? record.objective : "",
+    status: isGoalStatus(record.status) ? record.status : "active",
     turnBudget:
-      typeof record.turnBudget === "number" && record.turnBudget > 0
-        ? Math.round(record.turnBudget)
-        : null,
-    turnsUsed: typeof record.turnsUsed === "number" && record.turnsUsed >= 0 ? record.turnsUsed : 0,
+      isNumber(record.turnBudget) && record.turnBudget > 0 ? Math.round(record.turnBudget) : null,
+    turnsUsed: isNumber(record.turnsUsed) && record.turnsUsed >= 0 ? record.turnsUsed : 0,
     timeUsedSeconds: positiveNumber(record.timeUsedSeconds),
-    activeRunStartedAt:
-      typeof record.activeRunStartedAt === "string" ? record.activeRunStartedAt : null,
-    createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
-    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : now,
+    activeRunStartedAt: isString(record.activeRunStartedAt) ? record.activeRunStartedAt : null,
+    createdAt: isString(record.createdAt) ? record.createdAt : now,
+    updatedAt: isString(record.updatedAt) ? record.updatedAt : now,
   };
 }
 
@@ -47,9 +41,6 @@ const store = createSessionScopedJsonStore<SessionGoal>({
 });
 
 export type GoalWritePatch = Partial<Omit<SessionGoal, "version" | "updatedAt">> & {
-  /** Start the pursuit over. Progress is per-objective, so a new objective that
-   *  kept the old turn count and `createdAt` would report a goal set a minute
-   *  ago as days old — the exact bug a cleared-then-reset goal used to show. */
   resetProgress?: boolean;
 };
 
@@ -64,10 +55,7 @@ export async function readGoal(piSessionId: string): Promise<SessionGoal | null>
   return goal.objective ? goal : null;
 }
 
-export async function writeGoal(
-  piSessionId: string,
-  patch: GoalWritePatch,
-): Promise<SessionGoal> {
+export async function writeGoal(piSessionId: string, patch: GoalWritePatch): Promise<SessionGoal> {
   const { resetProgress, ...fields } = patch;
   return store.write(
     resetProgress ? { ...fields, ...PROGRESS_RESET, createdAt: new Date().toISOString() } : fields,

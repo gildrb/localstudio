@@ -1,7 +1,10 @@
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { listProjectsFromStore, projectsStoreFilePath } from "./projects-store";
 import { notifySessionListChanged } from "./session-list-changed";
+import { Schema } from "effect";
 import { sessionDirRootsForCwd } from "./sessions-store";
+
+const decodeFilename = Schema.decodeUnknownOption(Schema.String);
 
 const DEBOUNCE_MS = 200;
 const REFRESH_INTERVAL_MS = 15_000;
@@ -40,7 +43,8 @@ export function createSessionListWatcher(): SessionListWatcher {
     let watcher: FSWatcher;
     try {
       watcher = watch(root, { recursive: true }, (_eventType, filename) => {
-        if (typeof filename !== "string" || filename.endsWith(".jsonl")) scheduleNotify();
+        const decoded = decodeFilename(filename);
+        if (decoded._tag === "None" || decoded.value.endsWith(".jsonl")) scheduleNotify();
       });
     } catch {
       return;

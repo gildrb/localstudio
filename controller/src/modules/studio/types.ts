@@ -1,3 +1,5 @@
+import type { RecipeBase } from "@local-studio/contracts/recipes";
+
 /**
  * A curated first-run preset. `download` presets pull weights from Hugging Face
  * and become a local recipe; `remote` presets register an external
@@ -16,6 +18,6 @@ export interface StudioStarterPreset {
   backend?: "vllm";
   /** For llamacpp presets: the exact weights file inside the download dir. */
   /** Extra recipe fields merged over the starter recipe defaults. */
-  recipe_overrides?: Record<string, unknown>;
+  recipe_overrides?: Partial<RecipeBase>;
   remote?: { base_url: string; model: string };
 }

@@ -1,3 +1,4 @@
+import { Schema } from "effect";
 import { getGlobalSingleton } from "../instances";
 import { HostedPage, type PageState, type ScreencastFrame } from "./hosted-page";
 import { playwrightManager } from "./playwright";
@@ -7,21 +8,17 @@ export type { PageState, ScreencastFrame };
 const TEXT_CAP_BYTES = 500 * 1024;
 const HTML_CAP_BYTES = 1024 * 1024;
 const NAVIGATION_TIMEOUT_MS = 8_000;
-
-// One isolated BrowserContext per agent session, so cookies, storage, and open
-// pages never leak between sessions. The cua extension stamps every verb with
-// its session id; panel routes (frame poll, input, viewport, state) carry no
-// session and follow whichever session acted last — the panel is a window onto
-// the browser the model is driving, exactly as before, and verbs without any
-// session id land in a shared scope.
 const SHARED_SESSION = "shared";
 const MAX_SESSIONS = 8;
 const IDLE_SESSION_MS = 15 * 60_000;
 const SESSION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-
-/** A usable per-session scope key, or null when the value is absent/invalid. */
-export function normalizeBrowserSessionKey(value: unknown): string | null {
-  return typeof value === "string" && SESSION_KEY_PATTERN.test(value) ? value : null;
+const BrowserSessionKeyInputSchema = Schema.Unknown;
+type BrowserSessionKeyInput = typeof BrowserSessionKeyInputSchema.Type;
+const isBrowserSessionKey = Schema.is(
+  Schema.String.pipe(Schema.check(Schema.isPattern(SESSION_KEY_PATTERN))),
+);
+export function normalizeBrowserSessionKey(value: BrowserSessionKeyInput): string | null {
+  return isBrowserSessionKey(value) ? value : null;
 }
 
 const normalizeUrl = (value: string): string =>
@@ -89,7 +86,6 @@ class BrowserHost {
     await playwrightManager.releaseContext(key).catch(() => undefined);
   }
 
-  /** Close one session's browser context; used when the session ends. */
   async closeSession(sessionKey: string): Promise<void> {
     const key = normalizeBrowserSessionKey(sessionKey);
     if (!key) return;

@@ -26,9 +26,9 @@ export class McpProtocolError extends Error {
   }
 }
 
-const protocolError = (error: unknown): McpProtocolError => {
+const protocolError = (error: Error): McpProtocolError => {
   if (error instanceof McpProtocolError) return error;
-  const cause = error instanceof Error ? error : new Error(String(error));
+  const cause = error;
   if (cause.message.startsWith("ReadBuffer exceeded maximum size")) {
     return new McpProtocolError(
       "frame-too-large",
@@ -55,30 +55,20 @@ type BufferedFrame = Buffer | McpProtocolError;
 
 class BoundedMcpReadBuffer {
   private frames: BufferedFrame[] = [];
-  private remainder: Buffer[] = [];
-  private remainderBytes = 0;
-  private terminalQueued = false;
+  private remainder: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private terminal = false;
 
   append(chunk: Buffer): void {
-    if (this.terminalQueued) return;
-    let offset = 0;
-    while (offset < chunk.length) {
-      const newline = chunk.indexOf(0x0a, offset);
-      if (newline === -1) {
-        this.appendRemainder(chunk.subarray(offset));
-        return;
-      }
-      const tail = chunk.subarray(offset, newline);
-      const frameBytes = this.remainderBytes + tail.length + 1;
-      if (frameBytes > MAX_MCP_STDIO_BUFFER_BYTES) {
-        this.queueOverflow();
-        return;
-      }
-      this.frames.push(Buffer.concat([...this.remainder, tail], frameBytes - 1));
-      this.remainder = [];
-      this.remainderBytes = 0;
-      offset = newline + 1;
+    if (this.terminal) return;
+    const data = this.remainder.length ? Buffer.concat([this.remainder, chunk]) : chunk;
+    let start = 0;
+    for (let newline = data.indexOf(0x0a); newline >= 0; newline = data.indexOf(0x0a, start)) {
+      if (newline - start + 1 > MAX_MCP_STDIO_BUFFER_BYTES) return this.overflow();
+      this.frames.push(data.subarray(start, newline));
+      start = newline + 1;
     }
+    this.remainder = data.subarray(start);
+    if (this.remainder.length > MAX_MCP_STDIO_BUFFER_BYTES) this.overflow();
   }
 
   readMessage(): JSONRPCMessage | null {
@@ -89,8 +79,7 @@ class BoundedMcpReadBuffer {
       throw frame;
     }
     try {
-      const line = frame.toString("utf8").replace(/\r$/, "");
-      return JSONRPCMessageSchema.parse(JSON.parse(line));
+      return JSONRPCMessageSchema.parse(JSON.parse(frame.toString("utf8").replace(/\r$/, "")));
     } catch (error) {
       this.clear();
       throw error;
@@ -99,25 +88,13 @@ class BoundedMcpReadBuffer {
 
   clear(): void {
     this.frames = [];
-    this.remainder = [];
-    this.remainderBytes = 0;
-    this.terminalQueued = false;
+    this.remainder = Buffer.alloc(0);
+    this.terminal = false;
   }
 
-  private appendRemainder(chunk: Buffer): void {
-    if (chunk.length === 0) return;
-    this.remainderBytes += chunk.length;
-    if (this.remainderBytes > MAX_MCP_STDIO_BUFFER_BYTES) {
-      this.queueOverflow();
-      return;
-    }
-    this.remainder.push(chunk);
-  }
-
-  private queueOverflow(): void {
-    this.remainder = [];
-    this.remainderBytes = 0;
-    this.terminalQueued = true;
+  private overflow(): void {
+    this.remainder = Buffer.alloc(0);
+    this.terminal = true;
     this.frames.push(
       new McpProtocolError(
         "frame-too-large",
@@ -160,7 +137,7 @@ export class BoundedStdioClientTransport implements Transport {
     try {
       await this.inner.start();
     } catch (error) {
-      throw this.fail(error);
+      throw this.fail(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -169,7 +146,7 @@ export class BoundedStdioClientTransport implements Transport {
     try {
       await this.inner.send(message);
     } catch (error) {
-      throw this.fail(error);
+      throw this.fail(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -179,7 +156,7 @@ export class BoundedStdioClientTransport implements Transport {
     return this.closing;
   }
 
-  private fail(error: unknown): McpProtocolError {
+  private fail(error: Error): McpProtocolError {
     if (this.terminalError) return this.terminalError;
     const failure = protocolError(error);
     this.terminalError = failure;

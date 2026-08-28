@@ -3,6 +3,14 @@ import path from "node:path";
 import { addComment, deleteComment, listComments } from "@/features/agent/comments-store";
 import { errorMessage, jsonError } from "@/app/api/_lib/route-helpers";
 import { requireApiAccess } from "@/lib/auth/guard";
+import { Schema } from "effect";
+
+const CommentInputSchema = Schema.Struct({
+  cwd: Schema.optional(Schema.String),
+  path: Schema.optional(Schema.String),
+  line: Schema.optional(Schema.Number),
+  body: Schema.optional(Schema.String),
+});
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,9 +36,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const denied = requireApiAccess(request);
   if (denied) return denied;
-  let body: { cwd?: string; path?: string; line?: number; body?: string };
+  let body: typeof CommentInputSchema.Type;
   try {
-    body = (await request.json()) as typeof body;
+    body = Schema.decodeUnknownSync(CommentInputSchema)(await request.json());
   } catch {
     return jsonError("Invalid JSON");
   }
@@ -38,7 +46,8 @@ export async function POST(request: NextRequest) {
   const rel = body.path?.trim() ?? "";
   const line = Number(body.line);
   const text = body.body?.trim() ?? "";
-  if (!cwd || !rel || !Number.isFinite(line) || line < 1 || !text) {
+  const hasRequiredFields = [cwd, rel, text].every(Boolean);
+  if (!hasRequiredFields || !Number.isFinite(line) || line < 1) {
     return jsonError("cwd, path, line, body required");
   }
   if (!path.isAbsolute(cwd)) {

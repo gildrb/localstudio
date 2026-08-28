@@ -1,6 +1,8 @@
 import net from "node:net";
+import { Schema } from "effect";
 
-/** Returns true if the given TCP port can be bound on `host` right now. */
+const PortAddressSchema = Schema.Struct({ port: Schema.Number });
+
 export async function isPortAvailable(port: number, host = "127.0.0.1"): Promise<boolean> {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
   return new Promise<boolean>((resolve) => {
@@ -12,11 +14,6 @@ export async function isPortAvailable(port: number, host = "127.0.0.1"): Promise
   });
 }
 
-/**
- * Resolve a usable port, preferring `preferred` (a previously-persisted port)
- * so the embedded server keeps a stable origin across launches/restarts.
- * Falls back to an OS-allocated port only when the preferred one is taken.
- */
 export async function resolveStablePort(preferred?: number, host = "127.0.0.1"): Promise<number> {
   if (preferred && (await isPortAvailable(preferred, host))) return preferred;
   return allocatePort(host);
@@ -31,9 +28,9 @@ export async function allocatePort(host = "127.0.0.1"): Promise<number> {
     });
 
     server.listen(0, host, () => {
-      const address = server.address();
-      if (address && typeof address === "object") {
-        const { port } = address;
+      const address = Schema.decodeUnknownOption(PortAddressSchema)(server.address());
+      if (address._tag === "Some") {
+        const { port } = address.value;
         server.close((error) => {
           if (error) {
             reject(error);

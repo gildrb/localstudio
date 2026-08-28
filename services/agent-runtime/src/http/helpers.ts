@@ -1,9 +1,19 @@
-// Minimal response helpers for the transport-neutral handlers. These mirror
-// frontend/src/app/api/_lib/route-helpers.ts (jsonError/errorMessage) — kept
-// package-local so the handlers have zero frontend imports; the frontend
-// keeps its own copy for the 20+ non-runtime routes that stay in Next.
+import { Option, Schema } from "effect";
+import type { UnparsedValue, UnknownRecord } from "../../../../shared/agent/guards";
 
-/** Standard JSON error response used by the runtime handlers. */
+const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+
+export async function decodeJsonBody<S extends Schema.ConstraintDecoder<unknown>>(
+  request: Request,
+  schema: S,
+): Promise<S["Type"] | null> {
+  try {
+    return Schema.decodeUnknownSync(schema)(await request.json());
+  } catch {
+    return null;
+  }
+}
+
 export function jsonError(message: string, status = 400): Response {
   return Response.json({ error: message }, { status });
 }
@@ -11,20 +21,16 @@ export function jsonError(message: string, status = 400): Response {
 export async function readJsonBody(
   request: Request,
   options?: { maxChars?: number },
-): Promise<Record<string, unknown> | null> {
+): Promise<UnknownRecord | null> {
   try {
     const text = await request.text();
     if (options?.maxChars !== undefined && text.length > options.maxChars) return null;
-    const parsed = JSON.parse(text) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
+    return Option.getOrNull(Schema.decodeUnknownOption(UnknownRecordSchema)(JSON.parse(text)));
   } catch {
     return null;
   }
 }
 
-/** Normalize an unknown thrown value into a message for jsonError. */
-export function errorMessage(error: unknown, fallback: string): string {
+export function errorMessage(error: UnparsedValue, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }

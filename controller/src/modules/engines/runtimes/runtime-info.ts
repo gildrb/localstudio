@@ -4,6 +4,7 @@ import type {
   RuntimeCudaInfo,
   RuntimePlatformInfo,
   RuntimePlatformKind,
+  RuntimeGpuMonitoringTool,
   SystemRuntimeInfo,
 } from "../../models/types";
 import { runCommandAsyncEffect } from "../../../core/command";
@@ -14,12 +15,6 @@ import { getRocmInfo, resolveRocmSmiTool } from "../../system/platform/rocm-info
 import { resolveNvidiaSmiBinary } from "../../system/platform/smi-tools";
 import type { HostProfile } from "../../compute/contracts";
 import { getRuntimeTargets, runtimeTargetToBackendInfo } from "./runtime-targets";
-
-/**
- * Host runtime facts for /status and /compat: platform kind, GPU monitoring,
- * CUDA driver, and the per-engine docker-image state. Docker-only means there
- * are no python environments to probe — torch build info is gone with them.
- */
 
 const SYSTEM_RUNTIME_CACHE_TTL_MS = 30_000;
 let systemRuntimeCache: { expiresAt: number; value: SystemRuntimeInfo } | null = null;
@@ -80,6 +75,40 @@ export const getCudaInfo = (
     };
   });
 
+const platformInfo = (
+  kind: RuntimePlatformKind,
+  rocm: RuntimePlatformInfo["rocm"],
+): RuntimePlatformInfo => ({
+  kind,
+  vendor: kind === "cuda" ? "nvidia" : kind === "rocm" ? "amd" : kind === "metal" ? "apple" : null,
+  rocm,
+  torch: { torch_version: null, torch_cuda: null, torch_hip: null },
+});
+
+const gpuMonitoringFor = (
+  kind: RuntimePlatformKind,
+  nvidiaSnapshot: Effect.Success<ReturnType<typeof queryNvidiaSmiSnapshot>>,
+  rocmSmiTool: ReturnType<typeof resolveRocmSmiTool>,
+): Effect.Effect<{ available: boolean; tool: RuntimeGpuMonitoringTool | null }> => {
+  if (kind === "metal") return Effect.succeed({ available: false, tool: "apple-metal" as const });
+  if (kind === "cuda" && nvidiaSnapshot) {
+    return Effect.succeed({ available: nvidiaSnapshot.available, tool: "nvidia-smi" as const });
+  }
+  return probeGpuMonitoring(kind, rocmSmiTool);
+};
+
+const cudaInfoFor = (
+  kind: RuntimePlatformKind,
+  driverVersion: string | null,
+): Effect.Effect<RuntimeCudaInfo> =>
+  kind === "cuda"
+    ? getCudaInfo(driverVersion)
+    : Effect.succeed({
+        driver_version: null,
+        cuda_version: null,
+        upgrade_command_available: false,
+      });
+
 export const getSystemRuntimeInfo = (host: HostProfile): Effect.Effect<SystemRuntimeInfo> =>
   Effect.gen(function* () {
     const now = Date.now();
@@ -105,31 +134,17 @@ export const getSystemRuntimeInfo = (host: HostProfile): Effect.Effect<SystemRun
       isAppleSilicon: operatingSystem() === "darwin" && arch() === "arm64",
     });
     const rocm = kind === "rocm" ? yield* getRocmInfo(rocmSmiTool) : null;
-    const platform: RuntimePlatformInfo = {
-      kind,
-      vendor:
-        kind === "cuda" ? "nvidia" : kind === "rocm" ? "amd" : kind === "metal" ? "apple" : null,
-      rocm,
-      torch: { torch_version: null, torch_cuda: null, torch_hip: null },
-    };
+    const platform = platformInfo(kind, rocm);
     const [gpuMonitoring, cuda] = yield* Effect.all(
       [
-        kind === "metal"
-          ? Effect.succeed({ available: false, tool: "apple-metal" as const })
-          : kind === "cuda" && nvidiaSnapshot
-            ? Effect.succeed({ available: nvidiaSnapshot.available, tool: "nvidia-smi" as const })
-            : probeGpuMonitoring(kind, rocmSmiTool),
-        kind === "cuda"
-          ? getCudaInfo(nvidiaSnapshot?.driverVersion ?? null)
-          : Effect.succeed({
-              driver_version: null,
-              cuda_version: null,
-              upgrade_command_available: false,
-            }),
+        gpuMonitoringFor(kind, nvidiaSnapshot, rocmSmiTool),
+        cudaInfoFor(kind, nvidiaSnapshot?.driverVersion ?? null),
       ] as const,
       { concurrency: "unbounded" },
     );
-    const infoFor = (backend: "vllm" | "sglang" | "exllamav3"): SystemRuntimeInfo["backends"]["vllm"] =>
+    const infoFor = (
+      backend: "vllm" | "sglang" | "exllamav3",
+    ): SystemRuntimeInfo["backends"]["vllm"] =>
       runtimeTargetToBackendInfo(targets.find((target) => target.backend === backend) ?? null);
     const value: SystemRuntimeInfo = {
       platform,
@@ -138,7 +153,13 @@ export const getSystemRuntimeInfo = (host: HostProfile): Effect.Effect<SystemRun
       gpus: {
         count: host.deviceCount,
         types: nvidiaSnapshot?.gpus
-          ? [...new Set(nvidiaSnapshot.gpus.map((gpu) => gpu.name).filter((name) => name && name !== "Unknown"))]
+          ? [
+              ...new Set(
+                nvidiaSnapshot.gpus
+                  .map((gpu) => gpu.name)
+                  .filter((name) => name && name !== "Unknown"),
+              ),
+            ]
           : [],
       },
       backends: {

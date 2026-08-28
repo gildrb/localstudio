@@ -30,6 +30,16 @@ type ControllerApplication = ReturnType<typeof registerComputeRoutes> &
   ReturnType<typeof registerStudioRoutes> &
   ReturnType<typeof registerAllProxyRoutes>;
 
+const DISCONNECT_ERRORS = [
+  "AbortError",
+  "connection was closed",
+  "ERR_STREAM_PREMATURE_CLOSE",
+  "Stream was cancelled",
+  "stream was cancelled",
+  "The operation was aborted",
+  "readable stream is cancelled",
+];
+
 export const createApp = (
   context: AppContext,
   runtime: ControllerRuntime,
@@ -49,7 +59,6 @@ export const createApp = (
         "Authorization",
         "Content-Type",
         "X-API-Key",
-        // Protocol headers for the Responses and Anthropic Messages dialects.
         "Anthropic-Version",
         "Anthropic-Beta",
         "OpenAI-Beta",
@@ -79,11 +88,12 @@ export const createApp = (
     effectRoute(app.get, "/health", (ctx) => Effect.succeed(ctx.json({ status: "ok" }))),
   );
 
+  const openApiSource: ControllerRouteApp = routes;
   const documentedRoutes = mergeRoutes(
     routes,
     app.get(
       "/api/spec",
-      openAPIRouteHandler(routes as ControllerRouteApp, {
+      openAPIRouteHandler(openApiSource, {
         includeEmptyPaths: true,
         exclude: ["/*", "/api/spec", "/api/docs"],
         documentation: {
@@ -110,18 +120,9 @@ export const createApp = (
     if (isHttpStatus(error)) {
       return Response.json({ detail: error.detail }, { status: error.status });
     }
-    const name = (error as { name?: string })?.name ?? "";
+    const name = error.name;
     const message = String(error);
-    if (
-      name === "AbortError" ||
-      message.includes("AbortError") ||
-      message.includes("connection was closed") ||
-      message.includes("ERR_STREAM_PREMATURE_CLOSE") ||
-      message.includes("Stream was cancelled") ||
-      message.includes("stream was cancelled") ||
-      message.includes("The operation was aborted") ||
-      message.includes("readable stream is cancelled")
-    ) {
+    if (name === "AbortError" || DISCONNECT_ERRORS.some((text) => message.includes(text))) {
       context.logger.debug("client disconnected mid-request", {
         method: ctx.req.method,
         path: ctx.req.path,
@@ -132,5 +133,5 @@ export const createApp = (
     return ctx.json({ detail: "Internal Server Error" }, { status: 500 });
   });
 
-  return documentedRoutes as ControllerApplication;
+  return documentedRoutes;
 };

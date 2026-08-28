@@ -1,13 +1,16 @@
 import { Suspense } from "react";
-import { AgentWorkspace } from "@/features/agent/ui/agent-workspace-shell";
-import { ToolsProvider } from "@/features/agent/tools/context";
-
-export default function AgentPage() {
+import { Workbench } from "@/features/studio";
+export default function Page() {
   return (
-    <ToolsProvider>
-      <Suspense fallback={null}>
-        <AgentWorkspace />
-      </Suspense>
-    </ToolsProvider>
+    <Suspense
+      fallback={
+        <main>
+          <h1>Agent</h1>
+          <p>Loading local workspace…</p>
+        </main>
+      }
+    >
+      <Workbench />
+    </Suspense>
   );
 }

@@ -1,10 +1,3 @@
-//
-// HTTP surface for the Google account: client credentials, connection status,
-// disconnects, and the loopback OAuth authorization flow. Moved verbatim from
-// the Next route handlers so a remote runtime owns the Google binding — the
-// loopback OAuth listener must run in the process the connectors run in.
-//
-
 import { Effect, Schema } from "effect";
 import {
   disconnectGoogleAccount,
@@ -38,30 +31,24 @@ const GoogleAccountInputSchema = Schema.Struct({
   account: Schema.Union([Schema.Literal("gmail"), Schema.Literal("google-calendar")]),
 });
 
-function failure(error: unknown, fallback = "Google account failed"): Response {
+function failure(error: Error | null, fallback = "Google account failed"): Response {
   const status = error instanceof GoogleAccountError ? error.status : 500;
-  return Response.json(
-    { error: error instanceof Error ? error.message : fallback },
-    { status },
-  );
+  return Response.json({ error: error instanceof Error ? error.message : fallback }, { status });
 }
 
-/** Pooled sockets outlive a credential change, so every managed row is dropped. */
 async function closeGoogleConnections(): Promise<void> {
   try {
     for (const connector of await listConnectors()) {
       if (googleWorkspaceConnectorIdentity(connector.id)) closePooledConnection(connector.id);
     }
-  } catch {
-    // A connector file we cannot read has no live pooled connections to close.
-  }
+  } catch {}
 }
 
 export async function handleGoogleAccountGet(): Promise<Response> {
   try {
     return Response.json({ account: await Effect.runPromise(getGoogleAccount()) });
   } catch (error) {
-    return failure(error);
+    return failure(error instanceof Error ? error : null);
   }
 }
 
@@ -76,7 +63,7 @@ export async function handleGoogleClientPut(request: Request): Promise<Response>
     const account = await Effect.runPromise(saveGoogleClient(input));
     return Response.json({ account });
   } catch (error) {
-    return failure(error);
+    return failure(error instanceof Error ? error : null);
   } finally {
     await closeGoogleConnections();
   }
@@ -105,7 +92,7 @@ export async function handleGoogleAccountDisconnect(request: Request): Promise<R
     );
     return Response.json({ account });
   } catch (error) {
-    return failure(error);
+    return failure(error instanceof Error ? error : null);
   } finally {
     await closeGoogleConnections();
   }
@@ -119,11 +106,9 @@ export async function handleGoogleAuthorizeBegin(request: Request): Promise<Resp
     return Response.json({ error: "account is required" }, { status: 400 });
   }
   try {
-    return Response.json(
-      await Effect.runPromise(beginGoogleLoopbackAuthorization(input.account)),
-    );
+    return Response.json(await Effect.runPromise(beginGoogleLoopbackAuthorization(input.account)));
   } catch (error) {
-    return failure(error, "Google sign-in failed");
+    return failure(error instanceof Error ? error : null, "Google sign-in failed");
   }
 }
 
@@ -138,6 +123,6 @@ export async function handleGoogleAuthorizeCancel(request: Request): Promise<Res
     await Effect.runPromise(cancelGoogleLoopbackAuthorization(input.account));
     return Response.json({ cancelled: true });
   } catch (error) {
-    return failure(error, "Google sign-in cancellation failed");
+    return failure(error instanceof Error ? error : null, "Google sign-in cancellation failed");
   }
 }

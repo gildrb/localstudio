@@ -8,18 +8,11 @@ import { resolveBinary, runCommandEffect } from "../../../core/command";
 import { ENGINE_IDS, type HostProfile } from "../../compute/contracts";
 import { engineSpec } from "../../compute/engines/registry";
 
-/**
- * Runtime targets, docker-only: one row per roster engine. "Installed" means
- * the engine's pinned image is pulled; "active" means a container is running
- * from it. There is nothing else to discover — no venvs, no system installs,
- * no bundled wheels — which is the whole point.
- */
-
-const ENGINE_LABEL: Record<EngineBackend, string> = {
+const ENGINE_LABEL = {
   vllm: "vLLM",
   sglang: "SGLang",
   exllamav3: "exllamav3 (TabbyAPI)",
-};
+} satisfies Record<EngineBackend, string>;
 
 const DOCKER_COMMAND_TIMEOUT_MS = 3_000;
 const TARGET_CACHE_TTL_MS = 15_000;
@@ -109,7 +102,9 @@ export const getRuntimeTargets = (host: HostProfile): Effect.Effect<RuntimeTarge
           supportsDocker: true,
         },
         health: support.ok
-          ? { status: installed ? "ok" : "warning", ...(installed ? {} : { message: `Image not pulled: ${image ?? "unavailable"}` }) }
+          ? installed
+            ? { status: "ok" }
+            : { status: "warning", message: `Image not pulled: ${image ?? "unavailable"}` }
           : { status: "error", message: support.reason },
       });
     }

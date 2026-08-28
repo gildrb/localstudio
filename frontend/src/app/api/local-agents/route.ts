@@ -1,20 +1,16 @@
 import os from "node:os";
 import { NextRequest, NextResponse } from "next/server";
+import { Schema } from "effect";
 import { getApiSettings } from "@local-studio/agent-runtime/settings-service";
 import { requireApiAccess } from "@/lib/auth/guard";
-import { createApiCore, type ApiCore } from "@/lib/api/core";
-import type { RecipeWithStatus } from "@/lib/types";
-import {
-  inferVisionSupport,
-  normalizeOpenAIModels,
-  type OpenAIModelsResponse,
-} from "@/features/agent/models";
+
 import {
   attachModelToAgents,
   detectLocalAgents,
   LOCAL_AGENT_IDS,
   type LocalAgentId,
 } from "@/features/settings/local-agents";
+import { inferVisionSupport } from "@/features/agent/models";
 import { errorMessage, jsonError } from "../_lib/route-helpers";
 
 export const runtime = "nodejs";
@@ -28,22 +24,90 @@ export async function GET() {
   }
 }
 
-const isLocalAgentId = (value: unknown): value is LocalAgentId =>
-  typeof value === "string" && (LOCAL_AGENT_IDS as readonly string[]).includes(value);
+const LocalAgentsBodySchema = Schema.Struct({
+  modelId: Schema.optional(Schema.Unknown),
+  targets: Schema.optional(Schema.Unknown),
+});
+const LocalAgentIdSchema = Schema.Literals(LOCAL_AGENT_IDS);
+const LocalAgentTargetsSchema = Schema.Array(LocalAgentIdSchema);
+const decodeLocalAgentsBody = Schema.decodeUnknownOption(LocalAgentsBodySchema);
+const decodeModelId = Schema.decodeUnknownOption(Schema.String);
+const decodeLocalAgentTargets = Schema.decodeUnknownOption(LocalAgentTargetsSchema);
 
-async function resolveModelImages(core: ApiCore, recipe: RecipeWithStatus, modelId: string) {
-  try {
-    const payload = await core.request<OpenAIModelsResponse>("/v1/models", {
-      timeout: 10_000,
-      retries: 0,
-    });
-    const model = normalizeOpenAIModels(payload).find((entry) => entry.id === modelId);
-    if (model) return model.vision;
-  } catch {
-    // Some controller targets may expose recipes before /v1/models is reachable.
-    // Fall back to the same stable name/path inference used by the agent model picker.
+const ControllerRecipeSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  model_path: Schema.String,
+  served_model_name: Schema.optional(Schema.NullOr(Schema.String)),
+  max_model_len: Schema.optional(Schema.Number),
+});
+const ControllerRecipesSchema = Schema.Array(ControllerRecipeSchema);
+const ControllerModelsSchema = Schema.Struct({
+  data: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        vision: Schema.optional(Schema.Boolean),
+      }),
+    ),
+  ),
+});
+const ControllerErrorSchema = Schema.Struct({
+  detail: Schema.optional(Schema.String),
+  error: Schema.optional(Schema.Struct({ message: Schema.optional(Schema.String) })),
+  message: Schema.optional(Schema.String),
+});
+type ControllerRecipe = typeof ControllerRecipeSchema.Type;
+const decodeControllerRecipes = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ControllerRecipesSchema),
+);
+const decodeControllerModels = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ControllerModelsSchema),
+);
+const decodeControllerError = Schema.decodeUnknownOption(
+  Schema.fromJsonString(ControllerErrorSchema),
+);
+
+async function controllerPayload(
+  backendUrl: string,
+  apiKey: string,
+  endpoint: "/recipes" | "/v1/models",
+): Promise<string> {
+  const headers = new Headers({ accept: "application/json" });
+  if (apiKey) {
+    headers.set("Authorization", `Bearer ${apiKey}`);
+    if (endpoint === "/recipes") headers.set("X-API-Key", apiKey);
   }
+  const response = await fetch(`${backendUrl}${endpoint}`, {
+    headers,
+    cache: "no-store",
+    signal: AbortSignal.timeout(10_000),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    const decoded = decodeControllerError(text);
+    const message =
+      decoded._tag === "Some"
+        ? decoded.value.detail || decoded.value.error?.message || decoded.value.message
+        : undefined;
+    throw new Error(message || `${endpoint} returned HTTP ${response.status}`);
+  }
+  return text;
+}
 
+async function resolveModelImages(
+  backendUrl: string,
+  apiKey: string,
+  recipe: ControllerRecipe,
+  modelId: string,
+): Promise<boolean> {
+  try {
+    const payload = decodeControllerModels(
+      await controllerPayload(backendUrl, apiKey, "/v1/models"),
+    );
+    const model = payload.data?.find((entry) => entry.id === modelId);
+    if (model?.vision !== undefined) return model.vision;
+  } catch {}
   return inferVisionSupport(`${modelId} ${recipe.name} ${recipe.model_path}`);
 }
 
@@ -57,43 +121,38 @@ export async function POST(request: NextRequest) {
   } catch {
     return jsonError("Invalid JSON body");
   }
-  const { modelId, targets } = (body ?? {}) as { modelId?: unknown; targets?: unknown };
-  if (typeof modelId !== "string" || !modelId.trim()) {
+  const decodedBody = decodeLocalAgentsBody(body);
+  const decodedModelId =
+    decodedBody._tag === "Some" ? decodeModelId(decodedBody.value.modelId) : decodedBody;
+  if (decodedModelId._tag === "None" || !decodedModelId.value.trim()) {
     return jsonError("modelId is required");
   }
-  if (!Array.isArray(targets) || targets.length === 0 || !targets.every(isLocalAgentId)) {
+  const modelId = decodedModelId.value;
+  const decodedTargets =
+    decodedBody._tag === "Some" ? decodeLocalAgentTargets(decodedBody.value.targets) : decodedBody;
+  if (decodedTargets._tag === "None" || decodedTargets.value.length === 0) {
     return jsonError(
       "targets must be a non-empty array of agent ids (pi, opencode, droid, hermes, omp)",
     );
   }
 
+  const targets: LocalAgentId[] = [...decodedTargets.value];
   const settings = await getApiSettings();
   const backendUrl = settings.backendUrl.replace(/\/+$/, "");
-  const core = createApiCore({
-    baseUrl: backendUrl,
-    useProxy: false,
-    apiKeyOverride: settings.apiKey,
-  });
-
-  let recipes: RecipeWithStatus[];
+  let recipes: ControllerRecipe[];
   try {
-    const data = await core.request<RecipeWithStatus[]>("/recipes", {
-      timeout: 10_000,
-      retries: 0,
-      headers: settings.apiKey ? { "X-API-Key": settings.apiKey } : undefined,
-    });
-    recipes = Array.isArray(data) ? data : [];
+    recipes = [
+      ...decodeControllerRecipes(await controllerPayload(backendUrl, settings.apiKey, "/recipes")),
+    ];
   } catch (error) {
     return jsonError(errorMessage(error, "Failed to fetch recipes from controller"), 502);
   }
 
-  // `||` (not `??`) so an empty served_model_name falls back to the recipe id,
-  // matching how the UI derives the model id it sends here.
   const recipe = recipes.find((entry) => (entry.served_model_name || entry.id) === modelId);
   if (!recipe) return jsonError(`Model not found: ${modelId}`, 404);
 
   const contextWindow = recipe.max_model_len || 131072;
-  const images = await resolveModelImages(core, recipe, modelId);
+  const images = await resolveModelImages(backendUrl, settings.apiKey, recipe, modelId);
   try {
     const results = await attachModelToAgents({
       home: os.homedir(),

@@ -1,12 +1,4 @@
-//
-// HTTP surface for subagents. The pi extension calls these through the
-// frontend proxy (the connectors-bridge pattern); the chips UI polls the list
-// endpoint.
-//
-// Every route takes the caller's own pi session id and resolves the run inside
-// that parent's bucket, so a session can only reach the children it spawned.
-//
-
+import { Option, Schema } from "effect";
 import {
   findSubagent,
   listSubagents,
@@ -19,15 +11,18 @@ import {
 } from "../subagents";
 import { errorMessage, jsonError, readJsonBody } from "./helpers";
 
-const stringField = (body: Record<string, unknown> | null, key: string): string =>
-  typeof body?.[key] === "string" ? (body[key] as string).trim() : "";
+const SubagentRunBodySchema = Schema.Struct({
+  parentPiSessionId: Schema.String,
+  name: Schema.optional(Schema.String),
+  task: Schema.String,
+  modelId: Schema.optional(Schema.String),
+  wait: Schema.optional(Schema.Boolean),
+});
+const SubagentStopBodySchema = Schema.Struct({ piSessionId: Schema.String });
 
 const parentFromQuery = (request: Request): string =>
   new URL(request.url).searchParams.get("piSessionId")?.trim() ?? "";
 
-/** List rows stay cheap: the chips poll this every few seconds, so summaries
- *  never touch the transcript — only the detail route pays that read. The
- *  child's runtime key and cwd stay server-side. */
 function runSummary(run: SubagentRun) {
   return {
     id: run.id,
@@ -47,13 +42,13 @@ function runView(run: SubagentRun) {
   return { ...runSummary(run), error: run.error ?? report.error, report: report.text };
 }
 
-export async function handleSubagentsList(request: Request): Promise<Response> {
+export async function list(request: Request): Promise<Response> {
   const parent = parentFromQuery(request);
   if (!parent) return jsonError("piSessionId is required.");
   return Response.json({ subagents: listSubagents(parent).map(runSummary) });
 }
 
-export async function handleSubagentGet(request: Request, runId: string): Promise<Response> {
+export async function get(request: Request, runId: string): Promise<Response> {
   const parent = parentFromQuery(request);
   if (!parent) return jsonError("piSessionId is required.");
   const run = findSubagent(parent, runId);
@@ -61,8 +56,10 @@ export async function handleSubagentGet(request: Request, runId: string): Promis
   return Response.json({ ok: true, subagent: runView(run) });
 }
 
-export async function handleSubagentStop(request: Request, runId: string): Promise<Response> {
-  const parent = stringField(await readJsonBody(request), "piSessionId");
+export async function stop(request: Request, runId: string): Promise<Response> {
+  const rawBody = await readJsonBody(request);
+  const body = Option.getOrNull(Schema.decodeUnknownOption(SubagentStopBodySchema)(rawBody));
+  const parent = body?.piSessionId.trim() ?? "";
   if (!parent) return jsonError("Body must include piSessionId.");
   try {
     return Response.json({ ok: true, subagent: runView(await stopSubagent(parent, runId)) });
@@ -71,25 +68,20 @@ export async function handleSubagentStop(request: Request, runId: string): Promi
   }
 }
 
-export async function handleSubagentRun(request: Request): Promise<Response> {
-  const body = await readJsonBody(request);
-  const parentPiSessionId = stringField(body, "parentPiSessionId");
-  const name = typeof body?.name === "string" ? body.name : "";
-  const task = typeof body?.task === "string" ? body.task : "";
-  if (!parentPiSessionId || !task.trim()) {
+export async function run(request: Request): Promise<Response> {
+  const rawBody = await readJsonBody(request);
+  const body = Option.getOrNull(Schema.decodeUnknownOption(SubagentRunBodySchema)(rawBody));
+  if (!body?.parentPiSessionId.trim() || !body.task.trim()) {
     return jsonError("Body must include parentPiSessionId and task.");
   }
-  const input = {
-    parentPiSessionId,
-    name,
-    task,
-    ...(typeof body?.modelId === "string" ? { modelId: body.modelId } : {}),
+  const input: Parameters<typeof runSubagent>[0] = {
+    parentPiSessionId: body.parentPiSessionId.trim(),
+    name: body.name ?? "",
+    task: body.task,
   };
+  if (body.modelId !== undefined) input.modelId = body.modelId;
   try {
-    // wait:false answers as soon as the child is prompting; the caller polls
-    // the detail route for the report. The awaited form stays for callers
-    // whose runs fit inside the HTTP hops' ~5-minute header timeout.
-    if (body?.wait === false) {
+    if (body.wait === false) {
       const { run, completion } = await spawnSubagent(input);
       completion.catch(() => undefined);
       return Response.json({

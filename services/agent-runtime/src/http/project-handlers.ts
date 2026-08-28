@@ -1,18 +1,15 @@
-//
-// HTTP surface for the projects list (the directories pinned in the sidebar).
-// Moved verbatim from the Next route handlers so a remote runtime's project
-// list is the one the UI shows.
-//
-
 import {
   addProjectToStore,
   listProjectsFromStore,
   removeProjectFromStore,
   type ProjectEntry,
 } from "../projects-store";
-import { errorMessage, jsonError } from "./helpers";
+import { Schema } from "effect";
+import { decodeJsonBody, errorMessage, jsonError } from "./helpers";
 
-export async function handleProjectsList(): Promise<Response> {
+const ProjectPathInputSchema = Schema.Struct({ path: Schema.String });
+
+export async function list(): Promise<Response> {
   try {
     const projects = listProjectsFromStore();
     return Response.json({ projects });
@@ -21,14 +18,10 @@ export async function handleProjectsList(): Promise<Response> {
   }
 }
 
-export async function handleProjectAdd(request: Request): Promise<Response> {
-  let body: { path?: unknown };
-  try {
-    body = (await request.json()) as { path?: unknown };
-  } catch {
-    return jsonError("Invalid JSON body");
-  }
-  const directoryPath = typeof body.path === "string" ? body.path.trim() : "";
+export async function add(request: Request): Promise<Response> {
+  const body = await decodeJsonBody(request, ProjectPathInputSchema);
+  if (!body) return jsonError("Invalid JSON body");
+  const directoryPath = body.path.trim();
   if (!directoryPath) {
     return jsonError("path is required");
   }
@@ -40,7 +33,7 @@ export async function handleProjectAdd(request: Request): Promise<Response> {
   }
 }
 
-export async function handleProjectRemove(request: Request): Promise<Response> {
+export async function remove(request: Request): Promise<Response> {
   const id = new URL(request.url).searchParams.get("id");
   if (!id) {
     return jsonError("id is required");

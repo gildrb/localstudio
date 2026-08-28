@@ -1,9 +1,4 @@
-//
-// HTTP surface for the provider hub. All routes are proxied through the Next
-// server (`/api/agent/providers*`) like the other runtime handlers, so the
-// hub's single ModelRuntime instance serves both sign-in and sessions.
-//
-
+import { Option, Schema } from "effect";
 import {
   cancelProviderLogin,
   getProviderLoginJob,
@@ -12,27 +7,27 @@ import {
   respondProviderLogin,
   startProviderLogin,
 } from "../provider-hub";
-import { errorMessage, jsonError, readJsonBody } from "./helpers";
+import { jsonError, readJsonBody } from "./helpers";
+
+const ProviderResponseSchema = Schema.Struct({
+  promptId: Schema.optional(Schema.Number),
+  value: Schema.optional(Schema.String),
+});
+
+type ParsedBody = typeof ProviderResponseSchema.Type;
+const EMPTY_PROVIDER_RESPONSE: ParsedBody = {};
 
 export async function handleProvidersList(): Promise<Response> {
-  try {
-    return Response.json({ providers: await listProviders() });
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to list providers."), 500);
-  }
+  return Response.json({ providers: await listProviders() });
 }
 
 export async function handleProviderLogin(request: Request, providerId: string): Promise<Response> {
   const body = await readJsonBody(request);
   const authType = body?.type === "api_key" ? "api_key" : body?.type === "oauth" ? "oauth" : null;
   if (!authType) return jsonError("Body must include type: \"oauth\" | \"api_key\".");
-  try {
-    const result = await startProviderLogin(providerId, authType);
-    if ("error" in result) return jsonError(result.error, result.status);
-    return Response.json(result);
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to start login."), 500);
-  }
+  const result = await startProviderLogin(providerId, authType);
+  if ("error" in result) return jsonError(result.error, result.status);
+  return Response.json(result);
 }
 
 export function handleProviderLoginJob(request: Request, jobId: string): Response {
@@ -46,9 +41,12 @@ export async function handleProviderLoginRespond(
   request: Request,
   jobId: string,
 ): Promise<Response> {
-  const body = await readJsonBody(request);
-  const promptId = typeof body?.promptId === "number" ? body.promptId : null;
-  const value = typeof body?.value === "string" ? body.value : null;
+  const body = Option.getOrElse(
+    Schema.decodeUnknownOption(ProviderResponseSchema)(await readJsonBody(request)),
+    () => EMPTY_PROVIDER_RESPONSE,
+  );
+  const promptId = body.promptId ?? null;
+  const value = body.value ?? null;
   if (promptId === null || value === null) {
     return jsonError("Body must include promptId (number) and value (string).");
   }
@@ -64,11 +62,7 @@ export function handleProviderLoginCancel(jobId: string): Response {
 }
 
 export async function handleProviderLogout(providerId: string): Promise<Response> {
-  try {
-    const result = await logoutProvider(providerId);
-    if ("error" in result) return jsonError(result.error, result.status);
-    return Response.json(result);
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to sign out."), 500);
-  }
+  const result = await logoutProvider(providerId);
+  if ("error" in result) return jsonError(result.error, result.status);
+  return Response.json(result);
 }

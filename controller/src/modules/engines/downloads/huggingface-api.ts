@@ -98,9 +98,7 @@ export const buildHuggingFaceFileList = (
           !/(?:^|[-_.])(mmproj|projector|adapter|draft)(?:[-_.]|$)/i.test(filename),
       );
     const ggufFamilies = new Set(
-      primaryGgufFiles.map((filename) =>
-        filename.replace(/-\d{5}-of-\d{5}\.gguf$/i, ".gguf"),
-      ),
+      primaryGgufFiles.map((filename) => filename.replace(/-\d{5}-of-\d{5}\.gguf$/i, ".gguf")),
     );
     if (ggufFamilies.size > 1) {
       throw new Error(
@@ -126,7 +124,7 @@ export const buildHuggingFaceFileList = (
     }
     files.push({
       path: filename,
-      size_bytes: typeof sibling.size === "number" ? sibling.size : null,
+      size_bytes: sibling.size ?? null,
       downloaded_bytes: 0,
       status: "pending",
     });

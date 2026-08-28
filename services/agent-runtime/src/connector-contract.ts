@@ -2,12 +2,6 @@ import { Schema } from "effect";
 
 const StringRecordSchema = Schema.Record(Schema.String, Schema.String);
 
-/**
- * Explicit secretness, keyed by env/header name: `true` masks the value in
- * every read surface, `false` never masks it. A key absent from the record —
- * including every entry written before this field existed — falls back to the
- * name heuristic the store used historically, so old files keep their meaning.
- */
 const SecretFlagsSchema = Schema.Record(Schema.String, Schema.Boolean);
 
 const ConnectorOriginSchema = Schema.Struct({
@@ -49,34 +43,18 @@ export const ConnectorViewSchema = Schema.Struct({
 export const ConnectorsFileSchema = Schema.Struct({
   connectors: Schema.optional(Schema.Array(ConnectorConfigSchema)),
 });
-export const ConnectorsResponseSchema = Schema.Struct({
-  connectors: Schema.Array(ConnectorViewSchema),
-});
+const {
+  auth: _auth,
+  origin: _origin,
+  enabled: _enabled,
+  ...ConnectorUpsertFields
+} = ConnectorFields;
 export const ConnectorUpsertInputSchema = Schema.Struct({
-  id: Schema.String,
+  ...ConnectorUpsertFields,
   name: Schema.optional(Schema.String),
-  transport: Schema.Union([Schema.Literal("stdio"), Schema.Literal("http")]),
-  command: Schema.optional(Schema.String),
-  args: Schema.optional(Schema.Array(Schema.String)),
-  env: Schema.optional(StringRecordSchema),
-  envSecret: Schema.optional(SecretFlagsSchema),
-  cwd: Schema.optional(Schema.String),
-  url: Schema.optional(Schema.String),
-  headers: Schema.optional(StringRecordSchema),
-  headerSecret: Schema.optional(SecretFlagsSchema),
-  allowTools: Schema.optional(Schema.Array(Schema.String)),
   enabled: Schema.optional(Schema.Boolean),
 });
 export const ConnectorTestInputSchema = Schema.Struct({ id: Schema.String });
-export const ConnectorTestResponseSchema = Schema.Struct({
-  ok: Schema.Boolean,
-  tool_count: Schema.Number,
-  tool_names: Schema.Array(Schema.String),
-  error: Schema.optional(Schema.String),
-});
-export const ConnectorSshPathResponseSchema = Schema.Struct({
-  path: Schema.NullOr(Schema.String),
-});
 
 export type ConnectorOrigin = typeof ConnectorOriginSchema.Type;
 export type ConnectorAuthReference = typeof ConnectorAuthReferenceSchema.Type;

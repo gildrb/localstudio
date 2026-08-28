@@ -13,6 +13,14 @@ export interface ServeRuntime {
 /**
  * Canonical recipe shape as sent over the wire.
  */
+export type RecipeExtraArgument =
+  | string
+  | number
+  | boolean
+  | null
+  | RecipeExtraArgument[]
+  | { [key: string]: RecipeExtraArgument };
+
 export interface RecipeBase {
   id: string;
   name: string;
@@ -37,7 +45,7 @@ export interface RecipeBase {
   port: number;
   served_model_name: string | null;
   python_path: string | null;
-  extra_args: Record<string, unknown>;
+  extra_args: Record<string, RecipeExtraArgument>;
   max_thinking_tokens: number | null;
   thinking_mode: string;
 }

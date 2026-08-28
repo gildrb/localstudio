@@ -1,15 +1,8 @@
-// Reading-mode fallback used when headless Chromium is unavailable (and by the
-// /api/agent/browser/fetch route directly). Fetches a public http(s) URL with a
-// vetted DNS lookup so the embedded server never SSRFs into private nets, caps
-// the body, and converts HTML/Markdown into readable text for the model.
-//
-// This is the fetch+sanitize core that previously lived inline in the fetch
-// route; it is shared so the embedded [verb] path can fall back without an HTTP
-// self-call.
-
 import { lookup } from "node:dns/promises";
+import type { LookupFunction } from "node:net";
 import { request as httpRequest, type RequestOptions } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { Option, Schema } from "effect";
 import { sanitizePublicBrowserUrl } from "../../../../shared/agent/sanitize-embedded-browser-url";
 
 const MAX_BYTES = 512 * 1024;
@@ -27,7 +20,11 @@ export type ReaderResult = {
   contentType: string;
 };
 
-type ResolvedHostAddress = { address: string; family: 4 | 6 };
+const ResolvedHostAddressSchema = Schema.Struct({
+  address: Schema.String,
+  family: Schema.Union([Schema.Literal(4), Schema.Literal(6)]),
+});
+type ResolvedHostAddress = typeof ResolvedHostAddressSchema.Type;
 type ResolvedHostInput = string | ResolvedHostAddress;
 type ReaderHostResolver = (hostname: string) => Promise<ResolvedHostInput[]>;
 
@@ -41,7 +38,6 @@ type BoundedResponse = {
 };
 
 declare global {
-  // Test-only hooks for simulating DNS answers / responses without real network.
   var __LOCAL_STUDIO_BROWSER_READER_HOST_RESOLVER_FOR_TEST: ReaderHostResolver | undefined;
   var __LOCAL_STUDIO_BROWSER_READER_REQUEST_FOR_TEST:
     | ((url: string, address: ResolvedHostAddress) => Promise<BoundedResponse>)
@@ -54,10 +50,6 @@ const abortError = (signal: AbortSignal): Error =>
 const assertNotAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) throw abortError(signal);
 };
-
-// Detach from a pending promise as soon as the caller aborts: the panel or
-// tool call that asked for the page is gone, so stop holding its socket and
-// buffers instead of riding the fetch to completion.
 const awaitWithSignal = <A>(promise: Promise<A>, signal?: AbortSignal): Promise<A> => {
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(abortError(signal));
@@ -70,7 +62,7 @@ const awaitWithSignal = <A>(promise: Promise<A>, signal?: AbortSignal): Promise<
         if (signal.aborted) rejectPromise(abortError(signal));
         else resolve(value);
       },
-      (error: unknown) => {
+      (error: Error) => {
         signal.removeEventListener("abort", onAbort);
         rejectPromise(signal.aborted ? abortError(signal) : error);
       },
@@ -96,8 +88,6 @@ async function resolveReaderHost(
 }
 
 function decodeEntities(value: string): string {
-  // &amp; decodes LAST: decoding it first turns "&amp;lt;" into "&lt;" and a
-  // second replace then invents a "<" the source never contained.
   return value
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -106,10 +96,6 @@ function decodeEntities(value: string): string {
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&");
 }
-
-// Repeat a removal until the input stops changing: one pass can be defeated
-// by nesting the pattern inside itself (<scr<script>ipt>), and this text is
-// what the model reads.
 function replaceUntilStable(input: string, pattern: RegExp, replacement: string): string {
   let previous = "";
   let current = input;
@@ -123,10 +109,7 @@ function replaceUntilStable(input: string, pattern: RegExp, replacement: string)
 function stripTags(input: string): string {
   return replaceUntilStable(input, /<[^>]*>/g, "");
 }
-
-// Lightweight HTML → readable text. We intentionally avoid pulling in
-// readability/cheerio; the goal is "good enough for the model to read".
-function htmlToReadable(html: string, baseUrl: string): { title: string; text: string } {
+function htmlToReadable(html: string, baseUrl: string) {
   let noScripts = html;
   for (const tag of ["script", "style", "noscript", "iframe", "svg"]) {
     noScripts = replaceUntilStable(
@@ -165,6 +148,11 @@ function htmlToReadable(html: string, baseUrl: string): { title: string; text: s
   return { title, text };
 }
 
+function escapeHtmlElementContent(value: string): string {
+  // A literal "<" is the only markup opener during one HTML parse in element-data context.
+  return value.replaceAll("<", "&lt;");
+}
+
 function isMarkdownResponse(url: string, contentType: string): boolean {
   return /\b(markdown|mdx?)\b/i.test(contentType) || /\.(md|mdx|markdown)(?:[?#].*)?$/i.test(url);
 }
@@ -172,17 +160,6 @@ function isMarkdownResponse(url: string, contentType: string): boolean {
 function markdownTitle(markdown: string, fallback: string): string {
   const heading = markdown.match(/^\s*#\s+(.+)$/m)?.[1]?.trim();
   return heading || fallback;
-}
-
-function cleanMarkdown(markdown: string): string {
-  return markdown
-    .replace(/<img\b[^>]*\balt=["']([^"']*)["'][^>]*>/gi, (_match, alt: string) =>
-      alt.trim() ? alt.trim() : "",
-    )
-    .replace(/<\/?(p|div|span|center|picture|source)\b[^>]*>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .trim();
 }
 
 async function fetchBoundedUrl(
@@ -228,8 +205,10 @@ function hostForAddress(address: string): string {
 }
 
 function normalizeResolvedAddress(input: ResolvedHostInput): ResolvedHostAddress {
-  if (typeof input !== "string") return input;
-  return { address: input, family: input.includes(":") ? 6 : 4 };
+  const decoded = Schema.decodeUnknownOption(ResolvedHostAddressSchema)(input);
+  if (Option.isSome(decoded)) return decoded.value;
+  const address = Schema.decodeUnknownSync(Schema.String)(input);
+  return { address, family: address.includes(":") ? 6 : 4 };
 }
 
 function requestBoundedUrl(
@@ -241,18 +220,14 @@ function requestBoundedUrl(
   if (testRequest) return awaitWithSignal(testRequest(url, address), signal);
   const parsed = new URL(url);
   const request = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+  const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
+    if (lookupOptions.all) callback(null, [address]);
+    else callback(null, address.address, address.family);
+  };
   const options: RequestOptions = {
     headers: { Accept: ACCEPT, "User-Agent": USER_AGENT },
+    lookup: pinnedLookup,
     signal,
-    lookup: ((
-      _hostname: string,
-      lookupOptions: unknown,
-      callback: (...args: unknown[]) => void,
-    ) => {
-      const wantsAll = Boolean((lookupOptions as { all?: boolean } | undefined)?.all);
-      if (wantsAll) callback(null, [address]);
-      else callback(null, address.address, address.family);
-    }) as RequestOptions["lookup"],
   };
 
   return new Promise((resolve, reject) => {
@@ -268,8 +243,7 @@ function requestBoundedUrl(
       const status = response.statusCode ?? 0;
       const contentType = headerString(response.headers["content-type"]);
       const location = headerString(response.headers.location);
-      response.on("data", (raw: Buffer | string) => {
-        const chunk = typeof raw === "string" ? Buffer.from(raw) : raw;
+      response.on("data", (chunk: Buffer) => {
         if (total >= MAX_BYTES) return;
         const available = MAX_BYTES - total;
         const stored = chunk.length > available ? chunk.subarray(0, available) : chunk;
@@ -280,14 +254,15 @@ function requestBoundedUrl(
         if (settled) return;
         settled = true;
         const body = new TextDecoder("utf-8", { fatal: false }).decode(concatBytes(chunks, total));
-        resolve({
+        const boundedResponse: BoundedResponse = {
           status,
           ok: status >= 200 && status < 300,
           url,
           contentType,
           body,
-          ...(location ? { location } : {}),
-        });
+        };
+        if (location) boundedResponse.location = location;
+        resolve(boundedResponse);
       });
       response.on("error", fail);
     });
@@ -297,9 +272,13 @@ function requestBoundedUrl(
   });
 }
 
+const HeaderScalarSchema = Schema.Union([Schema.String, Schema.Number]);
 function headerString(value: string | string[] | number | undefined): string {
   if (Array.isArray(value)) return value[0] ?? "";
-  return typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
+  return Option.getOrElse(
+    Schema.decodeUnknownOption(HeaderScalarSchema)(value),
+    () => "",
+  ).toString();
 }
 
 function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
@@ -318,12 +297,12 @@ function renderReadable(response: BoundedResponse, fallbackUrl: string): ReaderR
   const finalUrl = response.url || fallbackUrl;
   if (contentType.startsWith("text/html") || contentType.includes("xhtml")) {
     const { title, text } = htmlToReadable(response.body, finalUrl);
-    return { url: finalUrl, title, text, markdown: text, contentType };
+    return { url: finalUrl, title, text, markdown: escapeHtmlElementContent(text), contentType };
   }
   if (contentType.startsWith("text/") || contentType.includes("application/json")) {
     const text = response.body.slice(0, MAX_BYTES);
     if (isMarkdownResponse(finalUrl, contentType)) {
-      const markdown = cleanMarkdown(text);
+      const markdown = escapeHtmlElementContent(text).trim();
       return {
         url: finalUrl,
         title: markdownTitle(markdown, finalUrl),
@@ -341,9 +320,6 @@ function renderReadable(response: BoundedResponse, fallbackUrl: string): ReaderR
     contentType,
   };
 }
-
-// Fetch a public URL and return reading-mode text. Throws on rejected/invalid
-// URLs or upstream failures; callers map errors to their own response shape.
 export async function fetchReadable(rawUrl: string, signal?: AbortSignal): Promise<ReaderResult> {
   assertNotAborted(signal);
   const safe = sanitizePublicBrowserUrl(rawUrl);

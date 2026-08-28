@@ -1,14 +1,31 @@
-/** Recipe extra_args lookup tolerant of kebab/snake spellings. */
+import { Option, Schema } from "effect";
+import type { RecipeExtraArgument } from "../../../contracts/recipes";
+import type { Recipe } from "../models/types";
+
+const RecipeExtraArgumentSchema: Schema.Codec<RecipeExtraArgument, RecipeExtraArgument> =
+  Schema.suspend(() =>
+    Schema.Union([
+      Schema.Null,
+      Schema.Boolean,
+      Schema.Number,
+      Schema.String,
+      Schema.mutable(Schema.Array(RecipeExtraArgumentSchema)),
+      Schema.Record(Schema.String, RecipeExtraArgumentSchema),
+    ]),
+  );
 
 export const getExtraArgument = (
-  extraArguments: Record<string, unknown>,
+  extraArguments: Recipe["extra_args"],
   key: string,
-): unknown => {
-  if (Object.prototype.hasOwnProperty.call(extraArguments, key)) return extraArguments[key];
-  const kebab = key.replace(/_/g, "-");
-  if (Object.prototype.hasOwnProperty.call(extraArguments, kebab)) return extraArguments[kebab];
-  const snake = key.replace(/-/g, "_");
-  return Object.prototype.hasOwnProperty.call(extraArguments, snake)
-    ? extraArguments[snake]
-    : undefined;
+): RecipeExtraArgument | undefined => {
+  const read = (candidate: string): RecipeExtraArgument | undefined => {
+    if (!Object.prototype.hasOwnProperty.call(extraArguments, candidate)) return undefined;
+    return Option.getOrUndefined(
+      Schema.decodeUnknownOption(RecipeExtraArgumentSchema)(extraArguments[candidate]),
+    );
+  };
+  const direct = read(key);
+  if (direct !== undefined) return direct;
+  const kebab = read(key.replace(/_/g, "-"));
+  return kebab ?? read(key.replace(/-/g, "_"));
 };

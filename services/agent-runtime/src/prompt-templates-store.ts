@@ -30,16 +30,15 @@ export function defaultPromptTemplateSources(): PromptTemplateSource[] {
   ];
 }
 
-function parseFrontMatter(content: string): {
+type PromptTemplateFrontMatter = {
   name?: string;
   description?: string;
   argumentHint?: string;
-} {
-  // Cheap YAML-like front matter parser — only supports the few keys we care
-  // about, matches both `---\nname: ...\n---` and a single-line markdown
-  // heading fallback.
+};
+
+function parseFrontMatter(content: string): PromptTemplateFrontMatter {
   const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
-  const result: { name?: string; description?: string; argumentHint?: string } = {};
+  const result: PromptTemplateFrontMatter = {};
   if (match) {
     for (const line of match[1].split(/\r?\n/)) {
       const kv = /^([A-Za-z_-]+)\s*:\s*(.*)$/.exec(line.trim());

@@ -1,52 +1,66 @@
-// Automations (Scheduled) tools for Local Studio.
-//
-// Gives the agent the same control over automations the Automations tab has:
-// list, read one with its run history, create, update, pause/resume, run now
-// and delete. An automation is a saved prompt the runtime re-runs on a
-// cron-like schedule in its own fresh session.
-//
-// Every tool here calls the SAME endpoints the tab calls
-// (/api/agent/automations…, proxied verbatim to the runtime's automations
-// store). There is deliberately no state in this file: if a tool and the tab
-// ever showed different automations, that would mean a second store had been
-// introduced. Calls proxy through the frontend like the subagents/connectors
-// bridges, so this file stays a plain pi extension with no runtime imports.
-//
-// The record shape mirrors services/agent-runtime automations-store.ts
-// (Automation): name, prompt, modelId, cwd, schedule{interval|daily|weekly},
-// status, nextRunAt, lastRun and runs[].
-
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "./schema.ts";
+import { Type, type Static, type TSchema } from "typebox";
+import { Schema } from "effect";
+import { requestJson, result, type ToolResult } from "./first-party-tool.ts";
 
 const FRONTEND_BASE = process.env.LOCAL_STUDIO_FRONTEND_BASE ?? "http://127.0.0.1:3000";
 const CALL_TIMEOUT_MS = 30_000;
-// "Run now" is not a store write: the endpoint runs the whole automation turn
-// in a fresh session and only answers once the result has been recorded. On the
-// 30s call budget every real run aborted here while the runtime kept going, so
-// it gets the subagent-sized budget instead.
 const RUN_TIMEOUT_MS = 15 * 60_000;
-const LAST_RUN_SUMMARY_CHARS = 1200;
-const HISTORY_SUMMARY_CHARS = 240;
 
-type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  details: Record<string, unknown>;
-};
-
-const textResult = (text: string, details: Record<string, unknown>): ToolResult => ({
-  content: [{ type: "text", text }],
-  details,
-});
-
-const failure = (text: string): ToolResult => textResult(text, { failed: true });
-
-// ─── Schedule shapes (mirror shared/agent/automation.ts) ────────────────────
+type AutomationDetails =
+  | { failed: true }
+  | { count: number; automations?: AutomationRecord[] }
+  | { id: string; schedule?: NormalizedSchedule; modelId?: string };
 
 type IntervalSchedule = { kind: "interval"; minutes: number };
 type DailySchedule = { kind: "daily"; time: string; weekdaysOnly?: boolean };
 type WeeklySchedule = { kind: "weekly"; day: number; time: string };
 export type NormalizedSchedule = IntervalSchedule | DailySchedule | WeeklySchedule;
+
+const TimeSchema = Schema.String.check(Schema.isPattern(/^([01]?\d|2[0-3]):[0-5]\d$/));
+const NormalizedScheduleSchema = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("interval"), minutes: Schema.Number }),
+  Schema.Struct({
+    kind: Schema.Literal("daily"),
+    time: Schema.String,
+    weekdaysOnly: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({ kind: Schema.Literal("weekly"), day: Schema.Number, time: Schema.String }),
+]);
+const AutomationRecordSchema = Schema.Struct({
+  id: Schema.optional(Schema.String),
+  name: Schema.optional(Schema.String),
+  status: Schema.optional(Schema.String),
+  nextRunAt: Schema.optional(Schema.String),
+  prompt: Schema.optional(Schema.String),
+  modelId: Schema.optional(Schema.String),
+  cwd: Schema.optional(Schema.String),
+  schedule: Schema.optional(NormalizedScheduleSchema),
+});
+const AutomationUpdateSchema = Schema.Struct({
+  name: Schema.optional(Schema.String),
+  prompt: Schema.optional(Schema.String),
+  modelId: Schema.optional(Schema.String),
+  cwd: Schema.optional(Schema.String),
+});
+const ErrorResponseSchema = Schema.Struct({ error: Schema.String });
+const ModelsResponseSchema = Schema.Struct({
+  models: Schema.Array(Schema.Struct({ id: Schema.String })),
+});
+const CreatedAutomationResponseSchema = Schema.Struct({
+  automation: Schema.optional(AutomationRecordSchema),
+});
+const AutomationsResponseSchema = Schema.Struct({
+  automations: Schema.Array(AutomationRecordSchema),
+});
+const HttpResponseSchema = Schema.Union([
+  ModelsResponseSchema,
+  AutomationsResponseSchema,
+  CreatedAutomationResponseSchema,
+  ErrorResponseSchema,
+]);
+type HttpResponse = typeof HttpResponseSchema.Type;
+type HttpJsonBody = HttpResponse | null;
 
 type ScheduleArg = {
   kind?: unknown;
@@ -66,66 +80,50 @@ const WEEKDAY_NAMES = [
   "Saturday",
 ];
 
-const SCHEDULE_DOC =
-  "Schedule format — one of: " +
-  "{kind:'interval', minutes:N} runs every N minutes (N >= 1); " +
-  "{kind:'daily', time:'HH:MM'} runs every day at that 24-hour local clock time, " +
-  "add weekdaysOnly:true to skip Saturday and Sunday; " +
-  "{kind:'weekly', day:D, time:'HH:MM'} runs once a week, day 0 = Sunday … 6 = Saturday.";
-
-function isValidTime(value: unknown): value is string {
-  return typeof value === "string" && /^([01]?\d|2[0-3]):[0-5]\d$/.test(value.trim());
+function normalizedScheduleTime(value: ScheduleArg["time"]): string | null {
+  const decoded = Schema.decodeUnknownOption(TimeSchema)(value);
+  return decoded._tag === "Some" ? decoded.value.trim() : null;
 }
 
-/** Validate the agent-supplied schedule into the store's shape, or explain what
- *  is wrong. The store silently rewrites anything it cannot parse to "daily at
- *  08:00", so every write path must pass through here first — otherwise a typo
- *  reschedules the automation instead of failing. Kept pure so the
- *  normalization is checkable without HTTP. */
 export function normalizeScheduleArg(
   input: ScheduleArg | undefined,
 ): { ok: true; schedule: NormalizedSchedule } | { ok: false; error: string } {
-  if (!input || typeof input !== "object") {
-    return { ok: false, error: `schedule is required (an object with a 'kind'). ${SCHEDULE_DOC}` };
+  if (!input) {
+    return { ok: false, error: "schedule is required (an object with a 'kind')." };
   }
   const kind = input.kind;
   if (kind === "interval") {
-    const minutes = typeof input.minutes === "number" ? Math.round(input.minutes) : NaN;
+    const parsedMinutes = Schema.decodeUnknownOption(Schema.Number)(input.minutes);
+    const minutes = parsedMinutes._tag === "Some" ? Math.round(parsedMinutes.value) : NaN;
     if (!Number.isFinite(minutes) || minutes < 1) {
       return { ok: false, error: "interval schedule needs 'minutes' >= 1." };
     }
     return { ok: true, schedule: { kind: "interval", minutes } };
   }
   if (kind === "daily") {
-    if (!isValidTime(input.time)) {
+    const time = normalizedScheduleTime(input.time);
+    if (!time) {
       return { ok: false, error: "daily schedule needs 'time' as 'HH:MM' (24h)." };
     }
-    return {
-      ok: true,
-      schedule: {
-        kind: "daily",
-        time: (input.time as string).trim(),
-        ...(input.weekdaysOnly === true ? { weekdaysOnly: true } : {}),
-      },
-    };
+    const schedule: DailySchedule = { kind: "daily", time };
+    if (input.weekdaysOnly === true) schedule.weekdaysOnly = true;
+    return { ok: true, schedule };
   }
   if (kind === "weekly") {
-    const day = typeof input.day === "number" ? Math.round(input.day) : NaN;
-    if (!Number.isInteger(day) || day < 0 || day > 6) {
+    const parsedDay = Schema.decodeUnknownOption(Schema.Number)(input.day);
+    const day = parsedDay._tag === "Some" ? Math.round(parsedDay.value) : NaN;
+    if (![0, 1, 2, 3, 4, 5, 6].includes(day)) {
       return { ok: false, error: "weekly schedule needs 'day' 0-6 (0 = Sunday)." };
     }
-    if (!isValidTime(input.time)) {
+    const time = normalizedScheduleTime(input.time);
+    if (!time) {
       return { ok: false, error: "weekly schedule needs 'time' as 'HH:MM' (24h)." };
     }
-    return { ok: true, schedule: { kind: "weekly", day, time: (input.time as string).trim() } };
+    return { ok: true, schedule: { kind: "weekly", day, time } };
   }
-  return {
-    ok: false,
-    error: `schedule.kind must be 'interval', 'daily' or 'weekly'. ${SCHEDULE_DOC}`,
-  };
+  return { ok: false, error: "schedule.kind must be 'interval', 'daily' or 'weekly'." };
 }
 
-/** One-line human description of a schedule, for list output. */
 export function describeSchedule(schedule: NormalizedSchedule): string {
   if (schedule.kind === "interval") return `every ${schedule.minutes} min`;
   if (schedule.kind === "daily") {
@@ -134,77 +132,26 @@ export function describeSchedule(schedule: NormalizedSchedule): string {
   return `weekly on ${WEEKDAY_NAMES[schedule.day] ?? `day ${schedule.day}`} at ${schedule.time}`;
 }
 
-const scheduleParameter = Type.Object(
-  {
-    kind: Type.Union([Type.Literal("interval"), Type.Literal("daily"), Type.Literal("weekly")], {
-      description: "interval = every N minutes; daily/weekly = at a clock time",
-    }),
-    minutes: Type.Optional(Type.Number({ description: "interval only: minutes, >= 1" })),
-    time: Type.Optional(Type.String({ description: "daily/weekly only: 'HH:MM' 24h local time" })),
-    day: Type.Optional(Type.Number({ description: "weekly only: 0-6, 0 = Sunday" })),
-    weekdaysOnly: Type.Optional(Type.Boolean({ description: "daily only: skip Saturday/Sunday" })),
-  },
-  { description: `When to run. ${SCHEDULE_DOC}` },
-);
-
-// ─── HTTP helpers ───────────────────────────────────────────────────────────
-
-type HttpReply = { ok: boolean; status: number; body: unknown };
-
 async function httpJson(
   path: string,
   init: RequestInit,
   signal: AbortSignal | undefined,
-  timeoutMs: number = CALL_TIMEOUT_MS,
-): Promise<HttpReply> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const abort = () => controller.abort();
-  signal?.addEventListener("abort", abort, { once: true });
-  if (signal?.aborted) controller.abort();
-  try {
-    const response = await fetch(`${FRONTEND_BASE}${path}`, {
-      ...init,
-      signal: controller.signal,
-    });
-    let body: unknown = null;
-    try {
-      body = await response.json();
-    } catch {
-      body = null;
-    }
-    return { ok: response.ok, status: response.status, body };
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener("abort", abort);
-  }
+  timeoutMs = CALL_TIMEOUT_MS,
+): Promise<{ ok: boolean; status: number; body: HttpJsonBody }> {
+  const response = await requestJson(`${FRONTEND_BASE}${path}`, init, signal, timeoutMs);
+  const parsed = Schema.decodeUnknownOption(HttpResponseSchema)(response.body);
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: parsed._tag === "Some" ? parsed.value : null,
+  };
 }
 
-function errorText(body: unknown, status: number): string {
-  if (body && typeof body === "object" && "error" in body) {
-    const message = (body as { error?: unknown }).error;
-    if (typeof message === "string") return message;
-  }
-  return `HTTP ${status}`;
+function errorText(body: HttpJsonBody, status: number): string {
+  const parsed = Schema.decodeUnknownOption(ErrorResponseSchema)(body);
+  return parsed._tag === "Some" ? parsed.value.error : `HTTP ${status}`;
 }
 
-function automationPath(id: string, suffix = ""): string {
-  return `/api/agent/automations/${encodeURIComponent(id)}${suffix}`;
-}
-
-/** Every tool body is "do one HTTP call, format the reply"; the try/catch is the
- *  only thing standing between a dropped runtime and an unhandled rejection. */
-async function guarded(label: string, run: () => Promise<ToolResult>): Promise<ToolResult> {
-  try {
-    return await run();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return failure(`Failed to ${label}: ${message}`);
-  }
-}
-
-/** Resolve the model an automation should run under: explicit arg, else the
- *  current session's model (injected by pi-runtime), else the first available. */
 async function resolveModelId(
   explicit: string | undefined,
   signal: AbortSignal | undefined,
@@ -214,312 +161,127 @@ async function resolveModelId(
   const envModel = process.env.LOCAL_STUDIO_MODEL_ID?.trim();
   if (envModel) return envModel;
   const { ok, body } = await httpJson("/api/agent/models", { method: "GET" }, signal);
-  if (!ok || !body || typeof body !== "object") return null;
-  const models = (body as { models?: unknown }).models;
-  if (!Array.isArray(models)) return null;
-  for (const model of models) {
-    if (model && typeof model === "object" && typeof (model as { id?: unknown }).id === "string") {
-      const id = (model as { id: string }).id.trim();
-      if (id) return id;
-    }
+  if (!ok) return null;
+  const parsed = Schema.decodeUnknownOption(ModelsResponseSchema)(body);
+  if (parsed._tag === "None") return null;
+  for (const model of parsed.value.models) {
+    const id = model.id.trim();
+    if (id) return id;
   }
   return null;
 }
 
-/** Resolve the directory an automation should run in: explicit arg, else the
- *  current session's cwd (injected by pi-runtime), else the app default. */
 function resolveCwd(explicit: string | undefined): string {
   const trimmed = explicit?.trim();
   if (trimmed) return trimmed;
   return process.env.LOCAL_STUDIO_CWD?.trim() ?? "";
 }
 
-// ─── Record formatting ──────────────────────────────────────────────────────
-
-type RunRecord = {
-  at?: unknown;
-  outcome?: unknown;
-  summary?: unknown;
-  error?: unknown;
-  piSessionId?: unknown;
-};
-
-type AutomationRecord = {
-  id?: unknown;
-  name?: unknown;
-  status?: unknown;
-  nextRunAt?: unknown;
-  schedule?: unknown;
-  prompt?: unknown;
-  modelId?: unknown;
-  cwd?: unknown;
-  targetSessionId?: unknown;
-  unread?: unknown;
-  lastRun?: unknown;
-  runs?: unknown;
-  createdAt?: unknown;
-};
-
-const SESSION_DOC =
-  "By default every run happens in a brand new session that remembers nothing. Pass sessionId " +
-  "to run inside an existing chat instead: the run continues that thread, sees its history and " +
-  "appends to it. A session id is the id of a pi session — read_automation prints the one each " +
-  "past run used, and the user can read it off a chat in the app. Pass an empty string to go " +
-  "back to a fresh session per run. A target that has been deleted does not fail the run: it " +
-  "falls back to a fresh session and says so in that run's summary.";
-
-function text(value: unknown, fallback = ""): string {
-  return typeof value === "string" && value.trim() ? value : fallback;
-}
-
-function clip(value: unknown, max: number): string {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  if (trimmed.length <= max) return trimmed;
-  return `${trimmed.slice(0, max)}… (+${trimmed.length - max} more chars)`;
-}
-
-function asRun(value: unknown): RunRecord | null {
-  return value && typeof value === "object" ? (value as RunRecord) : null;
-}
-
-function runList(record: AutomationRecord): RunRecord[] {
-  if (!Array.isArray(record.runs)) return [];
-  return record.runs.map(asRun).filter((run): run is RunRecord => run !== null);
-}
-
-/** describeSchedule for an already-stored (normalized) schedule object. */
-function describeScheduleLoose(schedule: unknown): string {
-  if (!schedule || typeof schedule !== "object") return "unknown schedule";
-  const parsed = normalizeScheduleArg(schedule as ScheduleArg);
-  return parsed.ok ? describeSchedule(parsed.schedule) : "unknown schedule";
-}
-
-function statusOf(record: AutomationRecord): "active" | "paused" {
-  return record.status === "paused" ? "paused" : "active";
-}
-
-function describeRunOutcome(run: RunRecord | null): string {
-  if (!run) return "never run";
-  const outcome = run.outcome === "error" ? "failed" : "ok";
-  return `last run ${outcome} at ${text(run.at, "unknown time")}`;
-}
+type AutomationRecord = typeof AutomationRecordSchema.Type;
 
 function formatAutomationLine(record: AutomationRecord): string {
-  const target = text(record.targetSessionId);
-  const parts = [
-    describeScheduleLoose(record.schedule),
-    statusOf(record),
-    text(record.nextRunAt) ? `next ${record.nextRunAt}` : "no next run scheduled",
-    describeRunOutcome(asRun(record.lastRun)),
-  ];
-  if (target) parts.push(`runs in session ${target}`);
-  if (record.unread === true) parts.push("result not yet opened in the app");
-  return `- ${text(record.name, "Untitled")} [${text(record.id, "(no id)")}] — ${parts.join(" · ")}`;
+  const id = record.id ?? "(no id)";
+  const name = record.name || "Untitled";
+  const status = record.status === "paused" ? "paused" : "active";
+  const scheduleText = record.schedule ? describeSchedule(record.schedule) : "unknown schedule";
+  const next = record.nextRunAt ? `, next ${record.nextRunAt}` : "";
+  return `- ${name} [${id}] — ${scheduleText}, ${status}${next}`;
 }
 
-function formatRunEntry(run: RunRecord, index: number): string {
-  const outcome = run.outcome === "error" ? "error" : "ok";
-  const lines = [`  ${index + 1}. ${text(run.at, "unknown time")} — ${outcome}`];
-  const error = text(run.error);
-  if (error) lines.push(`     error: ${error}`);
-  const summary = clip(run.summary, HISTORY_SUMMARY_CHARS);
-  if (summary) lines.push(`     said: ${summary.replaceAll("\n", " ")}`);
-  return lines.join("\n");
+function failure(text: string): ToolResult<AutomationDetails> {
+  return result(text, { failed: true });
 }
 
-function formatLastRunBlock(run: RunRecord | null): string[] {
-  if (!run) return ["last run: never — this automation has not fired yet"];
-  const outcome = run.outcome === "error" ? "error" : "ok";
-  const session = text(run.piSessionId);
-  const lines = [
-    `last run: ${outcome} at ${text(run.at, "unknown time")}${session ? ` (session ${session})` : ""}`,
-  ];
-  const error = text(run.error);
-  if (error) lines.push(`last run error: ${error}`);
-  const summary = clip(run.summary, LAST_RUN_SUMMARY_CHARS);
-  lines.push(summary ? `last run said:\n${summary}` : "last run said: (no assistant output)");
-  return lines;
-}
-
-function formatAutomationDetail(record: AutomationRecord, includeRuns: boolean): string {
-  const runs = runList(record);
-  const lines = [
-    `${text(record.name, "Untitled")} [${text(record.id, "(no id)")}]`,
-    `status: ${statusOf(record)}${record.unread === true ? " (latest result not yet opened in the app)" : ""}`,
-    `schedule: ${describeScheduleLoose(record.schedule)}`,
-    `next run: ${text(record.nextRunAt, "not scheduled")}`,
-    `model: ${text(record.modelId, "(app default)")}`,
-    `directory: ${text(record.cwd, "(app default)")}`,
-    `runs in: ${text(record.targetSessionId) ? `session ${record.targetSessionId as string}` : "a fresh session each time"}`,
-    `created: ${text(record.createdAt, "unknown")}`,
-    `prompt:\n${text(record.prompt, "(empty)")}`,
-    ...formatLastRunBlock(asRun(record.lastRun)),
-  ];
-  if (includeRuns && runs.length > 0) {
-    lines.push(`run history (${runs.length} kept, newest first):`);
-    lines.push(runs.map(formatRunEntry).join("\n"));
+async function attempt(
+  prefix: string,
+  operation: () => Promise<ToolResult<AutomationDetails>>,
+): Promise<ToolResult<AutomationDetails>> {
+  try {
+    return await operation();
+  } catch (error) {
+    return failure(`${prefix}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return lines.join("\n");
 }
 
-// ─── Store reads ────────────────────────────────────────────────────────────
+type IdTool<S extends TSchema> = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: S;
+  id: (params: Static<S>) => string;
+  path?: string;
+  init: (params: Static<S>) => RequestInit;
+  timeout?: number;
+  failure: string;
+  success: (id: string, params: Static<S>, body: HttpJsonBody) => ToolResult<AutomationDetails>;
+};
 
-type ListResult = { ok: true; automations: AutomationRecord[] } | { ok: false; error: string };
-
-/** The list endpoint is the only read path — there is no GET /automations/:id —
- *  and it already returns each automation in full, run history included. */
-async function fetchAutomations(signal: AbortSignal | undefined): Promise<ListResult> {
-  const { ok, status, body } = await httpJson("/api/agent/automations", { method: "GET" }, signal);
-  if (!ok) return { ok: false, error: errorText(body, status) };
-  const automations = (body as { automations?: unknown }).automations;
-  return {
-    ok: true,
-    automations: Array.isArray(automations) ? (automations as AutomationRecord[]) : [],
-  };
-}
-
-async function fetchAutomation(
-  id: string,
-  signal: AbortSignal | undefined,
-): Promise<{ ok: true; automation: AutomationRecord } | { ok: false; error: string }> {
-  const listed = await fetchAutomations(signal);
-  if (!listed.ok) return listed;
-  const match = listed.automations.find((record) => record.id === id);
-  if (!match) {
-    return {
-      ok: false,
-      error: `No automation with id '${id}'. Call list_automations for the current ids.`,
-    };
-  }
-  return { ok: true, automation: match };
-}
-
-function requireId(
-  params: unknown,
-  tool: string,
-): { ok: true; id: string } | { ok: false; error: string } {
-  const raw = (params as { id?: unknown } | undefined)?.id;
-  const id = typeof raw === "string" ? raw.trim() : "";
-  if (!id) return { ok: false, error: `${tool} needs an automation id (see list_automations).` };
-  return { ok: true, id };
-}
-
-function patchedAutomation(body: unknown): AutomationRecord {
-  const automation = (body as { automation?: unknown } | null)?.automation;
-  return automation && typeof automation === "object" ? (automation as AutomationRecord) : {};
-}
-
-// ─── Tools ──────────────────────────────────────────────────────────────────
-
-function registerReadTools(pi: ExtensionAPI): void {
+function registerIdTool<S extends TSchema>(pi: ExtensionAPI, spec: IdTool<S>): void {
   pi.registerTool({
-    name: "list_automations",
-    label: "List automations",
-    description:
-      "List every scheduled automation the app knows about — the same ones shown in the " +
-      "Automations tab — with its id, schedule, whether it is active or paused, when it next " +
-      "runs, and how its last run ended. Call this before any other automation tool: they all " +
-      "take the opaque id printed here (e.g. 'auto-1a2b3c4d'). Use read_automation for one " +
-      "automation's full prompt and run history.",
-    parameters: Type.Object({}),
-    async execute(_id, _params, signal) {
-      return guarded("list automations", async () => {
-        const listed = await fetchAutomations(signal);
-        if (!listed.ok) return failure(`Failed to list automations: ${listed.error}`);
-        if (listed.automations.length === 0) {
-          return textResult(
-            "No automations are scheduled. Use schedule_automation to create one.",
-            { count: 0 },
-          );
-        }
-        const lines = listed.automations.map(formatAutomationLine);
-        return textResult(`${listed.automations.length} automation(s):\n${lines.join("\n")}`, {
-          count: listed.automations.length,
-        });
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "read_automation",
-    label: "Read automation",
-    description:
-      "Read one automation in full: the exact prompt it runs, its model, working directory, the " +
-      "session it runs in, schedule, next run time, and its run history — the last 20 runs with when each ran, " +
-      "whether it succeeded, and what the agent reported. Use this to check whether a scheduled " +
-      "job is actually doing its work (a run can succeed on schedule and still report a " +
-      "failure), and to read the current prompt before editing it with update_automation.",
-    parameters: Type.Object({
-      id: Type.String({
-        description: "The automation id from list_automations, e.g. 'auto-1a2b3c4d'.",
-      }),
-      includeRuns: Type.Optional(
-        Type.Boolean({ description: "Include the run history. Default true." }),
-      ),
-    }),
-    async execute(_id, params, signal) {
-      const parsed = requireId(params, "read_automation");
-      if (!parsed.ok) return failure(parsed.error);
-      const includeRuns = (params as { includeRuns?: unknown })?.includeRuns !== false;
-      return guarded("read automation", async () => {
-        const found = await fetchAutomation(parsed.id, signal);
-        if (!found.ok) return failure(found.error);
-        return textResult(formatAutomationDetail(found.automation, includeRuns), {
-          id: parsed.id,
-          status: statusOf(found.automation),
-          runs: runList(found.automation).length,
-        });
+    name: spec.name,
+    label: spec.label,
+    description: spec.description,
+    parameters: spec.parameters,
+    async execute(_callId, params, signal) {
+      const values: Static<S> = JSON.parse(JSON.stringify(params));
+      const id = spec.id(values).trim();
+      if (!id) return failure(`${spec.name} needs an automation id.`);
+      return attempt(spec.failure, async () => {
+        const response = await httpJson(
+          `/api/agent/automations/${encodeURIComponent(id)}${spec.path ?? ""}`,
+          spec.init(values),
+          signal,
+          spec.timeout,
+        );
+        if (!response.ok)
+          return failure(`${spec.failure}: ${errorText(response.body, response.status)}`);
+        return spec.success(id, values, response.body);
       });
     },
   });
 }
 
-function registerWriteTools(pi: ExtensionAPI): void {
+export default function automationsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "schedule_automation",
     label: "Schedule automation",
     description:
-      "Create a scheduled automation: a saved prompt the app re-runs on a schedule, by default " +
-      "each time in its own fresh session that cannot see this conversation — so write a prompt " +
-      "that stands on its own. Use it for recurring work the user wants to keep happening (a " +
-      "morning digest, an hourly check on a service). " +
-      SCHEDULE_DOC +
-      " " +
-      SESSION_DOC +
-      " The automation runs with the current session's model and project directory unless you " +
-      "pass others. Returns the new automation's id.",
+      "Create a scheduled automation: a saved prompt the app re-runs on a schedule in its own " +
+      "fresh session. Use for recurring work (a daily digest, an hourly check). Provide the " +
+      "prompt to run and a schedule (interval minutes, or a daily/weekly time in 24h HH:MM). " +
+      "The run uses the current model unless you pass one. Returns the created automation.",
     parameters: Type.Object({
-      prompt: Type.String({
-        description: "The standalone instruction the automation runs each time.",
-      }),
-      schedule: scheduleParameter,
-      name: Type.Optional(Type.String({ description: "Short display name shown in the app." })),
+      prompt: Type.String({ description: "The instruction the automation runs each time." }),
+      schedule: Type.Object(
+        {
+          kind: Type.Union(
+            [Type.Literal("interval"), Type.Literal("daily"), Type.Literal("weekly")],
+            { description: "interval = every N minutes; daily/weekly = at a clock time" },
+          ),
+          minutes: Type.Optional(Type.Number({ description: "interval only: minutes, >= 1" })),
+          time: Type.Optional(Type.String({ description: "daily/weekly only: 'HH:MM' 24h" })),
+          day: Type.Optional(Type.Number({ description: "weekly only: 0-6, 0 = Sunday" })),
+          weekdaysOnly: Type.Optional(
+            Type.Boolean({ description: "daily only: skip Saturday/Sunday" }),
+          ),
+        },
+        { description: "When to run." },
+      ),
+      name: Type.Optional(Type.String({ description: "Short display name." })),
       model: Type.Optional(
         Type.String({ description: "Model id; defaults to the current session's model." }),
       ),
       cwd: Type.Optional(
         Type.String({ description: "Working directory; defaults to the current project." }),
       ),
-      sessionId: Type.Optional(
-        Type.String({
-          description: "Existing pi session to run inside; omit for a fresh session each run.",
-        }),
-      ),
     }),
     async execute(_id, params, signal) {
-      const args = (params ?? {}) as {
-        prompt?: string;
-        schedule?: ScheduleArg;
-        name?: string;
-        model?: string;
-        cwd?: string;
-        sessionId?: string;
-      };
-      const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+      const args = params;
+      const prompt = args.prompt.trim();
       if (!prompt) return failure("schedule_automation needs a non-empty prompt.");
       const scheduleResult = normalizeScheduleArg(args.schedule);
       if (!scheduleResult.ok) return failure(scheduleResult.error);
-      return guarded("create automation", async () => {
+      return attempt("Failed to create automation", async () => {
         const modelId = await resolveModelId(args.model, signal);
         if (!modelId) {
           return failure("No model available to run the automation. Pass a 'model' id.");
@@ -530,232 +292,151 @@ function registerWriteTools(pi: ExtensionAPI): void {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              name: typeof args.name === "string" ? args.name : "",
+              name: args.name ?? "",
               prompt,
               modelId,
               cwd: resolveCwd(args.cwd),
-              targetSessionId: typeof args.sessionId === "string" ? args.sessionId.trim() : null,
               schedule: scheduleResult.schedule,
             }),
           },
           signal,
         );
         if (!ok) return failure(`Failed to create automation: ${errorText(body, status)}`);
-        const automation = patchedAutomation(body);
-        const id = text(automation.id, "(unknown)");
-        const target = text(automation.targetSessionId);
-        return textResult(
-          `Created automation "${text(automation.name, args.name ?? "Untitled")}" [${id}] — ` +
-            `${describeSchedule(scheduleResult.schedule)}. ` +
-            `${target ? `Runs inside session ${target}. ` : "Each run starts a fresh session. "}` +
-            `Next run ${text(automation.nextRunAt, "pending")}. ` +
-            `Use run_automation_now to test it without waiting.`,
-          { id, schedule: scheduleResult.schedule, modelId, targetSessionId: target || null },
+        const parsedBody = Schema.decodeUnknownOption(CreatedAutomationResponseSchema)(body);
+        const automation = parsedBody._tag === "Some" ? parsedBody.value.automation : undefined;
+        const id = [automation?.id, "(unknown)"].filter(Boolean).slice(0, 1).join("");
+        return result<AutomationDetails>(
+          `Created automation "${automation?.name ?? args.name ?? "Untitled"}" [${id}] — ` +
+            `${describeSchedule(scheduleResult.schedule)}. Next run ${automation?.nextRunAt ?? "pending"}.`,
+          { id, schedule: scheduleResult.schedule, modelId },
         );
       });
     },
   });
 
   pi.registerTool({
+    name: "list_automations",
+    label: "List automations",
+    description: "List the scheduled automations: name, id, schedule, status and next run time.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, signal) {
+      return attempt("Failed to list automations", async () => {
+        const { ok, status, body } = await httpJson(
+          "/api/agent/automations",
+          { method: "GET" },
+          signal,
+        );
+        if (!ok) return failure(`Failed to list automations: ${errorText(body, status)}`);
+        const parsedBody = Schema.decodeUnknownOption(AutomationsResponseSchema)(body);
+        const automations = parsedBody._tag === "Some" ? parsedBody.value.automations : [];
+        if (automations.length === 0)
+          return result<AutomationDetails>("No automations are scheduled.", { count: 0 });
+        const lines = automations.map(formatAutomationLine);
+        return result<AutomationDetails>(
+          `${automations.length} automation(s):\n${lines.join("\n")}`,
+          {
+            count: automations.length,
+          },
+        );
+      });
+    },
+  });
+
+  registerIdTool(pi, {
+    name: "read_automation",
+    label: "Read automation",
+    description:
+      "Read one automation, including its prompt, schedule, model, directory and run state.",
+    parameters: Type.Object({ id: Type.String({ description: "Automation id." }) }),
+    id: (params) => params.id,
+    failure: "Failed to read automation",
+    init: () => ({ method: "GET" }),
+    success(id, _params, body) {
+      const parsed = Schema.decodeUnknownOption(CreatedAutomationResponseSchema)(body);
+      if (parsed._tag === "None" || !parsed.value.automation)
+        return failure("Automation response was invalid.");
+      return result<AutomationDetails>(JSON.stringify(parsed.value.automation, null, 2), { id });
+    },
+  });
+
+  registerIdTool(pi, {
     name: "update_automation",
     label: "Update automation",
-    description:
-      "Change an existing automation in place: rename it, rewrite the prompt it runs, move it to " +
-      "a different schedule, model, working directory or session. Only the fields you pass " +
-      "change; the rest are left exactly as they are. Always prefer this over deleting and " +
-      "re-creating — a new automation loses the run history the user relies on. Read the current " +
-      "values with read_automation first. " +
-      SCHEDULE_DOC +
-      " " +
-      SESSION_DOC,
+    description: "Update an automation's name, prompt, model or working directory.",
     parameters: Type.Object({
-      id: Type.String({ description: "The automation id from list_automations." }),
-      name: Type.Optional(Type.String({ description: "New display name." })),
-      prompt: Type.Optional(Type.String({ description: "New standalone instruction to run." })),
-      schedule: Type.Optional(scheduleParameter),
-      model: Type.Optional(Type.String({ description: "New model id." })),
-      cwd: Type.Optional(Type.String({ description: "New working directory." })),
-      sessionId: Type.Optional(
-        Type.String({
-          description:
-            "Pi session every run should continue; empty string goes back to a fresh session.",
+      id: Type.String({ description: "Automation id." }),
+      name: Type.Optional(Type.String()),
+      prompt: Type.Optional(Type.String()),
+      modelId: Type.Optional(Type.String()),
+      cwd: Type.Optional(Type.String()),
+    }),
+    id: (params) => params.id,
+    failure: "Failed to update automation",
+    init: (params) => ({
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        Schema.decodeUnknownSync(AutomationUpdateSchema)({
+          name: params.name,
+          prompt: params.prompt,
+          modelId: params.modelId,
+          cwd: params.cwd,
         }),
       ),
     }),
-    async execute(_id, params, signal) {
-      const parsed = requireId(params, "update_automation");
-      if (!parsed.ok) return failure(parsed.error);
-      const args = (params ?? {}) as {
-        name?: unknown;
-        prompt?: unknown;
-        schedule?: ScheduleArg;
-        model?: unknown;
-        cwd?: unknown;
-        sessionId?: unknown;
-      };
-      const patch: Record<string, unknown> = {};
-      if (typeof args.name === "string") patch.name = args.name;
-      if (typeof args.prompt === "string") patch.prompt = args.prompt;
-      if (typeof args.model === "string" && args.model.trim()) patch.modelId = args.model.trim();
-      if (typeof args.cwd === "string") patch.cwd = args.cwd.trim();
-      // An empty string is a real instruction here — "stop running in that
-      // session" — so it is kept rather than filtered out like a blank cwd.
-      if (typeof args.sessionId === "string") patch.targetSessionId = args.sessionId.trim() || null;
-      if (args.schedule !== undefined) {
-        // The store falls back to "daily at 08:00" for anything it cannot read,
-        // so a malformed schedule must fail here rather than quietly move the
-        // automation to 8am.
-        const scheduleResult = normalizeScheduleArg(args.schedule);
-        if (!scheduleResult.ok) return failure(scheduleResult.error);
-        patch.schedule = scheduleResult.schedule;
-      }
-      if (Object.keys(patch).length === 0) {
-        return failure(
-          "update_automation needs at least one field to change (name, prompt, schedule, model, cwd or sessionId).",
-        );
-      }
-      return guarded("update automation", async () => {
-        const { ok, status, body } = await httpJson(
-          automationPath(parsed.id),
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
-          },
-          signal,
-        );
-        if (!ok) return failure(`Failed to update automation: ${errorText(body, status)}`);
-        const automation = patchedAutomation(body);
-        return textResult(
-          `Updated ${Object.keys(patch).join(", ")} on "${text(automation.name, parsed.id)}" [${parsed.id}].\n` +
-            formatAutomationDetail(automation, false),
-          { id: parsed.id, changed: Object.keys(patch) },
-        );
-      });
-    },
+    success: (id) => result<AutomationDetails>(`Updated automation ${id}.`, { id }),
   });
 
-  pi.registerTool({
+  registerIdTool(pi, {
     name: "set_automation_status",
     label: "Pause or resume automation",
-    description:
-      "Pause or resume a scheduled automation. Pausing keeps the automation and its run history " +
-      "but stops it firing — use it when the user wants a recurring job to stop for now, instead " +
-      "of delete_automation. Resuming schedules the next run from now; runs missed while paused " +
-      "are not backfilled.",
+    description: "Pause or resume a scheduled automation.",
     parameters: Type.Object({
-      id: Type.String({ description: "The automation id from list_automations." }),
-      status: Type.Union([Type.Literal("active"), Type.Literal("paused")], {
-        description: "'paused' stops it firing; 'active' resumes it.",
-      }),
+      id: Type.String({ description: "Automation id." }),
+      status: Type.Union([Type.Literal("active"), Type.Literal("paused")]),
     }),
-    async execute(_id, params, signal) {
-      const parsed = requireId(params, "set_automation_status");
-      if (!parsed.ok) return failure(parsed.error);
-      const status = (params as { status?: unknown })?.status;
-      if (status !== "active" && status !== "paused") {
-        return failure("set_automation_status needs status 'active' or 'paused'.");
-      }
-      return guarded("change automation status", async () => {
-        const reply = await httpJson(
-          automationPath(parsed.id),
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status }),
-          },
-          signal,
-        );
-        if (!reply.ok) {
-          return failure(
-            `Failed to change automation status: ${errorText(reply.body, reply.status)}`,
-          );
-        }
-        const automation = patchedAutomation(reply.body);
-        const name = text(automation.name, parsed.id);
-        return textResult(
-          status === "paused"
-            ? `Paused "${name}" [${parsed.id}]. It keeps its history and will not run until resumed.`
-            : `Resumed "${name}" [${parsed.id}] — ${describeScheduleLoose(automation.schedule)}, next run ${text(automation.nextRunAt, "pending")}.`,
-          { id: parsed.id, status },
-        );
-      });
-    },
+    id: (params) => params.id,
+    failure: "Failed to update automation",
+    init: (params) => ({
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: params.status }),
+    }),
+    success: (id, params) =>
+      result<AutomationDetails>(
+        `${params.status === "paused" ? "Paused" : "Resumed"} automation ${id}.`,
+        { id },
+      ),
   });
 
-  pi.registerTool({
+  registerIdTool(pi, {
     name: "run_automation_now",
     label: "Run automation now",
     description:
-      "Run an automation immediately instead of waiting for its schedule, and report how it " +
-      "went. The run happens wherever the automation is configured to run — a fresh session, or " +
-      "the session it is attached to — and this tool waits for it to finish, so it can take " +
-      "minutes. The schedule is kept, but the next scheduled run is re-timed from now. Use it to " +
-      "prove an automation you just created or edited actually works.",
-    parameters: Type.Object({
-      id: Type.String({ description: "The automation id from list_automations." }),
-    }),
-    async execute(_id, params, signal) {
-      const parsed = requireId(params, "run_automation_now");
-      if (!parsed.ok) return failure(parsed.error);
-      return guarded("run automation", async () => {
-        const { ok, status, body } = await httpJson(
-          automationPath(parsed.id, "/run"),
-          { method: "POST" },
-          signal,
-          RUN_TIMEOUT_MS,
-        );
-        if (!ok) return failure(`Failed to run automation: ${errorText(body, status)}`);
-        const started = (body as { started?: unknown })?.started === true;
-        if (!started) {
-          return textResult(
-            `Automation ${parsed.id} is already running; this call did not start a second run. ` +
-              `Check read_automation for the result once it finishes.`,
-            { id: parsed.id, started: false },
-          );
-        }
-        const automation = patchedAutomation(body);
-        const lastRun = asRun(automation.lastRun);
-        const outcome = lastRun?.outcome === "error" ? "error" : "ok";
-        return textResult(
-          `Ran "${text(automation.name, parsed.id)}" [${parsed.id}] — ${outcome}.\n` +
-            `${formatLastRunBlock(lastRun).join("\n")}\n` +
-            `next scheduled run: ${text(automation.nextRunAt, "pending")}`,
-          { id: parsed.id, started: true, outcome },
-        );
-      });
-    },
+      "Run an automation immediately in a fresh session and wait for its recorded result.",
+    parameters: Type.Object({ id: Type.String({ description: "Automation id." }) }),
+    id: (params) => params.id,
+    failure: "Automation run failed",
+    path: "/run",
+    init: () => ({ method: "POST" }),
+    timeout: RUN_TIMEOUT_MS,
+    success: (id) =>
+      result<AutomationDetails>(
+        `Automation ${id} finished. Read it for the recorded run history.`,
+        { id },
+      ),
   });
 
-  pi.registerTool({
+  registerIdTool(pi, {
     name: "delete_automation",
     label: "Delete automation",
-    description:
-      "Delete a scheduled automation permanently, together with its run history. This cannot be " +
-      "undone. If the user only wants it to stop firing, use set_automation_status with " +
-      "'paused' instead.",
+    description: "Delete a scheduled automation by its id (get ids from list_automations).",
     parameters: Type.Object({
-      id: Type.String({
-        description: "The automation id from list_automations, e.g. 'auto-1a2b3c4d'.",
-      }),
+      id: Type.String({ description: "The automation id, e.g. 'auto-1a2b3c4d'." }),
     }),
-    async execute(_id, params, signal) {
-      const parsed = requireId(params, "delete_automation");
-      if (!parsed.ok) return failure(parsed.error);
-      return guarded("delete automation", async () => {
-        const { ok, status, body } = await httpJson(
-          automationPath(parsed.id),
-          { method: "DELETE" },
-          signal,
-        );
-        if (!ok) return failure(`Failed to delete automation: ${errorText(body, status)}`);
-        return textResult(`Deleted automation ${parsed.id}.`, { id: parsed.id });
-      });
-    },
+    id: (params) => params.id,
+    failure: "Failed to delete automation",
+    init: () => ({ method: "DELETE" }),
+    success: (id) => result<AutomationDetails>(`Deleted automation ${id}.`, { id }),
   });
-}
-
-export default function automationsExtension(pi: ExtensionAPI): void {
-  registerReadTools(pi);
-  registerWriteTools(pi);
 }

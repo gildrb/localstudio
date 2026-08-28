@@ -1,52 +1,32 @@
-// github — GitHub through the `gh` CLI that is already installed and signed in
-// on this machine.
-//
-// The deliberate choice here is to shell out rather than speak to api.github.com
-// directly. `gh` already holds the user's credentials in the OS keyring, already
-// knows which repo the session directory belongs to, already paginates, and
-// already renders diffs and check runs. An in-process API client would have to
-// re-solve all of that and would need a token of its own — one more secret to
-// store, refresh, and leak. So every tool below is an argv for `gh`, and the
-// descriptions say so, because a model that knows the tools are `gh` can reason
-// about what they can and cannot do.
-//
-// The runtime only loads this extension when a `gh` binary exists, so the tools
-// never advertise a CLI that is not there. Being *signed in* is a separate
-// question the binary answers at call time — `github_status` is the tool that
-// asks it.
-//
-// Arguments are passed as an argv array to execFile: there is no shell, so
-// nothing a model puts in a query string can become a command. Commands that
-// hand out credentials or destroy things (`gh auth token`, `gh repo delete`,
-// `gh secret set`) are refused outright rather than trusted to be used well.
-
 import { execFile } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type, type Static, type TSchema } from "./schema.ts";
+import { Type, type Static, type TSchema } from "typebox";
+import { Schema } from "effect";
 
+type GithubDetails = {
+  command?: string;
+  exitCode?: number;
+  cwd?: string;
+  refused?: boolean;
+  failed?: boolean;
+};
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
-  details: Record<string, unknown>;
+  details: GithubDetails;
 };
+const ProcessErrorSchema = Schema.Struct({ code: Schema.Number });
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const SLOW_TIMEOUT_MS = 180_000;
-// Big enough for a real PR diff, small enough that a runaway `--paginate` does
-// not push the rest of the conversation out of the context window.
 const MAX_OUTPUT_CHARS = 60_000;
 
 type GhRun = { code: number; stdout: string; stderr: string };
 
 type GithubEnv = {
-  /** The session's project directory — what `gh` resolves OWNER/REPO from. */
   cwd: string;
   bin: string;
 };
 
-// Read at REGISTRATION, not import. The runtime loads this module once per
-// process but registers it per session, and the project directory changes
-// between sessions; a module-scope constant would pin the first session's repo
-// onto every later one and answer questions about the wrong project.
 function readEnv(): GithubEnv {
   return {
     cwd: process.env.LOCAL_STUDIO_CWD || process.cwd(),
@@ -71,8 +51,6 @@ function runGh(
         maxBuffer: 32 * 1024 * 1024,
         env: {
           ...process.env,
-          // gh pipes into a pager and colourizes when it thinks it has a TTY;
-          // both corrupt the text a model reads.
           GH_PAGER: "cat",
           PAGER: "cat",
           NO_COLOR: "1",
@@ -81,12 +59,8 @@ function runGh(
         },
       },
       (error, stdout, stderr) => {
-        const code =
-          error && typeof (error as { code?: unknown }).code === "number"
-            ? ((error as { code: number }).code ?? 1)
-            : error
-              ? 1
-              : 0;
+        const processError = Schema.decodeUnknownOption(ProcessErrorSchema)(error);
+        const code = processError._tag === "Some" ? processError.value.code : error ? 1 : 0;
         resolve({
           code,
           stdout: String(stdout ?? ""),
@@ -102,14 +76,13 @@ function truncate(text: string): string {
   return `${text.slice(0, MAX_OUTPUT_CHARS)}\n\n[truncated at ${MAX_OUTPUT_CHARS} characters — narrow the query, lower the limit, or ask for specific fields]`;
 }
 
-/** One result shape for every tool: the output, plus what actually ran. */
 function present(args: string[], run: GhRun): ToolResult {
   const command = `gh ${args.join(" ")}`;
   const body = run.stdout.trim() || run.stderr.trim() || "(no output)";
   const text = run.code === 0 ? body : `${command} exited ${run.code}\n\n${body}`;
   return {
     content: [{ type: "text", text: truncate(text) }],
-    details: { command, exitCode: run.code, ...(run.code === 0 ? {} : { failed: true }) },
+    details: { command, exitCode: run.code, failed: run.code === 0 ? undefined : true },
   };
 }
 
@@ -119,8 +92,6 @@ function refuse(reason: string): ToolResult {
     details: { refused: true, failed: true },
   };
 }
-
-// ─── shared parameters ────────────────────────────────────────────────────
 
 const repoParam = Type.Optional(
   Type.String({
@@ -142,8 +113,6 @@ function limitArgs(limit: number | undefined): string[] {
 const REPO_DEFAULT =
   "With no `repo`, this resolves the repository from the session's project directory, exactly as running gh in that directory would.";
 
-// ─── tool table ───────────────────────────────────────────────────────────
-
 type ToolSpec<S extends TSchema> = {
   name: string;
   label: string;
@@ -153,17 +122,32 @@ type ToolSpec<S extends TSchema> = {
   timeoutMs?: number;
 };
 
-function define<S extends TSchema>(spec: ToolSpec<S>): ToolSpec<S> {
-  return spec;
+type RegistrableTool = { register: (pi: ExtensionAPI, env: GithubEnv) => void };
+
+function define<S extends TSchema>(spec: ToolSpec<S>): RegistrableTool {
+  return {
+    register(pi, env) {
+      pi.registerTool({
+        name: spec.name,
+        label: spec.label,
+        description: spec.description,
+        parameters: spec.parameters,
+        async execute(_id, params, signal) {
+          const args = spec.argv(JSON.parse(JSON.stringify(params)));
+          return present(args, await runGh(env, args, signal, spec.timeoutMs));
+        },
+      });
+    },
+  };
 }
 
-const SEARCH_FIELDS: Record<string, string> = {
-  issues: "number,title,state,repository,labels,author,updatedAt,url",
-  prs: "number,title,state,isDraft,repository,labels,author,updatedAt,url",
-  repos: "fullName,description,language,stargazersCount,updatedAt,url",
-  code: "path,repository,url",
-  commits: "sha,commit,repository,url",
-};
+const SEARCH_FIELDS = new Map([
+  ["issues", "number,title,state,repository,labels,author,updatedAt,url"],
+  ["prs", "number,title,state,isDraft,repository,labels,author,updatedAt,url"],
+  ["repos", "fullName,description,language,stargazersCount,updatedAt,url"],
+  ["code", "path,repository,url"],
+  ["commits", "sha,commit,repository,url"],
+]);
 
 const TOOLS = [
   define({
@@ -194,7 +178,7 @@ const TOOLS = [
       ...(p.owner ? ["--owner", p.owner] : []),
       ...limitArgs(p.limit),
       "--json",
-      SEARCH_FIELDS[p.kind] ?? "url",
+      SEARCH_FIELDS.get(p.kind) ?? "url",
     ],
   }),
   define({
@@ -406,9 +390,6 @@ const TOOLS = [
   }),
 ];
 
-// `gh` subcommands that hand out or replace credentials, or install and run
-// third-party code. Nothing a task legitimately needs is behind these, and the
-// blast radius of getting one wrong is the user's account.
 const BLOCKED_COMMANDS = new Set([
   "auth",
   "secret",
@@ -420,7 +401,39 @@ const BLOCKED_COMMANDS = new Set([
   "ssh-key",
 ]);
 
-function blockedReason(args: string[]): string | null {
+const API_VALUE_FLAGS = new Set([
+  "--cache",
+  "--field",
+  "-F",
+  "--header",
+  "-H",
+  "--hostname",
+  "--input",
+  "--raw-field",
+  "-f",
+]);
+
+function apiMethod(args: string[]): string | undefined {
+  if (args[0]?.toLowerCase() !== "api") return undefined;
+  let method = "GET";
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") break;
+    if (arg === "--method" || arg === "-X") {
+      method = args[index + 1]?.replace(/^=/, "") ?? method;
+      index += 1;
+    } else if (arg.startsWith("--method=")) {
+      method = arg.slice("--method=".length);
+    } else if (arg.startsWith("-X") && arg.length > 2) {
+      method = arg.slice(2).replace(/^=/, "");
+    } else if (API_VALUE_FLAGS.has(arg)) {
+      index += 1;
+    }
+  }
+  return method;
+}
+
+export function blockedReason(args: string[]): string | null {
   const command = args[0] ?? "";
   if (!command) return 'github_cli needs at least one argument, e.g. ["pr", "create", "--fill"].';
   if (command.startsWith("-")) {
@@ -429,7 +442,10 @@ function blockedReason(args: string[]): string | null {
   if (BLOCKED_COMMANDS.has(command)) {
     return `github_cli refuses \`gh ${command}\`: it reads or replaces credentials, or installs code. Use github_status to check the signed-in account; run anything else in this family yourself.`;
   }
-  if (args.includes("delete")) {
+  if (
+    args.some((arg) => arg.toLowerCase() === "delete") ||
+    apiMethod(args)?.toUpperCase() === "DELETE"
+  ) {
     return "github_cli refuses `delete` subcommands — they are irreversible. Ask the user to run it themselves if that is really what they want.";
   }
   return null;
@@ -468,24 +484,13 @@ export default async function registerGithubExtension(pi: ExtensionAPI) {
           command: "gh auth status",
           exitCode: auth.code,
           cwd: env.cwd,
-          ...(auth.code === 0 ? {} : { failed: true }),
+          failed: auth.code === 0 ? undefined : true,
         },
       };
     },
   });
 
-  for (const tool of TOOLS) {
-    pi.registerTool({
-      name: tool.name,
-      label: tool.label,
-      description: tool.description,
-      parameters: tool.parameters,
-      async execute(_id, params, signal) {
-        const args = tool.argv(params as never);
-        return present(args, await runGh(env, args, signal, tool.timeoutMs));
-      },
-    });
-  }
+  for (const tool of TOOLS) tool.register(pi, env);
 
   pi.registerTool({
     name: "github_cli",

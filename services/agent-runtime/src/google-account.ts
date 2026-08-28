@@ -1,10 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Effect, Schema, Semaphore } from "effect";
 import { connectMcp, type McpConnection } from "./mcp-client";
-import { listConnectors, upsertConnectors } from "./connectors-service";
+import { listConnectors, upsertConnectors, writePrivateJson } from "./connectors-service";
 import { resolveDataDir } from "./data-dir";
 import { createGoogleRestConnection } from "./google-rest-adapter";
 import {
@@ -23,6 +23,13 @@ import type { GoogleAccountView, GoogleConnectionView } from "./google-account-c
 
 export type { GoogleAccountView, GoogleConnectionView } from "./google-account-contract";
 
+type Service = GoogleWorkspacePluginId;
+type Transport = GoogleWorkspaceTransport;
+type Identity = GoogleWorkspaceIdentity;
+type Dependencies = GoogleOAuthDependencies;
+
+const OptionalString = Schema.optional(Schema.String);
+
 const TransportSchema = Schema.Union([Schema.Literal("rest"), Schema.Literal("remote-mcp")]);
 
 const ConnectionSchema = Schema.Struct({
@@ -30,7 +37,7 @@ const ConnectionSchema = Schema.Struct({
   endpoint: Schema.String,
   transport: TransportSchema,
   connectedAt: Schema.String,
-  revision: Schema.optional(Schema.String),
+  revision: OptionalString,
 });
 
 const ConnectionsSchema = Schema.Struct({
@@ -50,7 +57,6 @@ const MetadataSchema = Schema.Struct({
   accounts: Schema.Record(Schema.String, AccountRecordSchema),
 });
 
-/** Single-account layout written before accounts were keyed by mailbox. */
 const LegacyConnectionSchema = Schema.Struct({
   email: Schema.String,
   scopes: Schema.Array(Schema.String),
@@ -70,19 +76,19 @@ const LegacyMetadataSchema = Schema.Struct({
 const StoredMetadataSchema = Schema.Union([MetadataSchema, LegacyMetadataSchema]);
 
 const AccountTokensSchema = Schema.Struct({
-  gmail: Schema.optional(Schema.String),
-  "google-calendar": Schema.optional(Schema.String),
+  gmail: OptionalString,
+  "google-calendar": OptionalString,
 });
 
 const SecretsSchema = Schema.Struct({
   version: Schema.Literal(2),
-  clientSecret: Schema.optional(Schema.String),
+  clientSecret: OptionalString,
   refreshTokens: Schema.Record(Schema.String, AccountTokensSchema),
   pendingRevocations: Schema.optional(Schema.Array(Schema.String)),
 });
 
 const LegacySecretsSchema = Schema.Struct({
-  clientSecret: Schema.optional(Schema.String),
+  clientSecret: OptionalString,
   refreshTokens: AccountTokensSchema,
   pendingRevocations: Schema.optional(Schema.Array(Schema.String)),
 });
@@ -103,8 +109,8 @@ const PendingSchema = Schema.Struct({
 const TokenResponseSchema = Schema.Struct({
   access_token: Schema.String,
   expires_in: Schema.optional(Schema.Number),
-  refresh_token: Schema.optional(Schema.String),
-  scope: Schema.optional(Schema.String),
+  refresh_token: OptionalString,
+  scope: OptionalString,
 });
 
 const UserInfoSchema = Schema.Struct({ email: Schema.String });
@@ -139,7 +145,7 @@ export class GoogleAccountError extends Error {
   }
 }
 
-const defaultDependencies: GoogleOAuthDependencies = {
+const defaultDependencies: Dependencies = {
   fetch,
   now: Date.now,
   random: randomBytes,
@@ -148,31 +154,23 @@ const defaultDependencies: GoogleOAuthDependencies = {
 
 const secretsKey = "google-workspace";
 const accessTokens = new Map<string, { value: string; expiresAt: number }>();
-const authorizationFlows = new Map<
-  GoogleWorkspacePluginId,
-  { id: string; controller: AbortController }
->();
+const authorizationFlows = new Map<Service, { id: string; controller: AbortController }>();
 const accountMutation = Semaphore.makeUnsafe(1);
 const authorizationLifecycle = Semaphore.makeUnsafe(1);
 
-/**
- * Accounts are keyed by a digest of the verified mailbox, not by the address:
- * the key ends up in connector ids and permission grants, where a raw email
- * would both break the id charset and leak the mailbox into tool names.
- */
 export function googleAccountKey(email: string): string {
   return createHash("sha256").update(email.trim().toLowerCase()).digest("hex").slice(0, 10);
 }
 
-function activeGoogleWorkspaceTransport(): GoogleWorkspaceTransport {
+function activeTransport(): Transport {
   return googleWorkspaceTransport(process.env[GOOGLE_MCP_PREVIEW_ENV]);
 }
 
-function tokenCacheKey(identity: GoogleWorkspaceIdentity): string {
+function tokenCacheKey(identity: Identity): string {
   return `${identity.accountKey}:${identity.service}`;
 }
 
-export function createGoogleAuthorizationFlow(service: GoogleWorkspacePluginId): string {
+export function createGoogleAuthorizationFlow(service: Service): string {
   authorizationFlows.get(service)?.controller.abort();
   const flowId = randomUUID();
   authorizationFlows.set(service, { id: flowId, controller: new AbortController() });
@@ -183,14 +181,11 @@ function invalidateGoogleWorkspaceAuthorizations(): void {
   GOOGLE_WORKSPACE_PLUGIN_IDS.forEach(createGoogleAuthorizationFlow);
 }
 
-function ownsGoogleAuthorizationFlow(service: GoogleWorkspacePluginId, flowId: string): boolean {
+function ownsGoogleAuthorizationFlow(service: Service, flowId: string): boolean {
   return authorizationFlows.get(service)?.id === flowId;
 }
 
-function googleAuthorizationFlowSignal(
-  service: GoogleWorkspacePluginId,
-  flowId: string,
-): AbortSignal {
+function googleAuthorizationFlowSignal(service: Service, flowId: string): AbortSignal {
   const flow = authorizationFlows.get(service);
   if (flow?.id !== flowId) throw authorizationFlowError();
   return flow.controller.signal;
@@ -201,7 +196,7 @@ function authorizationFlowError(): GoogleAccountError {
 }
 
 function requireGoogleAuthorizationFlow(
-  service: GoogleWorkspacePluginId,
+  service: Service,
   flowId: string,
 ): Effect.Effect<void, GoogleAccountError> {
   return ownsGoogleAuthorizationFlow(service, flowId)
@@ -213,16 +208,10 @@ export function resolveGoogleAccountFilePath(): string {
   return path.join(resolveDataDir(), "google-account.json");
 }
 
-function pendingKey(service: GoogleWorkspacePluginId): string {
+function pendingKey(service: Service): string {
   return `google-workspace-pending:${service}`;
 }
 
-/**
- * Reads either storage layout and always hands back the keyed one. The legacy
- * record carried one mailbox per service, so its account key is recoverable
- * from the stored email; nothing needs a migration pass on disk because the
- * next write emits the current layout.
- */
 function normalizeMetadata(stored: typeof StoredMetadataSchema.Type): Metadata {
   if ("accounts" in stored) return stored;
   const accounts: Record<string, AccountRecord> = {};
@@ -261,34 +250,22 @@ function normalizeSecrets(
   for (const service of GOOGLE_WORKSPACE_PLUGIN_IDS) {
     const token = stored.refreshTokens[service];
     if (!token) continue;
-    // A legacy token names a service, not a mailbox. The only place the mailbox
-    // survives is the metadata connection for that same service; without it the
-    // token cannot be attributed to an account and is dropped rather than being
-    // handed to the wrong one.
     const key = Object.keys(metadata?.accounts ?? {}).find(
       (candidate) => metadata?.accounts[candidate]?.connections[service],
     );
     if (!key) continue;
     refreshTokens[key] = { ...refreshTokens[key], [service]: token };
   }
-  return {
-    version: 2,
-    ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
-    refreshTokens,
-    pendingRevocations: [...(stored.pendingRevocations ?? [])],
-  };
+  return withClientSecret(
+    {
+      version: 2,
+      refreshTokens,
+      pendingRevocations: [...(stored.pendingRevocations ?? [])],
+    },
+    stored.clientSecret,
+  );
 }
 
-/**
- * A public OAuth client id shipped with the build or set by the deployment.
- *
- * Desktop-app clients are public by design (PKCE carries the proof, not a
- * secret), so an id provided here spares the user the whole Google Cloud
- * console detour: with it set, the account is "configured" out of the box and
- * Connect goes straight to the consent screen. A client the user saves in the
- * UI still wins — it is stored metadata, and this fallback only fills the
- * never-configured case.
- */
 function envGoogleClientId(): string | null {
   const value = process.env.LOCAL_STUDIO_GOOGLE_CLIENT_ID?.trim();
   return value || null;
@@ -298,9 +275,7 @@ async function readMetadata(): Promise<Metadata | null> {
   const file = resolveGoogleAccountFilePath();
   if (!existsSync(file)) {
     const clientId = envGoogleClientId();
-    return clientId
-      ? { version: 2, clientId, hasClientSecret: false, accounts: {} }
-      : null;
+    return clientId ? { version: 2, clientId, hasClientSecret: false, accounts: {} } : null;
   }
   try {
     return normalizeMetadata(
@@ -311,13 +286,8 @@ async function readMetadata(): Promise<Metadata | null> {
   }
 }
 
-async function writeMetadata(metadata: Metadata): Promise<void> {
-  const file = resolveGoogleAccountFilePath();
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(temporary, JSON.stringify(metadata, null, 2), { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, file);
-  await chmod(file, 0o600);
+function writeMetadata(metadata: Metadata): Promise<void> {
+  return writePrivateJson(resolveGoogleAccountFilePath(), metadata);
 }
 
 function metadataEffect(): Effect.Effect<Metadata | null, GoogleAccountError> {
@@ -344,24 +314,24 @@ function vaultError(): GoogleAccountError {
 function readVaultJson<A>(
   vault: OAuthVault,
   key: string,
-  decode: (input: unknown) => A,
+  schema: Schema.Codec<A, unknown, never>,
 ): Effect.Effect<A | null, GoogleAccountError> {
   return vault.read(key).pipe(
     Effect.mapError(vaultError),
     Effect.flatMap((raw) => {
       if (!raw) return Effect.succeed(null);
       return Effect.try({
-        try: () => decode(JSON.parse(raw)),
+        try: () => Schema.decodeUnknownSync(schema)(JSON.parse(raw)),
         catch: () => new GoogleAccountError(500, "Secure OAuth record is invalid"),
       });
     }),
   );
 }
 
-function writeVaultJson(
+function writeVaultJson<A>(
   vault: OAuthVault,
   key: string,
-  value: unknown,
+  value: A,
 ): Effect.Effect<void, GoogleAccountError> {
   return vault.write(key, JSON.stringify(value)).pipe(Effect.mapError(vaultError));
 }
@@ -374,11 +344,15 @@ function emptySecrets(): Secrets {
   return { version: 2, refreshTokens: {}, pendingRevocations: [] };
 }
 
+function withClientSecret(secrets: Secrets, clientSecret: string | undefined): Secrets {
+  return clientSecret ? { ...secrets, clientSecret } : secrets;
+}
+
 function secretsEffect(
   vault: OAuthVault,
   metadata: Metadata | null,
 ): Effect.Effect<Secrets, GoogleAccountError> {
-  return readVaultJson(vault, secretsKey, Schema.decodeUnknownSync(StoredSecretsSchema)).pipe(
+  return readVaultJson(vault, secretsKey, StoredSecretsSchema).pipe(
     Effect.map((stored) => (stored ? normalizeSecrets(stored, metadata) : emptySecrets())),
   );
 }
@@ -407,7 +381,7 @@ function accountView(metadata: Metadata | null): GoogleAccountView {
     configured: Boolean(metadata?.clientId),
     clientId: metadata?.clientId ?? null,
     hasClientSecret: metadata?.hasClientSecret ?? false,
-    transport: activeGoogleWorkspaceTransport(),
+    transport: activeTransport(),
     accounts,
   };
 }
@@ -416,7 +390,6 @@ export function getGoogleAccount(): Effect.Effect<GoogleAccountView, GoogleAccou
   return metadataEffect().pipe(Effect.map(accountView));
 }
 
-/** Every refresh token this client has ever stored, deduplicated. */
 function storedRefreshTokens(secrets: Secrets): string[] {
   const tokens = Object.values(secrets.refreshTokens).flatMap((entry) =>
     GOOGLE_WORKSPACE_PLUGIN_IDS.flatMap((service) => {
@@ -430,7 +403,7 @@ function storedRefreshTokens(secrets: Secrets): string[] {
 export function saveGoogleClient(
   input: { clientId: string; clientSecret?: string },
   vault: OAuthVault = desktopOAuthVault,
-  dependencies: GoogleOAuthDependencies = defaultDependencies,
+  dependencies: Dependencies = defaultDependencies,
 ): Effect.Effect<GoogleAccountView, GoogleAccountError> {
   return authorizationLifecycle.withPermit(
     accountMutation.withPermit(
@@ -444,9 +417,6 @@ export function saveGoogleClient(
         const currentSecrets = yield* secretsEffect(vault, current);
         const sameClient = current?.clientId === clientId;
         if (!sameClient) {
-          // Every account was granted to the outgoing client, so every grant has
-          // to be handed back — revoking only the first one (the previous
-          // behaviour) orphaned the rest at Google with no way to reach them.
           yield* Effect.forEach(storedRefreshTokens(currentSecrets), (token) =>
             promiseEffect(() => revokeGoogleGrant(token, dependencies)),
           );
@@ -472,7 +442,6 @@ export function saveGoogleClient(
           accounts: sameClient ? (current?.accounts ?? {}) : {},
         };
         if (!sameClient) {
-          invalidateGoogleWorkspaceAuthorizations();
           yield* Effect.forEach(GOOGLE_WORKSPACE_PLUGIN_IDS, (id) =>
             removeVaultValue(vault, pendingKey(id)),
           );
@@ -480,7 +449,6 @@ export function saveGoogleClient(
         yield* writeVaultJson(vault, secretsKey, secrets);
         yield* writeMetadataEffect(metadata);
         accessTokens.clear();
-        if (!sameClient) yield* disableGoogleWorkspaceConnectors();
         return accountView(metadata);
       }),
     ),
@@ -499,25 +467,16 @@ function codeChallenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
-/**
- * RFC 8707 audience binding, and only on the MCP preview path. A token minted
- * for `gmailmcp.googleapis.com` is not accepted by `gmail.googleapis.com`, so
- * sending `resource` while the REST adapter is the transport would produce a
- * token that authenticates and then fails on every call.
- */
-function audienceParameters(
-  service: GoogleWorkspacePluginId,
-  transport: GoogleWorkspaceTransport,
-): Record<string, string> {
+function audienceParameters(service: Service, transport: Transport): Record<string, string> {
   return transport === "remote-mcp"
     ? { resource: GOOGLE_WORKSPACE_BINDINGS[service].mcpResource }
     : {};
 }
 
 export function beginGoogleAuthorization(
-  service: GoogleWorkspacePluginId,
+  service: Service,
   redirectUri: string,
-  dependencies: GoogleOAuthDependencies = defaultDependencies,
+  dependencies: Dependencies = defaultDependencies,
   vault: OAuthVault = desktopOAuthVault,
   requestedFlowId?: string,
 ): Effect.Effect<{ authorizationUrl: string }, GoogleAccountError> {
@@ -535,7 +494,7 @@ export function beginGoogleAuthorization(
           );
         }
         const binding = GOOGLE_WORKSPACE_BINDINGS[service];
-        const transport = activeGoogleWorkspaceTransport();
+        const transport = activeTransport();
         const verifier = dependencies.random(64).toString("base64url");
         const pending: Pending = {
           service,
@@ -562,8 +521,6 @@ export function beginGoogleAuthorization(
           code_challenge: codeChallenge(verifier),
           code_challenge_method: "S256",
           access_type: "offline",
-          // Without `select_account` Google silently reuses whichever session the
-          // browser already has, so a second mailbox can never be added.
           prompt: "select_account consent",
           include_granted_scopes: "true",
           ...audienceParameters(service, transport),
@@ -575,7 +532,7 @@ export function beginGoogleAuthorization(
 }
 
 export function cancelGoogleAuthorization(
-  service: GoogleWorkspacePluginId,
+  service: Service,
   vault: OAuthVault = desktopOAuthVault,
 ): Effect.Effect<void, GoogleAccountError> {
   return Effect.suspend(() => {
@@ -590,10 +547,7 @@ export function cancelGoogleAuthorization(
   });
 }
 
-function googleRequestSignal(
-  dependencies: GoogleOAuthDependencies,
-  cancellation?: AbortSignal,
-): AbortSignal {
+function googleRequestSignal(dependencies: Dependencies, cancellation?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(dependencies.requestTimeoutMs ?? 15_000);
   return cancellation ? AbortSignal.any([timeout, cancellation]) : timeout;
 }
@@ -603,7 +557,7 @@ async function exchangeAuthorizationCode(
   secrets: Secrets,
   pending: Pending,
   code: string,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
   cancellation: AbortSignal,
 ): Promise<TokenResponse> {
   const body = new URLSearchParams({
@@ -613,8 +567,8 @@ async function exchangeAuthorizationCode(
     grant_type: "authorization_code",
     redirect_uri: pending.redirectUri,
     ...audienceParameters(pending.service, pending.transport),
-    ...(secrets.clientSecret ? { client_secret: secrets.clientSecret } : {}),
   });
+  if (secrets.clientSecret) body.set("client_secret", secrets.clientSecret);
   const response = await dependencies.fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -631,7 +585,7 @@ async function exchangeAuthorizationCode(
 
 async function verifiedEmail(
   accessToken: string,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
   cancellation: AbortSignal,
 ): Promise<string> {
   const response = await dependencies.fetch("https://openidconnect.googleapis.com/v1/userinfo", {
@@ -646,10 +600,9 @@ async function verifiedEmail(
   }
 }
 
-/** One tool surface per transport, so callers never branch on which one is live. */
 export function googleWorkspaceConnection(input: {
-  service: GoogleWorkspacePluginId;
-  transport: GoogleWorkspaceTransport;
+  service: Service;
+  transport: Transport;
   authorize: (forceRefresh: boolean) => Promise<Record<string, string>>;
   signal?: AbortSignal;
 }): McpConnection {
@@ -657,20 +610,20 @@ export function googleWorkspaceConnection(input: {
     return createGoogleRestConnection({
       service: input.service,
       authorize: input.authorize,
-      ...(input.signal ? { signal: input.signal } : {}),
+      signal: input.signal,
     });
   }
   return connectMcp({
     transport: "http",
     url: GOOGLE_WORKSPACE_BINDINGS[input.service].mcpEndpoint,
     authorize: input.authorize,
-    ...(input.signal ? { signal: input.signal } : {}),
+    signal: input.signal,
   });
 }
 
 async function verifyGoogleWorkspaceAccess(
-  service: GoogleWorkspacePluginId,
-  transport: GoogleWorkspaceTransport,
+  service: Service,
+  transport: Transport,
   accessToken: string,
   signal: AbortSignal,
 ): Promise<void> {
@@ -689,7 +642,7 @@ async function verifyGoogleWorkspaceAccess(
       throw new GoogleAccountError(502, "Google read-only tool contract could not be verified");
     }
     const result = await connection.callTool(binding.verifyTool, {});
-    if (result !== null && typeof result === "object" && Reflect.get(result, "isError") === true) {
+    if ("isError" in result && result.isError === true) {
       throw new GoogleAccountError(502, "Google read-only access could not be verified");
     }
   } finally {
@@ -697,7 +650,7 @@ async function verifyGoogleWorkspaceAccess(
   }
 }
 
-function grantedScopes(service: GoogleWorkspacePluginId, token: TokenResponse): string[] {
+function grantedScopes(service: Service, token: TokenResponse): string[] {
   const scopes = token.scope?.split(/\s+/).filter(Boolean) ?? [];
   const granted = new Set(scopes);
   const missing = GOOGLE_WORKSPACE_BINDINGS[service].scopes.filter((scope) => !granted.has(scope));
@@ -707,14 +660,14 @@ function grantedScopes(service: GoogleWorkspacePluginId, token: TokenResponse): 
   return scopes;
 }
 
-function isGoogleWorkspaceConnector(connectorId: string, identity?: GoogleWorkspaceIdentity) {
+function isGoogleWorkspaceConnector(connectorId: string, identity?: Identity) {
   const parsed = googleWorkspaceConnectorIdentity(connectorId);
   if (!parsed) return false;
   if (!identity) return true;
   return parsed.service === identity.service && parsed.accountKey === identity.accountKey;
 }
 
-function disableGoogleWorkspaceConnectors(identity?: GoogleWorkspaceIdentity): Effect.Effect<void> {
+function disableGoogleWorkspaceConnectors(identity?: Identity): Effect.Effect<void> {
   return Effect.tryPromise({
     try: async () => {
       const connectors = await listConnectors();
@@ -729,10 +682,7 @@ function disableGoogleWorkspaceConnectors(identity?: GoogleWorkspaceIdentity): E
   }).pipe(Effect.catch(() => Effect.void));
 }
 
-async function revokeGoogleGrant(
-  token: string,
-  dependencies: GoogleOAuthDependencies,
-): Promise<void> {
+async function revokeGoogleGrant(token: string, dependencies: Dependencies): Promise<void> {
   const response = await dependencies.fetch("https://oauth2.googleapis.com/revoke", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -740,9 +690,12 @@ async function revokeGoogleGrant(
     signal: googleRequestSignal(dependencies),
   });
   if (response.ok) return;
-  const body: unknown = await response.json().catch(() => null);
-  if (response.status === 400 && body && typeof body === "object") {
-    if (Reflect.get(body, "error") === "invalid_token") return;
+  const RevokeResponseSchema = Schema.Struct({ error: OptionalString });
+  const body = Schema.decodeUnknownOption(RevokeResponseSchema)(
+    await response.json().catch(() => null),
+  );
+  if (response.status === 400 && body._tag === "Some" && body.value.error === "invalid_token") {
+    return;
   }
   throw new GoogleAccountError(502, "Google access could not be revoked");
 }
@@ -785,7 +738,7 @@ function updatePendingRevocation(
 function revokeQueuedGoogleGrant(
   vault: OAuthVault,
   token: string,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
 ): Effect.Effect<void, GoogleAccountError> {
   const revoke = promiseEffect(() => revokeGoogleGrant(token, dependencies));
   return updatePendingRevocation(vault, token, true).pipe(
@@ -806,7 +759,7 @@ function revokeQueuedGoogleGrant(
 
 function retryPendingGoogleRevocations(
   vault: OAuthVault,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
 ): Effect.Effect<void, GoogleAccountError> {
   return Effect.gen(function* () {
     const metadata = yield* metadataEffect();
@@ -820,7 +773,7 @@ function retryPendingGoogleRevocations(
 }
 
 function authorizationRequestEffect<A>(
-  service: GoogleWorkspacePluginId,
+  service: Service,
   flowId: string,
   operation: () => Promise<A>,
 ): Effect.Effect<A, GoogleAccountError> {
@@ -835,7 +788,7 @@ function authorizationRequestEffect<A>(
 
 type AuthorizationCommit = {
   account: GoogleAccountView;
-  identity: GoogleWorkspaceIdentity;
+  identity: Identity;
   committedRefreshToken: string;
   connectionRevision: string;
   flowId: string;
@@ -844,11 +797,14 @@ type AuthorizationCommit = {
   rollbackToken?: string;
 };
 
+type Accounts = Metadata["accounts"];
+type RefreshTokens = Secrets["refreshTokens"];
+
 function withoutConnection(
-  accounts: Record<string, AccountRecord>,
-  identity: GoogleWorkspaceIdentity,
+  accounts: Accounts,
+  identity: Identity,
   restored?: Connection,
-): Record<string, AccountRecord> {
+): Accounts {
   const next = { ...accounts };
   const account = next[identity.accountKey];
   if (!account) return next;
@@ -861,10 +817,10 @@ function withoutConnection(
 }
 
 function withoutToken(
-  refreshTokens: Record<string, AccountTokens>,
-  identity: GoogleWorkspaceIdentity,
+  refreshTokens: RefreshTokens,
+  identity: Identity,
   restored?: string,
-): Record<string, AccountTokens> {
+): RefreshTokens {
   const next = { ...refreshTokens };
   const tokens = { ...next[identity.accountKey] };
   if (restored) tokens[identity.service] = restored;
@@ -909,7 +865,7 @@ function failAfterGoogleGrantRollback(
   error: GoogleAccountError,
   vault: OAuthVault,
   token: string | undefined,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
 ): Effect.Effect<never, GoogleAccountError> {
   return token
     ? revokeQueuedGoogleGrant(vault, token, dependencies).pipe(Effect.andThen(Effect.fail(error)))
@@ -919,7 +875,7 @@ function failAfterGoogleGrantRollback(
 function rollbackGoogleAuthorization(
   vault: OAuthVault,
   commit: AuthorizationCommit,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
 ): Effect.Effect<void, GoogleAccountError> {
   const restore = restoreGoogleAuthorization(vault, commit);
   const token = commit.rollbackToken;
@@ -936,19 +892,23 @@ function rollbackGoogleAuthorization(
     : restore;
 }
 
-function completeGoogleAuthorizationUnlocked(
-  service: GoogleWorkspacePluginId,
+type AuthorizationStart = {
+  pending: Pending;
+  cancellation: AbortSignal;
+  metadata: Metadata;
+  secrets: Secrets;
+  token: TokenResponse;
+};
+
+function prepareGoogleAuthorizationCompletion(
+  service: Service,
   input: { state: string; code: string },
   expectedFlowId: string | undefined,
-  dependencies: GoogleOAuthDependencies,
+  dependencies: Dependencies,
   vault: OAuthVault,
-): Effect.Effect<AuthorizationCommit, GoogleAccountError> {
+): Effect.Effect<AuthorizationStart, GoogleAccountError> {
   return Effect.gen(function* () {
-    const pending = yield* readVaultJson(
-      vault,
-      pendingKey(service),
-      Schema.decodeUnknownSync(PendingSchema),
-    );
+    const pending = yield* readVaultJson(vault, pendingKey(service), PendingSchema);
     if (
       !pending ||
       pending.service !== service ||
@@ -974,9 +934,26 @@ function completeGoogleAuthorizationUnlocked(
     const token = yield* authorizationRequestEffect(service, pending.flowId, () =>
       exchangeAuthorizationCode(metadata, secrets, pending, input.code, dependencies, cancellation),
     );
-    // Before the mailbox is known the grant cannot be attributed, so it is only
-    // safe to hand back when this client holds no grants at all. Once the email
-    // verifies, the account is known and the test narrows to that account.
+    return { pending, cancellation, metadata, secrets, token };
+  });
+}
+
+function completeGoogleAuthorizationUnlocked(
+  service: Service,
+  input: { state: string; code: string },
+  expectedFlowId: string | undefined,
+  dependencies: Dependencies,
+  vault: OAuthVault,
+): Effect.Effect<AuthorizationCommit, GoogleAccountError> {
+  return Effect.gen(function* () {
+    const { pending, cancellation, metadata, secrets, token } =
+      yield* prepareGoogleAuthorizationCompletion(
+        service,
+        input,
+        expectedFlowId,
+        dependencies,
+        vault,
+      );
     let rollbackToken = storedRefreshTokens(secrets).length
       ? undefined
       : (token.refresh_token ?? token.access_token);
@@ -995,7 +972,7 @@ function completeGoogleAuthorizationUnlocked(
     const email = yield* authorizationRequestEffect(service, pending.flowId, () =>
       verifiedEmail(token.access_token, dependencies, cancellation),
     ).pipe(Effect.catch(rollbackFailure));
-    const identity: GoogleWorkspaceIdentity = {
+    const identity: Identity = {
       service,
       accountKey: googleAccountKey(email),
     };
@@ -1027,21 +1004,21 @@ function completeGoogleAuthorizationUnlocked(
       revision: connectionRevision,
     };
     const existing = metadata.accounts[identity.accountKey];
-    const updatedSecrets: Secrets = {
-      version: 2,
-      ...(secrets.clientSecret ? { clientSecret: secrets.clientSecret } : {}),
-      refreshTokens: {
-        ...secrets.refreshTokens,
-        [identity.accountKey]: { ...accountTokens, [service]: refreshToken },
+    const updatedSecrets = withClientSecret(
+      {
+        version: 2,
+        refreshTokens: {
+          ...secrets.refreshTokens,
+          [identity.accountKey]: { ...accountTokens, [service]: refreshToken },
+        },
+        pendingRevocations: pendingRevocations(secrets),
       },
-      pendingRevocations: pendingRevocations(secrets),
-    };
+      secrets.clientSecret,
+    );
     const updatedMetadata: Metadata = {
       ...metadata,
       accounts: {
         ...metadata.accounts,
-        // Re-authorizing a mailbox rotates its tokens in place; it never creates
-        // a second entry for the same address.
         [identity.accountKey]: {
           email,
           connections: { ...existing?.connections, [service]: connection },
@@ -1056,8 +1033,8 @@ function completeGoogleAuthorizationUnlocked(
       flowId: pending.flowId,
       previousMetadata: metadata,
       previousSecrets: secrets,
-      ...(rollbackToken ? { rollbackToken } : {}),
     };
+    if (rollbackToken) commit.rollbackToken = rollbackToken;
     yield* writeVaultJson(vault, secretsKey, updatedSecrets).pipe(
       Effect.andThen(writeMetadataEffect(updatedMetadata)),
       Effect.catch((error: GoogleAccountError) =>
@@ -1080,15 +1057,15 @@ function completeGoogleAuthorizationUnlocked(
 }
 
 export function completeGoogleAuthorizationWithActivation<A>(
-  service: GoogleWorkspacePluginId,
+  service: Service,
   input: { state: string; code: string },
   flowId: string,
-  activation: (signal: AbortSignal, identity: GoogleWorkspaceIdentity) => Effect.Effect<A, Error>,
-  rollback: (identity: GoogleWorkspaceIdentity, activated: A) => Effect.Effect<unknown, Error>,
-  dependencies: GoogleOAuthDependencies = defaultDependencies,
+  activation: (signal: AbortSignal, identity: Identity) => Effect.Effect<A, Error>,
+  rollback: (identity: Identity, activated: A) => Effect.Effect<unknown, Error>,
+  dependencies: Dependencies = defaultDependencies,
   vault: OAuthVault = desktopOAuthVault,
 ): Effect.Effect<
-  { account: GoogleAccountView; identity: GoogleWorkspaceIdentity; activation: A },
+  { account: GoogleAccountView; identity: Identity; activation: A },
   Error | GoogleAccountError
 > {
   return authorizationLifecycle.withPermit(
@@ -1119,9 +1096,9 @@ export function completeGoogleAuthorizationWithActivation<A>(
 }
 
 export function disconnectGoogleAccount(
-  identity: GoogleWorkspaceIdentity,
+  identity: Identity,
   vault: OAuthVault = desktopOAuthVault,
-  dependencies: GoogleOAuthDependencies = defaultDependencies,
+  dependencies: Dependencies = defaultDependencies,
 ): Effect.Effect<GoogleAccountView, GoogleAccountError> {
   return Effect.suspend(() => {
     invalidateGoogleWorkspaceAuthorizations();
@@ -1136,22 +1113,20 @@ export function disconnectGoogleAccount(
           const remaining = GOOGLE_WORKSPACE_PLUGIN_IDS.filter(
             (service) => service !== identity.service && accountTokens[service],
           );
-          // Google revokes the whole grant for a (client, user) pair, so handing
-          // this token back would also cut the mailbox's other service. It is
-          // only revoked once nothing else is still using it; until then the
-          // local copy is simply dropped.
           if (token && remaining.length === 0) {
             yield* promiseEffect(() => revokeGoogleGrant(token, dependencies));
           }
           const updatedMetadata: Metadata | null = metadata
             ? { ...metadata, accounts: withoutConnection(metadata.accounts, identity) }
             : null;
-          const updatedSecrets: Secrets = {
-            version: 2,
-            ...(secrets.clientSecret ? { clientSecret: secrets.clientSecret } : {}),
-            refreshTokens: withoutToken(secrets.refreshTokens, identity),
-            pendingRevocations: pendingRevocations(secrets),
-          };
+          const updatedSecrets = withClientSecret(
+            {
+              version: 2,
+              refreshTokens: withoutToken(secrets.refreshTokens, identity),
+              pendingRevocations: pendingRevocations(secrets),
+            },
+            secrets.clientSecret,
+          );
           return yield* Effect.gen(function* () {
             if (updatedMetadata) yield* writeMetadataEffect(updatedMetadata);
             yield* removeVaultValue(vault, pendingKey(identity.service));
@@ -1172,11 +1147,11 @@ export function disconnectGoogleAccount(
 }
 
 async function refreshAccessToken(
-  identity: GoogleWorkspaceIdentity,
+  identity: Identity,
   metadata: Metadata,
   secrets: Secrets,
-  transport: GoogleWorkspaceTransport,
-  dependencies: GoogleOAuthDependencies,
+  transport: Transport,
+  dependencies: Dependencies,
 ): Promise<TokenResponse> {
   const refreshToken = secrets.refreshTokens[identity.accountKey]?.[identity.service];
   if (!refreshToken) throw new GoogleAccountError(401, "Google account is not connected");
@@ -1185,8 +1160,8 @@ async function refreshAccessToken(
     refresh_token: refreshToken,
     grant_type: "refresh_token",
     ...audienceParameters(identity.service, transport),
-    ...(secrets.clientSecret ? { client_secret: secrets.clientSecret } : {}),
   });
+  if (secrets.clientSecret) body.set("client_secret", secrets.clientSecret);
   const response = await dependencies.fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -1202,9 +1177,9 @@ async function refreshAccessToken(
 }
 
 export function googleAuthorizationHeaders(
-  identity: GoogleWorkspaceIdentity,
+  identity: Identity,
   forceRefresh = false,
-  dependencies: GoogleOAuthDependencies = defaultDependencies,
+  dependencies: Dependencies = defaultDependencies,
   vault: OAuthVault = desktopOAuthVault,
 ): Effect.Effect<Record<string, string>, GoogleAccountError> {
   return accountMutation.withPermit(

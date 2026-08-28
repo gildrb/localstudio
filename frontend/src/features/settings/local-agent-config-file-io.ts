@@ -1,20 +1,23 @@
-/**
- * Generic read/write primitives for the JSON/YAML config files local coding
- * agents keep on disk — shared by the per-agent detection and merge logic in
- * this feature, with no knowledge of any specific agent's schema.
- */
 import { chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import YAML from "yaml";
-import { isRecord } from "@/lib/guards";
+import { Schema } from "effect";
+import {
+  JsonRecordSchema,
+  type Json as JsonValue,
+  type RecordJson as JsonRecord,
+} from "@/lib/json";
 
-export type JsonRecord = Record<string, unknown>;
+export { JsonRecordSchema };
+export type { JsonValue, JsonRecord };
+const decodeJsonRecord = Schema.decodeUnknownOption(JsonRecordSchema);
+const isString = Schema.is(Schema.String);
 
 const normalizeBaseUrl = (url: string): string => url.trim().replace(/\/+$/, "");
 
-export const sameBaseUrl = (a: unknown, b: string): boolean =>
-  typeof a === "string" && normalizeBaseUrl(a) === normalizeBaseUrl(b);
+export const sameBaseUrl = (a: JsonValue, b: string): boolean =>
+  isString(a) && normalizeBaseUrl(a) === normalizeBaseUrl(b);
 
 export async function pathExists(target: string): Promise<boolean> {
   try {
@@ -36,10 +39,11 @@ export async function readJsonFile(
   }
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) {
+    const config = decodeJsonRecord(parsed);
+    if (config._tag === "None") {
       return { exists: true, error: `${file} does not contain a JSON object` };
     }
-    return { exists: true, config: parsed };
+    return { exists: true, config: { ...config.value } };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { exists: true, error: `${file} is not valid JSON (${message}); refusing to modify it` };
@@ -84,17 +88,21 @@ export async function backupExistingFile(file: string): Promise<string> {
   return backupPath;
 }
 
+async function writeTextAtomic(file: string, mode: number, serialize: () => string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
+  await writeFile(tmp, serialize(), { encoding: "utf-8", mode });
+  // writeFile's mode is subject to the process umask; chmod makes it exact.
+  await chmod(tmp, mode);
+  await rename(tmp, file);
+}
+
 export async function writeJsonAtomic(
   file: string,
   config: JsonRecord,
   mode: number,
 ): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
-  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf-8", mode });
-  // writeFile's mode is subject to the process umask; chmod makes it exact.
-  await chmod(tmp, mode);
-  await rename(tmp, file);
+  await writeTextAtomic(file, mode, () => `${JSON.stringify(config, null, 2)}\n`);
 }
 
 export async function writeYamlAtomic(
@@ -102,12 +110,7 @@ export async function writeYamlAtomic(
   config: JsonRecord,
   mode: number,
 ): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
-  const yamlText = YAML.stringify(config, { indent: 2, lineWidth: 0 });
-  await writeFile(tmp, yamlText, { encoding: "utf-8", mode });
-  await chmod(tmp, mode);
-  await rename(tmp, file);
+  await writeTextAtomic(file, mode, () => YAML.stringify(config, { indent: 2, lineWidth: 0 }));
 }
 
 export async function existingFileMode(file: string): Promise<number | null> {

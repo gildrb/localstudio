@@ -1,6 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { isRecord } from "@/lib/guards";
+import { Schema } from "effect";
+import {
+  assertWorkspaceRoot,
+  resolveContainedFilePath,
+  withRegularFile,
+} from "@/features/agent/fs-store";
 
 export type Comment = {
   id: string;
@@ -15,31 +21,73 @@ type CommentsDocument = {
   files: Record<string, Comment[]>;
 };
 
-function commentsPath(rootCwd: string): string {
-  return path.join(rootCwd, ".local-studio", "comments.json");
+const CommentSchema = Schema.Struct({
+  id: Schema.String,
+  line: Schema.Number,
+  body: Schema.String,
+  createdAt: Schema.String,
+});
+const CommentsDocumentSchema = Schema.Struct({
+  files: Schema.Record(Schema.String, Schema.Array(CommentSchema)),
+});
+const decodeCommentsDocument = Schema.decodeUnknownSync(CommentsDocumentSchema);
+
+function commentsPath(rootCwd: string, allowMissing = false): string {
+  const root = assertWorkspaceRoot(rootCwd);
+  return resolveContainedFilePath(
+    root,
+    path.join(root, ".local-studio", "comments.json"),
+    allowMissing,
+  );
 }
 
 async function readDocument(rootCwd: string): Promise<CommentsDocument> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(commentsPath(rootCwd), "utf-8"));
-    if (!isRecord(parsed) || !isRecord(parsed.files)) return { files: {} };
-    return { files: parsed.files as CommentsDocument["files"] };
+    const raw = await withRegularFile(commentsPath(rootCwd), constants.O_RDONLY, ({ file }) =>
+      file.readFile("utf-8"),
+    );
+    const parsed: unknown = JSON.parse(raw);
+    const document = decodeCommentsDocument(parsed);
+    return {
+      files: Object.fromEntries(
+        Object.entries(document.files).map(([file, comments]) => [
+          file,
+          comments.map((comment) => ({ ...comment })),
+        ]),
+      ),
+    };
   } catch {
     return { files: {} };
   }
 }
 
 async function writeDocument(rootCwd: string, document: CommentsDocument): Promise<void> {
-  const filePath = commentsPath(rootCwd);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(document, null, 2)}\n`, "utf-8");
+  const pendingPath = commentsPath(rootCwd, true);
+  await mkdir(path.dirname(pendingPath), { recursive: true });
+  const filePath = commentsPath(rootCwd, true);
+  await withRegularFile(
+    filePath,
+    constants.O_WRONLY | constants.O_CREAT,
+    async ({ file }) => {
+      await file.truncate(0);
+      await file.writeFile(`${JSON.stringify(document, null, 2)}\n`, "utf-8");
+    },
+    0o600,
+  );
 }
 
 function ensureRel(rel: string): string {
-  if (!rel || rel.includes("..") || path.isAbsolute(rel)) {
+  const normalized = path.normalize(rel);
+  if (
+    !rel ||
+    rel.includes("\0") ||
+    path.isAbsolute(rel) ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  ) {
     throw new Error("Invalid file path");
   }
-  return rel;
+  return normalized;
 }
 
 export async function listComments(rootCwd: string, rel: string): Promise<Comment[]> {

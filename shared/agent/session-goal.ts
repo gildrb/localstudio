@@ -26,31 +26,3 @@ export const SessionGoalSchema = Schema.Struct({
 });
 
 export type SessionGoal = Schema.Schema.Type<typeof SessionGoalSchema>;
-
-export const SessionGoalResponseSchema = Schema.Struct({
-  goal: Schema.NullOr(SessionGoalSchema),
-});
-
-export type SessionGoalPatch = {
-  objective?: string;
-  status?: GoalStatus;
-  turnBudget?: number | null;
-  /** Start the pursuit over: turns, banked time and `createdAt` all reset.
-   *  Every path that sets a NEW objective must send this, or the card keeps
-   *  reporting the previous objective's turn count and age. */
-  resetTurns?: boolean;
-};
-
-/** Statuses the goal can no longer leave on its own. The UI has to offer a way
- *  out of each of them or the goal is stuck until it is deleted. */
-export function goalIsTerminal(status: GoalStatus): boolean {
-  return status === "complete" || status === "blocked" || status === "budget_limited";
-}
-
-/** Seconds of pursuit to show right now: banked time plus the open run.
- *  `now` is a parameter so the caller's ticker owns the clock. */
-export function goalElapsedSeconds(goal: SessionGoal, now: number): number {
-  const openRunStart = goal.activeRunStartedAt ? Date.parse(goal.activeRunStartedAt) : NaN;
-  const openRunSeconds = Number.isFinite(openRunStart) ? Math.max(0, (now - openRunStart) / 1000) : 0;
-  return Math.max(0, goal.timeUsedSeconds) + openRunSeconds;
-}

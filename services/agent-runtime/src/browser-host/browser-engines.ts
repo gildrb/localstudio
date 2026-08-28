@@ -1,26 +1,7 @@
-// Which Chromium-family binary the embedded browser drives.
-//
-// Two dials, in priority order:
-//
-//   1. LOCAL_STUDIO_CHROME_PATH — an explicit binary path, absolute authority.
-//      If it is set but missing we fail loudly instead of falling back: an
-//      override that silently drives a different browser than the one named is
-//      worse than an error the user can read.
-//   2. The persisted engine preference (<dataDir>/browser-engine.json), seeded
-//      from LOCAL_STUDIO_BROWSER_ENGINE when nothing has been chosen yet. This
-//      is the dial a GUI user can actually reach — a packaged desktop app
-//      inherits no shell env, so env-only configuration is unreachable there.
-//
-// "auto" (the default) prefers Playwright's bundled Chromium, the only engine
-// guaranteed to match playwright-core's protocol expectations, then falls back
-// to installed browsers in a fixed order. Auto-detection deliberately does NOT
-// promote Brave over Chrome — changing which browser an existing install drives
-// would be a surprise. Brave is reachable by *choosing* it; that is what the
-// preference is for.
-
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { Option, Schema } from "effect";
 import { chromium } from "playwright-core";
 import { resolveDataDir } from "../data-dir";
 
@@ -34,7 +15,6 @@ export type BrowserEngineId =
   | "arc"
   | "vivaldi";
 
-/** Selectable engines in menu order; "auto" and "bundled" are always offered. */
 export const BROWSER_ENGINE_IDS: readonly BrowserEngineId[] = [
   "auto",
   "bundled",
@@ -49,16 +29,13 @@ export const BROWSER_ENGINE_IDS: readonly BrowserEngineId[] = [
 export type BrowserEngineInfo = {
   id: BrowserEngineId;
   label: string;
-  /** Resolved binary, or null when this engine is not installed here. */
   path: string | null;
 };
 
 export type ResolvedBrowserEngine = {
-  /** "custom" when an explicit binary path is in force — not a settable id. */
   id: BrowserEngineId | "custom";
   label: string;
   path: string;
-  /** Which dial won, so the UI can explain what is actually running. */
   source: "override" | "preference" | "bundled" | "detected";
 };
 
@@ -81,109 +58,68 @@ const resolveOnPath = (binary: string): string | null => {
   }
 };
 
-const fromPaths =
-  (paths: string[]) =>
-  (): string | null =>
-    paths.find((candidate) => existsSync(candidate)) ?? null;
+const specs = (
+  entries: Array<[BrowserEngineId, string, string[]]>,
+  locate: (names: string[]) => string | null,
+): EngineSpec[] =>
+  entries.map(([id, label, names]) => ({ id, label, locate: () => locate(names) }));
 
-const fromCommands =
-  (names: string[]) =>
-  (): string | null =>
-    names.map(resolveOnPath).find((value): value is string => Boolean(value)) ?? null;
-
-const macApp = (app: string, binary = app): string =>
-  `/Applications/${app}.app/Contents/MacOS/${binary}`;
-
-function windowsPaths(suffixes: string[]): string[] {
-  const roots = [
-    process.env["PROGRAMFILES"],
-    process.env["PROGRAMFILES(X86)"],
-    process.env["LOCALAPPDATA"],
-  ].filter((value): value is string => Boolean(value));
-  return roots.flatMap((root) => suffixes.map((suffix) => path.join(root, suffix)));
-}
-
-// Ordered per platform. Flattening this table in order reproduces the legacy
-// candidate list exactly, so "auto" behaves on existing installs as it always
-// has.
 function engineSpecs(): EngineSpec[] {
   if (process.platform === "darwin") {
-    return [
-      {
-        id: "chrome",
-        label: "Google Chrome",
-        locate: fromPaths([
-          macApp("Google Chrome"),
-          macApp("Google Chrome Beta"),
-          macApp("Google Chrome Canary"),
-        ]),
-      },
-      { id: "chromium", label: "Chromium", locate: fromPaths([macApp("Chromium")]) },
-      {
-        id: "brave",
-        label: "Brave",
-        locate: fromPaths([
-          macApp("Brave Browser"),
-          macApp("Brave Browser Beta"),
-          macApp("Brave Browser Nightly"),
-        ]),
-      },
-      { id: "edge", label: "Microsoft Edge", locate: fromPaths([macApp("Microsoft Edge")]) },
-      { id: "arc", label: "Arc", locate: fromPaths([macApp("Arc")]) },
-      { id: "vivaldi", label: "Vivaldi", locate: fromPaths([macApp("Vivaldi")]) },
-    ];
+    return specs(
+      [
+        [
+          "chrome",
+          "Google Chrome",
+          ["Google Chrome", "Google Chrome Beta", "Google Chrome Canary"],
+        ],
+        ["chromium", "Chromium", ["Chromium"]],
+        ["brave", "Brave", ["Brave Browser", "Brave Browser Beta", "Brave Browser Nightly"]],
+        ["edge", "Microsoft Edge", ["Microsoft Edge"]],
+        ["arc", "Arc", ["Arc"]],
+        ["vivaldi", "Vivaldi", ["Vivaldi"]],
+      ],
+      (names) =>
+        names.map((name) => `/Applications/${name}.app/Contents/MacOS/${name}`).find(existsSync) ??
+        null,
+    );
   }
   if (process.platform === "win32") {
-    return [
-      {
-        id: "chrome",
-        label: "Google Chrome",
-        locate: fromPaths(
-          windowsPaths([
+    const roots = [
+      process.env["PROGRAMFILES"],
+      process.env["PROGRAMFILES(X86)"],
+      process.env["LOCALAPPDATA"],
+    ].filter((value): value is string => Boolean(value));
+    return specs(
+      [
+        [
+          "chrome",
+          "Google Chrome",
+          [
             "Google\\Chrome\\Application\\chrome.exe",
             "Google\\Chrome Beta\\Application\\chrome.exe",
-          ]),
-        ),
-      },
-      {
-        id: "chromium",
-        label: "Chromium",
-        locate: fromPaths(windowsPaths(["Chromium\\Application\\chrome.exe"])),
-      },
-      {
-        id: "brave",
-        label: "Brave",
-        locate: fromPaths(
-          windowsPaths(["BraveSoftware\\Brave-Browser\\Application\\brave.exe"]),
-        ),
-      },
-      {
-        id: "edge",
-        label: "Microsoft Edge",
-        locate: fromPaths(windowsPaths(["Microsoft\\Edge\\Application\\msedge.exe"])),
-      },
-      {
-        id: "vivaldi",
-        label: "Vivaldi",
-        locate: fromPaths(windowsPaths(["Vivaldi\\Application\\vivaldi.exe"])),
-      },
-    ];
+          ],
+        ],
+        ["chromium", "Chromium", ["Chromium\\Application\\chrome.exe"]],
+        ["brave", "Brave", ["BraveSoftware\\Brave-Browser\\Application\\brave.exe"]],
+        ["edge", "Microsoft Edge", ["Microsoft\\Edge\\Application\\msedge.exe"]],
+        ["vivaldi", "Vivaldi", ["Vivaldi\\Application\\vivaldi.exe"]],
+      ],
+      (names) =>
+        roots.flatMap((root) => names.map((name) => path.join(root, name))).find(existsSync) ??
+        null,
+    );
   }
-  return [
-    { id: "chromium", label: "Chromium", locate: fromCommands(["chromium-browser", "chromium"]) },
-    {
-      id: "chrome",
-      label: "Google Chrome",
-      locate: fromCommands(["google-chrome-stable", "google-chrome"]),
-    },
-    { id: "brave", label: "Brave", locate: fromCommands(["brave-browser"]) },
-    {
-      id: "edge",
-      label: "Microsoft Edge",
-      locate: fromCommands(["microsoft-edge", "microsoft-edge-stable"]),
-    },
-    { id: "vivaldi", label: "Vivaldi", locate: fromCommands(["vivaldi-stable"]) },
-  ];
+  return specs(
+    [
+      ["chromium", "Chromium", ["chromium-browser", "chromium"]],
+      ["chrome", "Google Chrome", ["google-chrome-stable", "google-chrome"]],
+      ["brave", "Brave", ["brave-browser"]],
+      ["edge", "Microsoft Edge", ["microsoft-edge", "microsoft-edge-stable"]],
+      ["vivaldi", "Vivaldi", ["vivaldi-stable"]],
+    ],
+    (names) => names.map(resolveOnPath).find((value): value is string => Boolean(value)) ?? null,
+  );
 }
 
 function bundledPath(): string | null {
@@ -191,28 +127,28 @@ function bundledPath(): string | null {
     const bundled = chromium.executablePath();
     return bundled && existsSync(bundled) ? bundled : null;
   } catch {
-    // playwright-core throws when no browser is registered for this build.
     return null;
   }
 }
 
-export function isBrowserEngineId(value: unknown): value is BrowserEngineId {
-  return typeof value === "string" && BROWSER_ENGINE_IDS.includes(value as BrowserEngineId);
-}
+const BrowserEnginePreferenceSchema = Schema.Struct({
+  engine: Schema.Literals(BROWSER_ENGINE_IDS),
+});
+const browserEngineIds = new Set<string>(BROWSER_ENGINE_IDS);
+export const isBrowserEngineId = (value: string | undefined): value is BrowserEngineId =>
+  value !== undefined && browserEngineIds.has(value);
 
 function preferenceFilePath(): string {
   return path.join(resolveDataDir(), PREFERENCE_FILE);
 }
 
-/** Persisted choice, falling back to LOCAL_STUDIO_BROWSER_ENGINE, then "auto". */
 export function readEnginePreference(): BrowserEngineId {
   try {
-    const raw = readFileSync(preferenceFilePath(), "utf8");
-    const parsed = JSON.parse(raw) as { engine?: unknown };
-    if (isBrowserEngineId(parsed.engine)) return parsed.engine;
-  } catch {
-    // Missing or unreadable file — fall through to env, then the default.
-  }
+    const parsed = Schema.decodeUnknownOption(BrowserEnginePreferenceSchema)(
+      JSON.parse(readFileSync(preferenceFilePath(), "utf8")),
+    );
+    if (Option.isSome(parsed)) return parsed.value.engine;
+  } catch {}
   const fromEnv = process.env.LOCAL_STUDIO_BROWSER_ENGINE?.trim().toLowerCase();
   return isBrowserEngineId(fromEnv) ? fromEnv : "auto";
 }
@@ -228,7 +164,6 @@ export function explicitBinaryOverride(): string | null {
   return process.env.LOCAL_STUDIO_CHROME_PATH?.trim() || null;
 }
 
-/** Every selectable engine with the binary it resolves to on this machine. */
 export function listBrowserEngines(): BrowserEngineInfo[] {
   return [
     { id: "auto", label: "Automatic", path: autoPath() },
@@ -244,11 +179,6 @@ function autoPath(): string | null {
   );
 }
 
-/**
- * Resolve the engine to launch, or throw a message naming the exact problem.
- * `preferenceUnavailable` is reported by the caller so a chosen-but-missing
- * browser degrades to a working default instead of killing the browser tool.
- */
 const warnedStaleOverrides = new Set<string>();
 
 export function resolveBrowserEngine(): ResolvedBrowserEngine {
@@ -257,10 +187,6 @@ export function resolveBrowserEngine(): ResolvedBrowserEngine {
     if (existsSync(override)) {
       return { id: "custom", label: overrideLabel(override), path: override, source: "override" };
     }
-    // A stale override degrades to auto-detection instead of killing the
-    // browser tool outright: one forgotten env var otherwise reads as "the
-    // browser broke", with a working Chromium sitting right there. Warned
-    // once — this resolver runs on every frame poll.
     if (!warnedStaleOverrides.has(override)) {
       warnedStaleOverrides.add(override);
       console.warn(

@@ -1,11 +1,4 @@
-// HTTP surface for server-side PTY sessions. Output travels as SSE so the
-// Next.js proxy streams it through unbuffered (pass-through bodies flush in
-// the standalone server; only locally-generated streams don't). Frames:
-//   event: snapshot  → base64 of the full replay buffer (first event frame)
-//   data:            → base64 of a live output chunk
-//   event: exit      → {"exitCode":n,"signal":s}
-// plus `: ping` comments to keep intermediaries from idling the stream out.
-
+import { Option, Schema } from "effect";
 import {
   MAX_PTY_INPUT_CHARS,
   isPtyAvailable,
@@ -21,25 +14,35 @@ import { sseResponse } from "./sse";
 
 const PING_INTERVAL_MS = 15_000;
 const MAX_BODY_CHARS = MAX_PTY_INPUT_CHARS + 4_096;
+const PtyBodySchema = Schema.Struct({
+  cwd: Schema.optional(Schema.String),
+  ownerKey: Schema.optional(Schema.String),
+  id: Schema.optional(Schema.String),
+  data: Schema.optional(Schema.String),
+  cols: Schema.optional(Schema.Unknown),
+  rows: Schema.optional(Schema.Unknown),
+});
+type PtyBody = typeof PtyBodySchema.Type;
 
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+async function readPtyBody(request: Request): Promise<PtyBody | null> {
+  const body = await readJsonBody(request, { maxChars: MAX_BODY_CHARS });
+  return Option.getOrNull(Schema.decodeUnknownOption(PtyBodySchema)(body));
 }
 
 function encodeBase64(text: string): string {
   return Buffer.from(text, "utf8").toString("base64");
 }
 
-export async function handlePtyOpen(request: Request): Promise<Response> {
+export async function open(request: Request): Promise<Response> {
   if (!isPtyAvailable()) {
     return jsonError(`PTY unavailable: ${ptyUnavailableReason() ?? "unknown"}`, 503);
   }
-  const body = await readJsonBody(request, { maxChars: MAX_BODY_CHARS });
+  const body = await readPtyBody(request);
   if (!body) return jsonError("Invalid JSON body");
   try {
     const result = openPtySession({
-      cwd: asString(body.cwd),
-      ownerKey: asString(body.ownerKey),
+      cwd: body.cwd,
+      ownerKey: body.ownerKey,
       cols: Number(body.cols),
       rows: Number(body.rows),
     });
@@ -49,10 +52,9 @@ export async function handlePtyOpen(request: Request): Promise<Response> {
   }
 }
 
-export function handlePtyStream(request: Request): Response {
+export function stream(request: Request): Response {
   const id = new URL(request.url).searchParams.get("id")?.trim() ?? "";
   if (!id) return jsonError("id is required");
-
   return sseResponse({
     signal: request.signal,
     heartbeat: { intervalMs: PING_INTERVAL_MS, comment: "ping" },
@@ -65,7 +67,7 @@ export function handlePtyStream(request: Request): Response {
         },
       });
       if (!subscription) {
-        send(`event: gone\ndata: {}\n\n`);
+        send("event: gone\ndata: {}\n\n");
         close();
         return;
       }
@@ -75,25 +77,25 @@ export function handlePtyStream(request: Request): Response {
   });
 }
 
-export async function handlePtyInput(request: Request): Promise<Response> {
-  const body = await readJsonBody(request, { maxChars: MAX_BODY_CHARS });
-  const id = asString(body?.id)?.trim();
-  const data = asString(body?.data);
-  if (!body || !id || typeof data !== "string") return jsonError("id and data are required");
+export async function input(request: Request): Promise<Response> {
+  const body = await readPtyBody(request);
+  const id = body?.id?.trim();
+  const data = body?.data;
+  if (!body || !id || data === undefined) return jsonError("id and data are required");
   if (data.length > MAX_PTY_INPUT_CHARS) return jsonError("input too large", 413);
   return Response.json({ ok: writePtySession(id, data) });
 }
 
-export async function handlePtyResize(request: Request): Promise<Response> {
-  const body = await readJsonBody(request, { maxChars: MAX_BODY_CHARS });
-  const id = asString(body?.id)?.trim();
+export async function resize(request: Request): Promise<Response> {
+  const body = await readPtyBody(request);
+  const id = body?.id?.trim();
   if (!body || !id) return jsonError("id is required");
   return Response.json({ ok: resizePtySession(id, Number(body.cols), Number(body.rows)) });
 }
 
-export async function handlePtyClose(request: Request): Promise<Response> {
-  const body = await readJsonBody(request, { maxChars: MAX_BODY_CHARS });
-  const id = asString(body?.id)?.trim();
+export async function close(request: Request): Promise<Response> {
+  const body = await readPtyBody(request);
+  const id = body?.id?.trim();
   if (!body || !id) return jsonError("id is required");
   closePtySession(id);
   return Response.json({ ok: true });

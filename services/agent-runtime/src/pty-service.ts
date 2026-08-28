@@ -1,24 +1,9 @@
-// Server-side PTY sessions for the web app — the browser-parity twin of the
-// desktop pty-manager (desktop/logic/pty-manager.ts). Shells are keyed by
-// ownerKey and outlive any UI attachment: closing the tab, navigating away, or
-// dropping the SSE stream leaves the shell running; reattaching replays the
-// bounded scrollback and resumes live output.
-//
-// Security posture: this service is only reachable through the Next.js
-// frontend proxy (the runtime binds 127.0.0.1), which enforces the host
-// allowlist, the opt-in access token, CSRF on mutations, and workspace-root
-// checks on cwd. Everything here re-validates its own inputs anyway —
-// defense-in-depth against a misrouted or host-local caller.
-
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { existsSync, realpathSync, statSync } from "node:fs";
 
-// The runtime ships as ESM; node-pty is a CJS native addon, so load it with a
-// scoped require rather than a static import (which would break the bun-run
-// dev path and eagerly load the addon at boot).
 const requireModule = createRequire(import.meta.url);
 
 type PtyHandle = {
@@ -56,10 +41,6 @@ type Session = {
   disposers: Array<() => void>;
 };
 
-// Bounded scrollback kept per shell for reattach/replay (~200 KB of UTF-16,
-// comfortably under a 512 KB ceiling). A reattaching client gets this buffer as
-// the first `snapshot` frame; navigating away or dropping the stream never
-// trims it — only new output past the cap rolls off the front.
 export const MAX_REPLAY_CHARS = 200_000;
 const MAX_PTY_SESSIONS = 64;
 export const MAX_PTY_INPUT_CHARS = 32_768;
@@ -79,10 +60,8 @@ function loadFactory(): PtyFactory | null {
         opts: { cwd: string; cols: number; rows: number; env: NodeJS.ProcessEnv; name?: string },
       ) => PtyHandle;
     };
-    const required = requireModule("@lydell/node-pty") as Mod | { default: Mod };
-    const mod = (
-      required && "spawn" in required ? required : (required as { default: Mod }).default
-    ) as Mod;
+    const required: Mod | { default: Mod } = requireModule("@lydell/node-pty");
+    const mod: Mod = "spawn" in required ? required : required.default;
     factory = ({ cwd, cols, rows, shell, args, env }) =>
       mod.spawn(shell, args, { cwd, cols, rows, env, name: "xterm-256color" });
     return factory;
@@ -93,16 +72,16 @@ function loadFactory(): PtyFactory | null {
   }
 }
 
-function resolveShell(): { shell: string; args: string[] } {
+type ShellCommand = { shell: string; args: string[] };
+type OpenPtyResult = { id: string; reused: boolean };
+
+function resolveShell(): ShellCommand {
   if (process.platform === "win32") {
     return { shell: process.env.COMSPEC || "cmd.exe", args: [] };
   }
   return { shell: process.env.SHELL || "/bin/zsh", args: [] };
 }
 
-// Never spawn a shell rooted at / or a bare system directory, and fall back to
-// the home directory when the requested cwd is missing. Mirrors the frontend's
-// assertWorkspaceRoot posture without importing Next-side code.
 const SYSTEM_ROOTS = new Set(
   ["/bin", "/boot", "/dev", "/etc", "/lib", "/proc", "/sbin", "/sys", "/usr", "/var"].map((p) =>
     path.resolve(p),
@@ -122,9 +101,7 @@ function safeCwd(input: string | undefined | null): string {
   if (resolved === path.parse(resolved).root || SYSTEM_ROOTS.has(resolved)) return os.homedir();
   try {
     if (existsSync(resolved) && statSync(resolved).isDirectory()) return resolved;
-  } catch {
-    // fall through
-  }
+  } catch {}
   return os.homedir();
 }
 
@@ -141,7 +118,7 @@ function safeOwnerKey(input: string | undefined | null): string | null {
   return key ? key.slice(0, 512) : null;
 }
 
-function clampDimension(value: unknown, fallback: number): number {
+function clampDimension(value: number | undefined, fallback: number): number {
   const parsed = Math.floor(Number(value));
   return Number.isFinite(parsed) && parsed >= 2 && parsed <= 1_000 ? parsed : fallback;
 }
@@ -175,7 +152,7 @@ export function openPtySession(opts: {
   cols?: number;
   rows?: number;
   ownerKey?: string;
-}): { id: string; reused: boolean } {
+}): OpenPtyResult {
   const make = loadFactory();
   if (!make) throw new Error(`PTY unavailable: ${factoryError?.message ?? "unknown"}`);
   const ownerKey = safeOwnerKey(opts.ownerKey);
@@ -276,19 +253,10 @@ export function closePtySession(id: string): void {
   for (const dispose of session.disposers) {
     try {
       dispose();
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
   session.subscribers.clear();
   try {
     session.pty.kill();
-  } catch {
-    // already exited
-  }
-}
-
-export function closePtySessionByOwner(ownerKey: string): void {
-  const session = ownedSession(ownerKey);
-  if (session) closePtySession(session.id);
+  } catch {}
 }

@@ -29,13 +29,11 @@ const TOKEN = String.raw`[^\s;,"']+`;
 export function redactLogLine(line: string): string {
   let redacted = line;
 
-  // Authorization / Bearer headers.
   redacted = redacted.replace(
     new RegExp(String.raw`(Authorization:\s*Bearer\s+)` + TOKEN, "gi"),
     `$1${REDACTED}`,
   );
 
-  // X-Api-Key style headers.
   redacted = redacted.replace(
     new RegExp(String.raw`((?:^|[\r\n])[Xx]-[Aa]pi-[Kk]ey:\s+)` + TOKEN, "g"),
     `$1${REDACTED}`,
@@ -60,7 +58,6 @@ export function redactLogLine(line: string): string {
     `$1$2${REDACTED}$2`,
   );
 
-  // CLI long flags: --api-key <value>, --hf-token <value>, etc.
   redacted = redacted.replace(
     new RegExp(
       String.raw`(\s)(--(?:api-key|apikey|api_token|auth-token|access-token|hf-token|token|secret|password))\s+` +
@@ -70,7 +67,6 @@ export function redactLogLine(line: string): string {
     `$1$2 ${REDACTED}`,
   );
 
-  // URL query parameters: api_key=..., token=..., password=..., refresh_token=..., client_secret=..., etc.
   redacted = redacted.replace(
     /([?&])(api_key|api-key|apikey|token|access_token|auth_token|key|secret|hf_token|openai_api_key|anthropic_api_key|password|passwd|client_secret|refresh_token|id_token|session_token|secret_access_key)=([^&\s]*)/gi,
     `$1$2=${REDACTED}`,

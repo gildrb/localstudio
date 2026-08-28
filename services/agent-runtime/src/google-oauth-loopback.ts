@@ -14,6 +14,7 @@ import {
 } from "./google-workspace-adapter";
 import type { GoogleWorkspacePluginId } from "./google-workspace-binding";
 import { createOAuthLoopbackLifecycle } from "./oauth-loopback-lifecycle";
+import { listenOnLoopback } from "./oauth-loopback-listener";
 
 type ActiveFlow = {
   id: string;
@@ -93,9 +94,6 @@ async function handleCallback(
         account,
         { state, code },
         flowId,
-        // Which mailbox this grant belongs to is only known once Google has
-        // verified the email, so the adapter's prior state is captured here
-        // rather than before the flow starts.
         (signal, identity) =>
           Effect.gen(function* () {
             const wasEnabled = yield* googleWorkspaceAdapterEnabled(identity);
@@ -118,21 +116,6 @@ async function handleCallback(
   }
 }
 
-function listen(server: Server): Promise<number> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("Loopback listener failed"));
-        return;
-      }
-      resolve(address.port);
-    });
-  });
-}
-
 export function beginGoogleLoopbackAuthorization(
   account: GoogleWorkspacePluginId,
 ): Effect.Effect<{ authorizationUrl: string }, GoogleAccountError> {
@@ -144,7 +127,7 @@ export function beginGoogleLoopbackAuthorization(
         void handleCallback(account, flowId, request.url ?? "/", response);
       });
       const port = yield* Effect.tryPromise({
-        try: () => listen(server),
+        try: () => listenOnLoopback(server),
         catch: () => new GoogleAccountError(500, "Could not start the private OAuth callback"),
       });
       server.on("error", () => closeFlow(account, flowId));

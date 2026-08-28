@@ -1,15 +1,16 @@
 /**
  * Server-only support for attaching a Local Studio model to locally installed
- * coding-agent CLIs (pi, opencode, droid, hermes). Detection inspects well-known
- * config directories under a given home dir; attachment merges a provider /
- * model entry into each agent's own config file, preserving everything else
- * in the file and backing the file up before the first modification.
+ * coding-agent CLIs. Detection inspects well-known config directories under a
+ * given home dir; attachment merges a provider/model entry into each agent's
+ * config file, preserving everything else and backing up existing files before
+ * modification.
  */
 import path from "node:path";
-import { isRecord } from "@/lib/guards";
+import { Option, Schema } from "effect";
 import {
   backupExistingFile,
   existingFileMode,
+  JsonRecordSchema,
   pathExists,
   readJsonFile,
   readYamlFile,
@@ -46,6 +47,15 @@ import type {
 export { LOCAL_AGENT_IDS, type LocalAgentId, type LocalAgentTarget } from "./local-agent-types";
 export type { AttachAction, AttachModelInput, AttachResult, LocalAgentModel };
 export { detectLocalAgents };
+
+const decodeLocalAgentConfig = JsonRecordSchema.pipe(Schema.decodeUnknownOption);
+const configWriters = { json: writeJsonAtomic, yaml: writeYamlAtomic };
+
+interface AgentConfigFile {
+  exists: boolean;
+  config?: JsonRecord;
+  error?: string;
+}
 
 interface AgentAttachPlan {
   configPath: string;
@@ -109,6 +119,25 @@ async function planFor(
   };
 }
 
+async function readAgentConfig(
+  configPath: string,
+  format: AgentAttachPlan["format"],
+): Promise<AgentConfigFile> {
+  if (format === "json") return readJsonFile(configPath);
+  const file = await readYamlFile(configPath);
+  if (file.error) return { exists: file.exists, error: file.error };
+  const decoded = Option.map(decodeLocalAgentConfig(file.document?.toJS()), (config) => ({
+    ...config,
+  }));
+  if (file.exists && Option.isNone(decoded)) {
+    return {
+      exists: true,
+      error: `${configPath} does not contain a YAML object`,
+    };
+  }
+  return { exists: file.exists, config: Option.getOrUndefined(decoded) };
+}
+
 async function attachToAgent(
   agent: LocalAgentId,
   home: string,
@@ -125,21 +154,12 @@ async function attachToAgent(
     };
   }
 
-  let file: { exists: boolean; config?: JsonRecord; error?: string };
-  if (format === "yaml") {
-    const yamlFile = await readYamlFile(configPath);
-    if (yamlFile.error) {
-      return { agent, ok: false, configPath, error: yamlFile.error };
-    }
-    file = { exists: yamlFile.exists, config: yamlFile.document?.toJS() as JsonRecord | undefined };
-  } else {
-    file = await readJsonFile(configPath);
-  }
+  const file = await readAgentConfig(configPath, format);
   if (file.error) {
     return { agent, ok: false, configPath, error: file.error };
   }
 
-  const config = file.config ?? plan.emptyConfig();
+  const { config = plan.emptyConfig() } = file;
   const mergeAction = plan.merge(config, model);
 
   let backupPath: string | undefined;
@@ -148,23 +168,20 @@ async function attachToAgent(
   }
 
   const mode = file.exists ? ((await existingFileMode(configPath)) ?? 0o600) : 0o600;
-  if (format === "yaml") {
-    await writeYamlAtomic(configPath, config, mode);
-  } else {
-    await writeJsonAtomic(configPath, config, mode);
-  }
+  await configWriters[format](configPath, config, mode);
 
   const action: AttachAction = file.exists ? mergeAction : "created-file";
   const extraUpdates =
     agent === "omp" ? await enableOmpModel(home, model, config).catch(() => undefined) : undefined;
-  return {
+  const result: AttachResult = {
     agent,
     ok: true,
     configPath,
     backupPath,
     action,
-    ...(extraUpdates ? { extraUpdates } : {}),
   };
+  if (extraUpdates) result.extraUpdates = extraUpdates;
+  return result;
 }
 
 async function enableOmpModel(
@@ -177,8 +194,10 @@ async function enableOmpModel(
   const settingsPath = ompSettingsPath(home);
   const settings = await readYamlFile(settingsPath);
   if (settings.error || !settings.exists || !settings.document) return undefined;
-  const doc = settings.document.toJS() as JsonRecord | undefined;
-  if (!isRecord(doc)) return undefined;
+  const doc = Option.getOrUndefined(
+    Option.map(decodeLocalAgentConfig(settings.document.toJS()), (config) => ({ ...config })),
+  );
+  if (!doc) return undefined;
   const enabled = doc["enabledModels"];
   if (!Array.isArray(enabled) || enabled.length === 0) return undefined;
   const selector = `${providerKey}/${model.modelId}`;

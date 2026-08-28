@@ -7,11 +7,6 @@ import {
   type GoogleWorkspaceIdentity,
 } from "./google-workspace-binding";
 
-/**
- * The account a connector is allowed to authorize as is derived from its id,
- * not read from its `auth.account` field — the field only has to agree. A row
- * whose id names one mailbox cannot mint tokens for another.
- */
 export function googleWorkspaceConnectorAuth(
   connector: ConnectorConfig,
 ): GoogleWorkspaceIdentity | null {

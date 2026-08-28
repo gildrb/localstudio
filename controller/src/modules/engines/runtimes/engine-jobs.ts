@@ -6,12 +6,6 @@ import type { HostProfile } from "../../compute/contracts";
 import { clearRuntimeTargetsCache, pinnedImageFor } from "./runtime-targets";
 import { pidExists } from "./pid-exists";
 
-/**
- * Engine jobs, docker-only: every job — install or update — is a `docker pull`
- * of the engine's pinned image. The job registry (list, poll, cancel, prune)
- * keeps its wire shape from the installer era; only the operation changed.
- */
-
 type CreateEngineJobOptions = {
   backend: RuntimeJobBackend;
   type: RuntimeJobType;

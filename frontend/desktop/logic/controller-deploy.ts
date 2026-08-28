@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { app } from "electron";
+import { Schema } from "effect";
 
 export interface ControllerDeployResult {
   ok: boolean;
@@ -11,7 +12,6 @@ export interface ControllerDeployResult {
 }
 
 export interface ControllerDeployOptions {
-  /** "ssh" installs onto a remote host; "local" runs the bundled installer on this machine. */
   mode?: "ssh" | "local";
   host?: string;
   port?: number;
@@ -22,15 +22,21 @@ const MARKER = "LOCAL_STUDIO_CONTROLLER ";
 const INSTALL_SCRIPT_URL =
   "https://raw.githubusercontent.com/sybil-solutions/local-studio/main/scripts/install-controller.sh";
 const DEPLOY_TIMEOUT_MS = 15 * 60_000;
-
-// "user@host" / "host" / tailnet names; conservative charset keeps the value
-// safe to place inside the ssh argv (never inside a shell string).
+const DeployMarkerSchema = Schema.Struct({ url: Schema.String, api_key: Schema.String });
+const ControllerDeployOptionsSchema = Schema.Struct({
+  mode: Schema.optional(Schema.Literals(["ssh", "local"])),
+  host: Schema.optional(Schema.String),
+  port: Schema.optional(
+    Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 65_535 })),
+  ),
+  installDir: Schema.optional(Schema.String),
+});
+const decodeDeployMarker = Schema.decodeUnknownOption(Schema.fromJsonString(DeployMarkerSchema));
 const HOST_PATTERN = /^[A-Za-z0-9._@-]+$/;
 
 export const isValidDeployHost = (host: string): boolean =>
   HOST_PATTERN.test(host) && !host.startsWith("-");
 
-/** Bundled installer (packaged app) or checkout copy (dev tree). */
 const findLocalInstallScript = (resourcesPath: string | null): string | null => {
   const candidates = [
     resourcesPath ? resolve(resourcesPath, "install-controller.sh") : null,
@@ -46,19 +52,13 @@ const findLocalInstallScript = (resourcesPath: string | null): string | null => 
 export const parseDeployMarker = (line: string): { url: string; apiKey: string } | null => {
   const index = line.indexOf(MARKER);
   if (index === -1) return null;
-  try {
-    const payload = JSON.parse(line.slice(index + MARKER.length)) as {
-      url?: string;
-      api_key?: string;
-    };
-    if (payload.url && payload.api_key) return { url: payload.url, apiKey: payload.api_key };
-  } catch {
-    return null;
+  const payload = decodeDeployMarker(line.slice(index + MARKER.length));
+  if (payload._tag === "Some" && payload.value.url && payload.value.api_key) {
+    return { url: payload.value.url, apiKey: payload.value.api_key };
   }
   return null;
 };
 
-/** Stream installer output, resolve on the marker line, fail on exit/timeout. */
 const runInstaller = (
   child: ChildProcessWithoutNullStreams,
   describeFailure: (code: number | null, stderrTail: string) => string,
@@ -109,11 +109,6 @@ const runInstaller = (
 
 const lastLine = (tail: string): string => tail.trim().split("\n").pop() ?? "";
 
-/**
- * Install a controller onto this machine, using the installer bundled with the
- * app. Binds to loopback: a controller that exists to serve the local app has
- * no reason to listen on the network.
- */
 const deployLocalController = (
   options: ControllerDeployOptions,
   resourcesPath: string | null,
@@ -127,14 +122,16 @@ const deployLocalController = (
     });
   }
   const port = options.port && Number.isFinite(options.port) ? options.port : 8080;
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    LOCAL_STUDIO_HOST: "127.0.0.1",
+    LOCAL_STUDIO_PORT: String(port),
+  };
+  const installDir = options.installDir?.trim();
+  if (installDir) environment.LOCAL_STUDIO_DIR = installDir;
   const child = spawn("bash", [script], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      LOCAL_STUDIO_HOST: "127.0.0.1",
-      LOCAL_STUDIO_PORT: String(port),
-      ...(options.installDir?.trim() ? { LOCAL_STUDIO_DIR: options.installDir.trim() } : {}),
-    },
+    env: environment,
   });
   child.stdin.end();
   return runInstaller(
@@ -144,11 +141,10 @@ const deployLocalController = (
   );
 };
 
-/**
- * Deploy a controller either locally (bundled installer, loopback bind) or to
- * an ssh host. Streams progress lines via `onLog`; resolves with the
- * controller URL + API key parsed from the installer's final marker line.
- */
+export const decodeControllerDeployOptions = Schema.decodeUnknownOption(
+  ControllerDeployOptionsSchema,
+);
+
 export const deployController = (
   options: ControllerDeployOptions,
   resourcesPath: string | null,

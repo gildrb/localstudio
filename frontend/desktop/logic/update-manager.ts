@@ -5,17 +5,17 @@ import { DESKTOP_CONFIG } from "../configs";
 import type { DesktopUpdateSnapshot } from "../types";
 import { log } from "../helpers/logger";
 import { isLoopbackHttpUrl } from "../helpers/url";
-import { UpdateInstallIntent } from "./update-install-intent";
 
 let latestUpdateState: DesktopUpdateSnapshot = { status: "idle" };
-const installIntent = new UpdateInstallIntent();
+let installRequested = false;
 
 function setUpdateState(nextState: DesktopUpdateSnapshot): void {
   latestUpdateState = nextState;
 }
 
-function setUpdateError(error: unknown): void {
-  installIntent.clear();
+type UpdateFailure = Parameters<StringConstructor>[0];
+function setUpdateError(error: UpdateFailure): void {
+  installRequested = false;
   const message = String(error);
   setUpdateState({ status: "error", message });
   log.error(`Auto update error: ${message}`);
@@ -24,9 +24,6 @@ function setUpdateError(error: unknown): void {
 function resolveFeedUrl(): string | null {
   const raw = process.env.LOCAL_STUDIO_UPDATE_URL?.trim();
   if (!raw) return null;
-  // Refuse cleartext update feeds — auto-update over http is trivially
-  // MITM-able into shipping an arbitrary binary. Allow http only for loopback
-  // (local testing of an update server).
   try {
     const parsed = new URL(raw);
     if (parsed.protocol !== "https:" && !isLoopbackHttpUrl(raw)) {
@@ -40,7 +37,7 @@ function resolveFeedUrl(): string | null {
   return raw.replace(/\/+$/, "");
 }
 
-function ensureFeedConfigured(): { ok: true; url: string } {
+function ensureFeedConfigured(): string {
   const feedUrl = resolveFeedUrl();
   if (feedUrl) {
     autoUpdater.setFeedURL({
@@ -48,26 +45,19 @@ function ensureFeedConfigured(): { ok: true; url: string } {
       url: feedUrl,
       channel: "stable",
     });
-    return { ok: true, url: feedUrl };
+    return feedUrl;
   }
 
-  // Default feed: the public GitHub releases, which ship latest-mac.yml plus
-  // signed zip/dmg assets. electron-updater verifies the download's code
-  // signature against the running app before installing.
   autoUpdater.setFeedURL({
     provider: "github",
     owner: "sybil-solutions",
     repo: "local-studio",
   });
-  return { ok: true, url: "github:sybil-solutions/local-studio" };
+  return "github:sybil-solutions/local-studio";
 }
 
 export function getUpdateState(): DesktopUpdateSnapshot {
   return latestUpdateState;
-}
-
-function installDownloadedUpdate(): void {
-  autoUpdater.quitAndInstall();
 }
 
 export async function checkForUpdates(force = false): Promise<DesktopUpdateSnapshot> {
@@ -80,9 +70,6 @@ export async function checkForUpdates(force = false): Promise<DesktopUpdateSnaps
     return disabledState;
   }
 
-  // Dev-channel builds install via the dev mirror, never the stable releases —
-  // the default GitHub feed would happily "update" them onto stable. An
-  // explicit LOCAL_STUDIO_UPDATE_URL override still wins for feed testing.
   if (isDevChannelBuild && !resolveFeedUrl()) {
     const devChannelState = {
       status: "idle",
@@ -108,8 +95,6 @@ export async function checkForUpdates(force = false): Promise<DesktopUpdateSnaps
     autoUpdater.allowPrerelease = false;
     const result = await autoUpdater.checkForUpdates();
     if (result?.downloadPromise) void result.downloadPromise.catch(setUpdateError);
-    // An unpackaged app resolves null without emitting any status event; leave
-    // "checking" behind and the renderer would poll forever.
     if (!result && latestUpdateState.status === "checking") {
       setUpdateState({ status: "idle", message: "Updater unavailable in this build" });
     }
@@ -125,20 +110,22 @@ export async function checkForUpdates(force = false): Promise<DesktopUpdateSnaps
 }
 
 export async function startUpdate(): Promise<DesktopUpdateSnapshot> {
-  const action = installIntent.request(latestUpdateState.status);
-  if (action === "install") {
-    installDownloadedUpdate();
+  installRequested = true;
+  if (latestUpdateState.status === "downloaded") {
+    installRequested = false;
+    autoUpdater.quitAndInstall();
     return latestUpdateState;
   }
-  if (action === "wait") return latestUpdateState;
-
+  if (["checking", "available", "downloading"].includes(latestUpdateState.status)) {
+    return latestUpdateState;
+  }
   const snapshot = await checkForUpdates(true);
   if (
     snapshot.status === "idle" ||
     snapshot.status === "not-available" ||
     snapshot.status === "error"
   ) {
-    installIntent.clear();
+    installRequested = false;
   }
   return snapshot;
 }
@@ -155,8 +142,7 @@ export function initializeAutoUpdates(): void {
     return;
   }
 
-  const feed = ensureFeedConfigured();
-  log.info(`[update] Feed: ${feed.url}`);
+  log.info(`[update] Feed: ${ensureFeedConfigured()}`);
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -173,7 +159,7 @@ export function initializeAutoUpdates(): void {
   });
 
   autoUpdater.on("update-not-available", (info) => {
-    installIntent.clear();
+    installRequested = false;
     setUpdateState({ status: "not-available", version: info.version });
     log.info("No update available");
   });
@@ -190,9 +176,10 @@ export function initializeAutoUpdates(): void {
   autoUpdater.on("update-downloaded", (info) => {
     setUpdateState({ status: "downloaded", version: info.version });
     log.info(`Update downloaded: ${info.version}`);
-    if (installIntent.downloadCompleted()) {
+    if (installRequested) {
+      installRequested = false;
       log.info(`Restarting to install update: ${info.version}`);
-      installDownloadedUpdate();
+      autoUpdater.quitAndInstall();
     }
   });
 

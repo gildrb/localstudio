@@ -1,36 +1,51 @@
+import { Option, Schema } from "effect";
 import type { McpConnection, McpToolInfo } from "./mcp-client";
+import { JsonSchema, type Json } from "./json";
 import {
   GOOGLE_WORKSPACE_BINDINGS,
   type GoogleWorkspacePluginId,
 } from "./google-workspace-binding";
 
-/**
- * The read-only Google tools, served from the public REST APIs.
- *
- * Google's first-party Workspace MCP servers are a developer preview and we
- * cannot confirm they accept a self-registered Desktop OAuth client, so the
- * default transport is this in-process adapter: it implements the same
- * `McpConnection` surface and exposes exactly the tool names the remote server
- * declares, so the connector, the skill, and stored transcripts do not know
- * which transport answered.
- *
- * Every tool here is a GET (or, for free/busy, a query-shaped POST) against a
- * read-only scope. Nothing in this file can mutate a mailbox or a calendar.
- */
+const OptionalString = Schema.optional(Schema.String);
+const decodeJson = Schema.decodeUnknownSync(JsonSchema);
+
+const ToolArgumentsSchema = Schema.Struct({
+  query: OptionalString,
+  max_results: Schema.optional(Schema.Number),
+  page_token: OptionalString,
+  thread_id: OptionalString,
+  message_id: OptionalString,
+  calendar_id: OptionalString,
+  time_min: OptionalString,
+  time_max: OptionalString,
+  event_id: OptionalString,
+  calendar_ids: Schema.optional(Schema.Array(Schema.String)),
+});
+type ToolArguments = typeof ToolArgumentsSchema.Type;
+const decodeToolArguments = Schema.decodeUnknownSync(ToolArgumentsSchema);
 
 type RestRequest = {
   method?: "GET" | "POST";
   path: string;
   query?: Record<string, string | undefined>;
-  body?: unknown;
+  body?: Json;
+};
+
+type ToolSchemaProperties = NonNullable<McpToolInfo["inputSchema"]["properties"]>;
+type ToolSchemaProperty = ToolSchemaProperties[string];
+type ObjectInputSchema = McpToolInfo["inputSchema"] & {
+  type: "object";
+  properties: ToolSchemaProperties;
+  required?: string[];
+  additionalProperties: false;
 };
 
 type RestToolSpec = {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
-  build: (args: Record<string, unknown>) => RestRequest;
-  project?: (payload: unknown) => unknown;
+  inputSchema: ObjectInputSchema;
+  build: (args: ToolArguments) => RestRequest;
+  project?: (payload: Json) => ProjectedPayload;
 };
 
 export class GoogleRestError extends Error {
@@ -42,41 +57,45 @@ export class GoogleRestError extends Error {
   }
 }
 
-const objectSchema = (
-  properties: Record<string, unknown>,
+function objectSchema(
+  properties: ToolSchemaProperties,
   required: string[] = [],
-): Record<string, unknown> => ({
-  type: "object",
-  properties,
-  ...(required.length ? { required } : {}),
-  additionalProperties: false,
-});
-
-const stringProperty = (description: string) => ({ type: "string", description });
-const numberProperty = (description: string) => ({ type: "number", description });
-
-function text(args: Record<string, unknown>, key: string): string | undefined {
-  const value = args[key];
-  if (typeof value === "string" && value.trim()) return value.trim();
-  return undefined;
+): ObjectInputSchema {
+  const schema: ObjectInputSchema = {
+    type: "object",
+    properties,
+    additionalProperties: false,
+  };
+  if (required.length) schema.required = required;
+  return schema;
 }
 
-function requiredText(args: Record<string, unknown>, key: string): string {
+const stringProperty = (description: string): ToolSchemaProperty => ({
+  type: "string",
+  description,
+});
+const numberProperty = (description: string): ToolSchemaProperty => ({
+  type: "number",
+  description,
+});
+
+type TextArgumentKey = Exclude<keyof ToolArguments, "max_results" | "calendar_ids">;
+
+function text(args: ToolArguments, key: TextArgumentKey): string | undefined {
+  const value = args[key]?.trim();
+  return value || undefined;
+}
+
+function requiredText(args: ToolArguments, key: TextArgumentKey): string {
   const value = text(args, key);
   if (!value) throw new GoogleRestError(400, `"${key}" is required`);
   return value;
 }
 
-function count(args: Record<string, unknown>, key: string, fallback: number): string {
-  const value = args[key];
-  if (typeof value !== "number" || !Number.isFinite(value)) return String(fallback);
+function count(args: ToolArguments, fallback: number): string {
+  const value = args.max_results;
+  if (value === undefined || !Number.isFinite(value)) return String(fallback);
   return String(Math.max(1, Math.min(500, Math.trunc(value))));
-}
-
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function decodeBase64Url(value: string): string {
@@ -87,16 +106,69 @@ function decodeBase64Url(value: string): string {
   }
 }
 
-/** Pull the first text/plain (else text/html) part out of a Gmail MIME tree. */
-function messageBody(payload: Record<string, unknown> | null, wanted: string): string {
+type GmailHeader = { name?: string; value?: string };
+type GmailBody = { data?: string };
+type GmailPart = {
+  mimeType?: string;
+  body?: GmailBody;
+  parts?: readonly GmailPart[];
+  headers?: readonly GmailHeader[];
+};
+type GmailMessage = {
+  id?: string;
+  threadId?: string;
+  labelIds?: readonly string[];
+  snippet?: string;
+  payload?: GmailPart;
+};
+
+const GmailHeaderSchema = Schema.Struct({
+  name: OptionalString,
+  value: OptionalString,
+});
+const GmailBodySchema = Schema.Struct({ data: OptionalString });
+const GmailPartSchema: Schema.Codec<GmailPart, GmailPart> = Schema.suspend(() =>
+  Schema.Struct({
+    mimeType: OptionalString,
+    body: Schema.optional(GmailBodySchema),
+    parts: Schema.optional(Schema.Array(GmailPartSchema)),
+    headers: Schema.optional(Schema.Array(GmailHeaderSchema)),
+  }),
+);
+const GmailMessageSchema = Schema.Struct({
+  id: OptionalString,
+  threadId: OptionalString,
+  labelIds: Schema.optional(Schema.Array(Schema.String)),
+  snippet: OptionalString,
+  payload: Schema.optional(GmailPartSchema),
+});
+const GmailThreadSchema = Schema.Struct({
+  id: OptionalString,
+  messages: Schema.optional(Schema.Array(GmailMessageSchema)),
+});
+const decodeGmailMessage = Schema.decodeUnknownSync(GmailMessageSchema);
+const decodeGmailThread = Schema.decodeUnknownSync(GmailThreadSchema);
+interface MessageHeaders {
+  [name: string]: string;
+}
+
+type ProjectedMessage = {
+  id?: string;
+  threadId?: string;
+  labelIds?: readonly string[];
+  snippet?: string;
+  headers: MessageHeaders;
+  body: string;
+};
+type ProjectedThread = { id?: string; messages: ProjectedMessage[] };
+type ProjectedPayload = Json | ProjectedMessage | ProjectedThread;
+
+function messageBody(payload: GmailPart | undefined, wanted: string): string {
   if (!payload) return "";
-  const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : "";
-  const body = record(payload.body);
-  const data = body && typeof body.data === "string" ? body.data : "";
-  if (mimeType === wanted && data) return decodeBase64Url(data);
-  const parts = Array.isArray(payload.parts) ? payload.parts : [];
-  for (const part of parts) {
-    const found = messageBody(record(part), wanted);
+  const data = payload.body?.data ?? "";
+  if (payload.mimeType === wanted && data) return decodeBase64Url(data);
+  for (const part of payload.parts ?? []) {
+    const found = messageBody(part, wanted);
     if (found) return found;
   }
   return "";
@@ -104,43 +176,36 @@ function messageBody(payload: Record<string, unknown> | null, wanted: string): s
 
 const KEPT_HEADERS = new Set(["from", "to", "cc", "subject", "date", "reply-to"]);
 
-function messageHeaders(payload: Record<string, unknown> | null): Record<string, string> {
-  const headers = payload && Array.isArray(payload.headers) ? payload.headers : [];
-  const kept: Record<string, string> = {};
-  for (const entry of headers) {
-    const header = record(entry);
-    const name = header && typeof header.name === "string" ? header.name.toLowerCase() : "";
-    const value = header && typeof header.value === "string" ? header.value : "";
+function messageHeaders(payload: GmailPart | undefined): MessageHeaders {
+  const kept: MessageHeaders = {};
+  for (const header of payload?.headers ?? []) {
+    const name = header.name?.toLowerCase() ?? "";
+    const value = header.value ?? "";
     if (name && value && KEPT_HEADERS.has(name)) kept[name] = value;
   }
   return kept;
 }
 
-/**
- * A Gmail message with `format=full` carries every MIME part base64-encoded,
- * including attachments. Handing that to a model is unusable, so each message
- * becomes its addressing headers plus the decoded text body.
- */
-function projectMessage(value: unknown): unknown {
-  const message = record(value);
-  if (!message) return value;
-  const payload = record(message.payload);
-  const plain = messageBody(payload, "text/plain") || messageBody(payload, "text/html");
+function projectDecodedMessage(message: GmailMessage): ProjectedMessage {
+  const plain =
+    messageBody(message.payload, "text/plain") || messageBody(message.payload, "text/html");
   return {
     id: message.id,
     threadId: message.threadId,
     labelIds: message.labelIds,
     snippet: message.snippet,
-    headers: messageHeaders(payload),
+    headers: messageHeaders(message.payload),
     body: plain || message.snippet || "",
   };
 }
 
-function projectThread(value: unknown): unknown {
-  const thread = record(value);
-  if (!thread) return value;
-  const messages = Array.isArray(thread.messages) ? thread.messages : [];
-  return { id: thread.id, messages: messages.map(projectMessage) };
+function projectMessage(value: Json): ProjectedMessage {
+  return projectDecodedMessage(decodeGmailMessage(value));
+}
+
+function projectThread(value: Json): ProjectedThread {
+  const thread = decodeGmailThread(value);
+  return { id: thread.id, messages: (thread.messages ?? []).map(projectDecodedMessage) };
 }
 
 const GMAIL_TOOLS: RestToolSpec[] = [
@@ -163,7 +228,7 @@ const GMAIL_TOOLS: RestToolSpec[] = [
       path: "/users/me/threads",
       query: {
         q: text(args, "query"),
-        maxResults: count(args, "max_results", 20),
+        maxResults: count(args, 20),
         pageToken: text(args, "page_token"),
       },
     }),
@@ -196,7 +261,7 @@ const GMAIL_TOOLS: RestToolSpec[] = [
     }),
     build: (args) => ({
       path: "/users/me/drafts",
-      query: { maxResults: count(args, "max_results", 20) },
+      query: { maxResults: count(args, 20) },
     }),
   },
 ];
@@ -224,7 +289,7 @@ const CALENDAR_TOOLS: RestToolSpec[] = [
         timeMin: text(args, "time_min"),
         timeMax: text(args, "time_max"),
         q: text(args, "query"),
-        maxResults: count(args, "max_results", 50),
+        maxResults: count(args, 50),
         singleEvents: "true",
         orderBy: "startTime",
       },
@@ -261,9 +326,7 @@ const CALENDAR_TOOLS: RestToolSpec[] = [
       ["time_min", "time_max"],
     ),
     build: (args) => {
-      const calendars = Array.isArray(args.calendar_ids)
-        ? args.calendar_ids.filter((id): id is string => typeof id === "string" && Boolean(id))
-        : [];
+      const calendars = (args.calendar_ids ?? []).filter(Boolean);
       return {
         method: "POST",
         path: "/freeBusy",
@@ -277,16 +340,16 @@ const CALENDAR_TOOLS: RestToolSpec[] = [
   },
 ];
 
-const TOOLS: Record<GoogleWorkspacePluginId, RestToolSpec[]> = {
+const TOOLS = {
   gmail: GMAIL_TOOLS,
   "google-calendar": CALENDAR_TOOLS,
-};
+} satisfies Record<GoogleWorkspacePluginId, RestToolSpec[]>;
 
 function toolInfo(spec: RestToolSpec): McpToolInfo {
   return {
     name: spec.name,
     description: spec.description,
-    inputSchema: spec.inputSchema as McpToolInfo["inputSchema"],
+    inputSchema: spec.inputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   };
 }
@@ -299,10 +362,17 @@ function requestUrl(base: string, request: RestRequest): string {
   return url.toString();
 }
 
+const GoogleErrorResponseSchema = Schema.Struct({
+  error: Schema.optional(Schema.Struct({ message: OptionalString })),
+});
+const decodeGoogleErrorResponse = Schema.decodeUnknownOption(GoogleErrorResponseSchema);
+
 async function errorMessage(response: Response): Promise<string> {
-  const body: unknown = await response.json().catch(() => null);
-  const error = record(record(body)?.error);
-  const message = error && typeof error.message === "string" ? error.message : "";
+  const decoded = decodeGoogleErrorResponse(await response.json().catch(() => null));
+  const message = Option.match(decoded, {
+    onNone: () => "",
+    onSome: (body) => body.error?.message ?? "",
+  });
   return message || `Google returned ${response.status}`;
 }
 
@@ -327,13 +397,14 @@ export function createGoogleRestConnection(input: GoogleRestConnectionInput): Mc
   const call = async (request: RestRequest, forceRefresh: boolean): Promise<Response> => {
     const headers = new Headers(await input.authorize(forceRefresh));
     if (request.body !== undefined) headers.set("content-type", "application/json");
-    return send(requestUrl(base, request), {
+    const init: RequestInit = {
       method: request.method ?? "GET",
       headers,
       redirect: "error",
-      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
       signal: signal(),
-    });
+    };
+    if (request.body !== undefined) init.body = JSON.stringify(request.body);
+    return send(requestUrl(base, request), init);
   };
 
   return {
@@ -342,10 +413,8 @@ export function createGoogleRestConnection(input: GoogleRestConnectionInput): Mc
       if (closed) throw new GoogleRestError(499, "Google connection is closed");
       const spec = TOOLS[input.service].find((candidate) => candidate.name === name);
       if (!spec) throw new GoogleRestError(404, `Unknown tool "${name}"`);
-      const request = spec.build(args ?? {});
+      const request = spec.build(decodeToolArguments(args ?? {}));
       let response = await call(request, false);
-      // Same contract as the MCP HTTP client: one silent retry with a freshly
-      // minted access token before surfacing an authorization failure.
       if (response.status === 401) response = await call(request, true);
       if (!response.ok) {
         return {
@@ -353,7 +422,7 @@ export function createGoogleRestConnection(input: GoogleRestConnectionInput): Mc
           content: [{ type: "text", text: `${name} failed: ${await errorMessage(response)}` }],
         };
       }
-      const payload: unknown = await response.json().catch(() => null);
+      const payload = decodeJson(await response.json().catch(() => null));
       const projected = spec.project ? spec.project(payload) : payload;
       return { content: [{ type: "text", text: JSON.stringify(projected, null, 2) }] };
     },

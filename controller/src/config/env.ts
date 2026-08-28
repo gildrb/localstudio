@@ -49,6 +49,30 @@ export const loadDotEnvironment = (): string | undefined => {
 const defaultModelsDirectory = (): string =>
   process.platform === "win32" ? join(homedir(), "models") : "/models";
 
+const validateControllerAccess = (
+  config: Config,
+  host: string,
+  allowedHosts: string[] | undefined,
+  allowUnauthenticated: boolean,
+): void => {
+  if (!config.api_key && !allowUnauthenticated && !isLoopbackHost(host)) {
+    throw new Error(
+      "LOCAL_STUDIO_API_KEY is required when binding the controller to a non-loopback host. Set LOCAL_STUDIO_ALLOW_UNAUTHENTICATED=true only for trusted local environments.",
+    );
+  }
+  if (!config.api_key && isWildcardHost(host) && allowedHosts?.length === 0) {
+    throw new Error(
+      "LOCAL_STUDIO_ALLOWED_HOSTS is required for a keyless wildcard controller bind",
+    );
+  }
+};
+
+const applyPersistedConfig = (config: Config): void => {
+  const persisted = loadPersistedConfig(config.data_dir);
+  if (persisted.models_dir) config.models_dir = resolve(persisted.models_dir);
+  if (Array.isArray(persisted.providers)) config.providers = persisted.providers;
+};
+
 export const createConfig = (): Config => {
   loadDotEnvironment();
 
@@ -141,36 +165,20 @@ export const createConfig = (): Config => {
     db_path: databasePath,
     models_dir: resolve(parsed.LOCAL_STUDIO_MODELS_DIR),
     strict_openai_models: strictOpenAIModelsEnabled,
-    ...(allowedHosts ? { allowed_hosts: allowedHosts } : {}),
     cors_origins: parseCorsOrigins(parsed.LOCAL_STUDIO_CORS_ORIGINS),
     providers: [],
   };
 
-  if (apiKey) {
-    config.api_key = apiKey;
-  }
+  if (apiKey) config.api_key = apiKey;
+  if (allowedHosts) config.allowed_hosts = allowedHosts;
 
-  const allowUnauthenticated = parseBooleanFlag(parsed.LOCAL_STUDIO_ALLOW_UNAUTHENTICATED);
-  if (!config.api_key && !allowUnauthenticated && !isLoopbackHost(host)) {
-    throw new Error(
-      "LOCAL_STUDIO_API_KEY is required when binding the controller to a non-loopback host. Set LOCAL_STUDIO_ALLOW_UNAUTHENTICATED=true only for trusted local environments.",
-    );
-  }
-  if (!config.api_key && isWildcardHost(host) && allowedHosts?.length === 0) {
-    throw new Error(
-      "LOCAL_STUDIO_ALLOWED_HOSTS is required for a keyless wildcard controller bind",
-    );
-  }
-
-
-  const persisted = loadPersistedConfig(config.data_dir);
-  if (persisted.models_dir) {
-    config.models_dir = resolve(persisted.models_dir);
-  }
-
-  if (Array.isArray(persisted.providers)) {
-    config.providers = persisted.providers;
-  }
+  validateControllerAccess(
+    config,
+    host,
+    allowedHosts,
+    parseBooleanFlag(parsed.LOCAL_STUDIO_ALLOW_UNAUTHENTICATED),
+  );
+  applyPersistedConfig(config);
 
   return config;
 };

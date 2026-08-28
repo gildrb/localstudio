@@ -1,17 +1,8 @@
-import { type NextRequest } from "next/server";
-import { proxyToAgentRuntime } from "@/app/api/agent/proxy-to-runtime";
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(request: NextRequest): Promise<Response> {
-  return proxyToAgentRuntime(request);
-}
-
-export async function POST(request: NextRequest): Promise<Response> {
-  return proxyToAgentRuntime(request);
-}
-
-export async function DELETE(request: NextRequest): Promise<Response> {
-  return proxyToAgentRuntime(request);
-}
+export {
+  authProxy as GET,
+  authProxy as POST,
+  authProxy as DELETE,
+} from "@/app/api/agent/route-proxy";

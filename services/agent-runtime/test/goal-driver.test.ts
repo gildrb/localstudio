@@ -1,212 +1,195 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { cleanTemps, isolatedDataDir } from "./test-fixtures";
 import { attachGoalDriver, markGoalTurnAborted } from "../src/goal-driver";
 import { readGoal, writeGoal } from "../src/goals-store";
-import type { LoggedPiEvent, PiAgentSession } from "../src/pi-runtime-types";
+import type { LoggedPiEvent, PiAgentSession, PiAgentStatus } from "../src/pi-runtime-types";
 
-const PI_SESSION_ID = "goal-driver-test-session";
-const temporaryRoots: string[] = [];
-const originalDataDir = process.env.LOCAL_STUDIO_DATA_DIR;
-
+const id = "goal-driver-test-session";
+const original = process.env.LOCAL_STUDIO_DATA_DIR;
+const disposers = new Set<() => void>();
 beforeEach(() => {
-  const dataDir = mkdtempSync(path.join(tmpdir(), "goal-driver-"));
-  temporaryRoots.push(dataDir);
-  process.env.LOCAL_STUDIO_DATA_DIR = dataDir;
+  const directory = isolatedDataDir("goal-driver-");
+  process.env.LOCAL_STUDIO_DATA_DIR = directory;
+  jest.useFakeTimers();
 });
-
 afterEach(() => {
-  if (originalDataDir === undefined) delete process.env.LOCAL_STUDIO_DATA_DIR;
-  else process.env.LOCAL_STUDIO_DATA_DIR = originalDataDir;
-  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const dispose of disposers) dispose();
+  disposers.clear();
+  if (original === undefined) delete process.env.LOCAL_STUDIO_DATA_DIR;
+  else process.env.LOCAL_STUDIO_DATA_DIR = original;
+  jest.useRealTimers();
+  cleanTemps();
 });
 
+type GoalEvent = LoggedPiEvent["event"];
 type Harness = {
   session: PiAgentSession;
-  emit: (event: Record<string, unknown>) => void;
+  status: PiAgentStatus;
+  emit: (event: GoalEvent) => void;
+  waitForIdle: () => Promise<void>;
   prompts: string[];
 };
-
 function harness(): Harness {
-  const listeners: Array<(logged: LoggedPiEvent) => void> = [];
-  const prompts: string[] = [];
+  const listeners: Array<(event: LoggedPiEvent) => void> = [],
+    prompts: string[] = [];
   let seq = 0;
-  const session = {
-    status: {
-      running: false,
-      active: false,
-      modelId: "test",
-      cwd: "/tmp",
-      piSessionId: PI_SESSION_ID,
-      agentDir: "/tmp",
-      eventSeq: 0,
-      lastError: null,
-      contextUsage: null,
+  const status: PiAgentStatus = {
+    running: false,
+    active: false,
+    modelId: "test",
+    cwd: "/tmp",
+    piSessionId: id,
+    agentDir: "/tmp",
+    eventSeq: 0,
+    lastError: null,
+    contextUsage: null,
+  };
+  const session: PiAgentSession = {
+    status,
+    async ensureStarted() {},
+    async prompt(message) {
+      prompts.push(message);
     },
-    onLoggedEvent(listener: (logged: LoggedPiEvent) => void) {
+    async steer() {},
+    async mutateQueuedFollowUp() {},
+    async followUp() {},
+    async abort() {
+      return { steering: [], followUp: [] };
+    },
+    async compact() {
+      throw new Error("compact is not available in the goal-driver harness");
+    },
+    async stop() {},
+    getEventsAfter() {
+      return [];
+    },
+    onLoggedEvent(listener) {
       listeners.push(listener);
       return () => undefined;
     },
-    async prompt(message: string) {
-      prompts.push(message);
+    adoptPiSessionId(piSessionId) {
+      status.piSessionId = piSessionId ?? null;
     },
-  } as unknown as PiAgentSession;
-  attachGoalDriver(session);
+    respondExtensionUi() {
+      return false;
+    },
+  };
+  const control = attachGoalDriver(session);
+  disposers.add(() => control.dispose());
   return {
     session,
+    status,
     prompts,
-    emit: (event) => {
-      seq += 1;
-      for (const listener of listeners) listener({ seq, event, timestamp: "" });
+    waitForIdle: () => control.waitForIdle(),
+    emit(event) {
+      for (const listener of listeners) listener({ seq: ++seq, event, timestamp: "" });
     },
   };
 }
-
-const assistantSays = (text: string) => ({
+const says = (text: string) => ({
   type: "message",
   message: { role: "assistant", content: [{ type: "text", text }] },
 });
-
-/**
- * The driver settles asynchronously off the event stream, so wait for the goal
- * record to stop changing rather than for a fixed delay. A single 30ms sleep
- * raced the driver on loaded CI runners: the assertions ran while the turn was
- * still being processed, so the suite failed intermittently on CI while
- * passing on every developer machine.
- */
-const flush = async (): Promise<void> => {
-  const deadline = Date.now() + 2_000;
-  let previous = JSON.stringify(await readGoal(PI_SESSION_ID));
-  let stableReads = 0;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    const current = JSON.stringify(await readGoal(PI_SESSION_ID));
-    stableReads = current === previous ? stableReads + 1 : 0;
-    previous = current;
-    if (stableReads >= 3) return;
-  }
-};
-
-async function setGoal(patch: Parameters<typeof writeGoal>[1] = {}) {
-  await writeGoal(PI_SESSION_ID, {
+const goal = (patch: Parameters<typeof writeGoal>[1] = {}) =>
+  writeGoal(id, {
     objective: "ship the release",
     status: "active",
     resetProgress: true,
     ...patch,
   });
+async function turn(harness: Harness, text?: string): Promise<void> {
+  harness.emit({ type: "agent_start" });
+  if (text) harness.emit(says(text));
+  harness.emit({ type: "agent_settled" });
+  await harness.waitForIdle();
 }
 
-describe("a settled turn advances the goal", () => {
-  test("an ordinary turn counts and leaves the goal active", async () => {
-    const { emit } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    emit(assistantSays("Rebuilt the bundle."));
-    emit({ type: "agent_settled" });
-    await flush();
-    const goal = await readGoal(PI_SESSION_ID);
-    expect(goal?.status).toBe("active");
-    expect(goal?.turnsUsed).toBe(1);
-  });
-
-  test("the completion sentinel from THIS turn settles the goal", async () => {
-    const { emit } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    emit(assistantSays("All green.\nGOAL_COMPLETE"));
-    emit({ type: "agent_settled" });
-    await flush();
-    expect((await readGoal(PI_SESSION_ID))?.status).toBe("complete");
-  });
-
-  test("a turn that produced no text cannot inherit the previous turn's sentinel", async () => {
-    const { emit } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    emit(assistantSays("All green.\nGOAL_COMPLETE"));
-    emit({ type: "agent_settled" });
-    await flush();
-    // The goal is re-aimed; the transcript still ends in GOAL_COMPLETE.
-    await setGoal({ objective: "now do the next thing" });
-    emit({ type: "agent_start" });
-    emit({ type: "tool_execution_start" });
-    emit({ type: "agent_settled" });
-    await flush();
-    const goal = await readGoal(PI_SESSION_ID);
-    expect(goal?.status).toBe("active");
-    expect(goal?.turnsUsed).toBe(1);
-  });
-
-  test("a spent turn budget stops the pursuit", async () => {
-    const { emit } = harness();
-    await setGoal({ turnBudget: 1 });
-    emit({ type: "agent_start" });
-    emit(assistantSays("Working."));
-    emit({ type: "agent_settled" });
-    await flush();
-    const goal = await readGoal(PI_SESSION_ID);
-    expect(goal?.status).toBe("budget_limited");
-    expect(goal?.turnsUsed).toBe(1);
-  });
-
-  test("pursuit time is banked per run, not measured from createdAt", async () => {
-    const { emit } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    await flush();
-    expect((await readGoal(PI_SESSION_ID))?.activeRunStartedAt).not.toBeNull();
-    emit({ type: "agent_settled" });
-    await flush();
-    const goal = await readGoal(PI_SESSION_ID);
-    expect(goal?.activeRunStartedAt).toBeNull();
-    expect(goal?.timeUsedSeconds).toBeGreaterThanOrEqual(0);
-  });
+test("ordinary turns count and remain active", async () => {
+  const h = harness();
+  await goal();
+  await turn(h, "Rebuilt the bundle.");
+  const result = await readGoal(id);
+  expect(result?.status).toBe("active");
+  expect(result?.turnsUsed).toBe(1);
 });
 
-describe("a stopped pursuit says so", () => {
-  test("Stop pauses the goal instead of re-prompting two seconds later", async () => {
-    const { session, emit, prompts } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    // The SDK emits agent_settled from a `finally`, so an abort looks exactly
-    // like a completed turn unless the abort path marks it first.
-    markGoalTurnAborted(session);
-    emit({ type: "agent_settled" });
-    await flush();
-    expect((await readGoal(PI_SESSION_ID))?.status).toBe("paused");
-    await new Promise((resolve) => setTimeout(resolve, 2200));
-    expect(prompts).toHaveLength(0);
-  });
+test("this turn's completion sentinel settles the goal", async () => {
+  const h = harness();
+  await goal();
+  await turn(h, "All green.\nGOAL_COMPLETE");
+  expect((await readGoal(id))?.status).toBe("complete");
+});
 
-  test("a runtime error pauses rather than spinning", async () => {
-    const { session, emit } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    (session.status as { lastError: string | null }).lastError = "model unreachable";
-    emit({ type: "agent_settled" });
-    await flush();
-    expect((await readGoal(PI_SESSION_ID))?.status).toBe("paused");
-  });
+test("textless turns do not inherit old sentinels", async () => {
+  const h = harness();
+  await goal();
+  await turn(h, "All green.\nGOAL_COMPLETE");
+  await goal({ objective: "now do the next thing" });
+  h.emit({ type: "agent_start" });
+  h.emit({ type: "tool_execution_start" });
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
+  const result = await readGoal(id);
+  expect(result?.status).toBe("active");
+  expect(result?.turnsUsed).toBe(1);
+});
 
-  test("a continuation that made no tool call parks the goal instead of silently giving up", async () => {
-    const { emit, prompts } = harness();
-    await setGoal();
-    emit({ type: "agent_start" });
-    emit(assistantSays("Working."));
-    emit({ type: "agent_settled" });
-    await flush();
-    await new Promise((resolve) => setTimeout(resolve, 2200));
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain("ship the release");
+test("spent turn budgets stop pursuit", async () => {
+  const h = harness();
+  await goal({ turnBudget: 1 });
+  await turn(h, "Working.");
+  const result = await readGoal(id);
+  expect(result?.status).toBe("budget_limited");
+  expect(result?.turnsUsed).toBe(1);
+});
 
-    // The continuation replies with words and no tool call — the spin case.
-    emit(assistantSays("I think we are nearly there."));
-    emit({ type: "agent_settled" });
-    await flush();
-    // The status is PERSISTED, so the UI stops claiming the goal is being
-    // pursued and offers Resume, rather than the driver stopping in memory
-    // while the stored status still reads "active".
-    expect((await readGoal(PI_SESSION_ID))?.status).toBe("paused");
-  });
+test("pursuit time is banked per run", async () => {
+  const h = harness();
+  await goal();
+  h.emit({ type: "agent_start" });
+  await h.waitForIdle();
+  expect((await readGoal(id))?.activeRunStartedAt).not.toBeNull();
+  jest.advanceTimersByTime(1_500);
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
+  const result = await readGoal(id);
+  expect(result?.activeRunStartedAt).toBeNull();
+  expect(result?.timeUsedSeconds).toBe(1.5);
+});
+
+test("Stop pauses without reprompting", async () => {
+  const h = harness();
+  await goal();
+  h.emit({ type: "agent_start" });
+  markGoalTurnAborted(h.session);
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
+  expect((await readGoal(id))?.status).toBe("paused");
+  jest.advanceTimersByTime(2_000);
+  await h.waitForIdle();
+  expect(h.prompts).toHaveLength(0);
+});
+
+test("runtime errors pause pursuit", async () => {
+  const h = harness();
+  await goal();
+  h.emit({ type: "agent_start" });
+  h.status.lastError = "model unreachable";
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
+  expect((await readGoal(id))?.status).toBe("paused");
+});
+
+test("tool-free continuations park the goal", async () => {
+  const h = harness();
+  await goal();
+  await turn(h, "Working.");
+  jest.advanceTimersByTime(2_000);
+  await h.waitForIdle();
+  expect(h.prompts).toHaveLength(1);
+  expect(h.prompts[0]).toContain("ship the release");
+  h.emit(says("I think we are nearly there."));
+  h.emit({ type: "agent_settled" });
+  await h.waitForIdle();
+  expect((await readGoal(id))?.status).toBe("paused");
 });

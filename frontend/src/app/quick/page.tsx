@@ -1,32 +1,16 @@
-"use client";
-
 import { Suspense } from "react";
-import { AgentWorkspace } from "@/features/agent/ui/agent-workspace-shell";
-import { ToolsProvider } from "@/features/agent/tools/context";
-import { getQuickPanelBridge } from "@/features/agent/ui/quick-panel/quick-panel-bridge";
-import { useMountSubscription } from "@/hooks/use-mount-subscription";
-
-function useDismissOnEscape(): void {
-  useMountSubscription(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      const bridge = getQuickPanelBridge();
-      if (!bridge) return;
-      event.preventDefault();
-      void bridge.dismiss();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-}
-
-export default function QuickPanelPage() {
-  useDismissOnEscape();
+import { Workbench } from "@/features/studio";
+export default function Page() {
   return (
-    <ToolsProvider>
-      <Suspense fallback={null}>
-        <AgentWorkspace compact />
-      </Suspense>
-    </ToolsProvider>
+    <Suspense
+      fallback={
+        <main>
+          <h1>Quick panel</h1>
+          <p>Loading local workspace…</p>
+        </main>
+      }
+    >
+      <Workbench quick />
+    </Suspense>
   );
 }

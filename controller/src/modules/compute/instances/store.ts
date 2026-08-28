@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import type {
   DeviceId,
   EngineId,
@@ -22,6 +22,9 @@ import type {
   EngineRuntimeKind,
 } from "../contracts";
 import { decodeInstanceRecord } from "./record-schema";
+
+const ErrorCodeSchema = Schema.Struct({ code: Schema.String });
+const decodeErrorCode = Schema.decodeUnknownOption(ErrorCodeSchema);
 
 /**
  * The instance store: one JSON file per running deployment, written write-then-rename so
@@ -83,8 +86,6 @@ const pidAlive = (pid: number): boolean => {
   }
 };
 
-/* ── placement lock ──────────────────────────────────────────────────────── */
-
 // Reservation is a read-modify-write over the record set, so two concurrent launches
 // could otherwise both see the same free devices. exo's build-lock recipe: create with
 // "wx" (atomic on every OS), holder pid inside, stale iff the holder is dead — SIGKILL
@@ -115,9 +116,7 @@ const lockIsStale = (lockPath: string): boolean => {
 const releaseLock = (lockPath: string): void => {
   try {
     rmSync(lockPath);
-  } catch {
-    /* already gone */
-  }
+  } catch {}
 };
 
 const acquirePlacementLock = (lockPath: string): Effect.Effect<void, LaunchFailure> =>
@@ -138,8 +137,6 @@ const acquirePlacementLock = (lockPath: string): Effect.Effect<void, LaunchFailu
     }
   });
 
-/* ── store ───────────────────────────────────────────────────────────────── */
-
 export const makeInstanceStore = (dataDirectory: string): InstanceStore => {
   const directory = join(dataDirectory, "instances");
   const logsDirectory = join(directory, "logs");
@@ -153,23 +150,19 @@ export const makeInstanceStore = (dataDirectory: string): InstanceStore => {
     try {
       const path = recordPath(name);
       chmodSync(path, 0o600);
-      return decodeInstanceRecord(JSON.parse(readFileSync(path, "utf8")) as unknown);
+      return decodeInstanceRecord(JSON.parse(readFileSync(path, "utf8")));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      const decodedError = decodeErrorCode(error);
+      if (decodedError._tag === "Some" && decodedError.value.code === "ENOENT") return null;
       throw error;
     }
   };
 
-  const all = (): readonly InstanceRecord[] => {
-    try {
-      return readdirSync(directory)
-        .filter((file) => file.endsWith(".json"))
-        .map((file) => read(file.slice(0, -".json".length)))
-        .filter((record): record is InstanceRecord => record !== null);
-    } catch (error) {
-      throw error;
-    }
-  };
+  const all = (): readonly InstanceRecord[] =>
+    readdirSync(directory)
+      .filter((file) => file.endsWith(".json"))
+      .map((file) => read(file.slice(0, -".json".length)))
+      .filter((record): record is InstanceRecord => record !== null);
 
   const write = (record: InstanceRecord): void => {
     const path = recordPath(record.name);
@@ -194,9 +187,7 @@ export const makeInstanceStore = (dataDirectory: string): InstanceStore => {
   const drop = (name: string): void => {
     try {
       rmSync(recordPath(name));
-    } catch {
-      /* already gone */
-    }
+    } catch {}
   };
 
   const heldDevices = (

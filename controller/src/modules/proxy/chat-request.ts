@@ -1,4 +1,6 @@
 import type { Logger } from "../../core/logger";
+import type { ProxyPayload } from "./usage-observer";
+import { isProxyObject, stringFromProxyValue } from "./usage-observer";
 import type { AppContext } from "../../app-context";
 import { Effect } from "effect";
 import type { Recipe } from "../models/types";
@@ -17,6 +19,20 @@ const PROXY_SESSION_HEADER_NAMES = [
 ];
 
 const NON_RUNNING_MODEL_WARN_INTERVAL_MS = 10 * 60_000;
+
+interface WarningLogDetails {
+  [key: string]: string | number | null | undefined;
+  requested_model: string | null;
+  requested_recipe_id: string;
+  active_model: string | null;
+  source: string | null;
+  suppressed_requests?: number;
+}
+
+export interface UpstreamAuth {
+  [key: string]: string;
+  Authorization: string;
+}
 
 interface NonRunningModelWarningState {
   lastWarnAt: number;
@@ -51,32 +67,34 @@ export const createNonRunningModelWarner = (
 
     const suppressed = state.suppressed;
     warnings.set(key, { lastWarnAt: now, suppressed: 0 });
-    logger.warn("Rejected chat request for non-running model", {
+    const logDetails: WarningLogDetails = {
       requested_model: details.requestedModel,
       requested_recipe_id: details.requestedRecipeId,
       active_model: details.activeModel,
       source: details.source,
-      ...(suppressed > 0 ? { suppressed_requests: suppressed } : {}),
-    });
+    };
+    if (suppressed > 0) logDetails.suppressed_requests = suppressed;
+    logger.warn("Rejected chat request for non-running model", logDetails);
   };
 };
 
 export const extractSessionId = (
-  parsedBody: Record<string, unknown>,
+  parsedBody: ProxyPayload,
   header: (name: string) => string | undefined,
 ): string | null => {
   const fromHeader = PROXY_SESSION_HEADER_NAMES.map((name) => header(name)).find(Boolean);
   if (fromHeader?.trim()) return fromHeader.trim();
 
-  const direct = parsedBody["session_id"] ?? parsedBody["sessionId"] ?? parsedBody["chat_id"];
-  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const direct = stringFromProxyValue(
+    parsedBody.session_id ?? parsedBody.sessionId ?? parsedBody.chat_id,
+  );
+  if (direct?.trim()) return direct.trim();
 
-  const metadata = parsedBody["metadata"];
-  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
-    const record = metadata as Record<string, unknown>;
-    const fromMetadata = record["session_id"] ?? record["sessionId"] ?? record["chat_id"];
-    if (typeof fromMetadata === "string" && fromMetadata.trim()) return fromMetadata.trim();
-  }
+  const metadata = parsedBody.metadata;
+  const fromMetadata = stringFromProxyValue(
+    metadata?.session_id ?? metadata?.sessionId ?? metadata?.chat_id,
+  );
+  if (fromMetadata?.trim()) return fromMetadata.trim();
 
   return null;
 };
@@ -100,10 +118,9 @@ export const findRecipeByModel = (
 
 export interface UpstreamResolution {
   upstreamUrl: string;
-  auth: Record<string, string>;
+  auth: Partial<UpstreamAuth>;
   requestProvider: string;
   providerRouting: ProviderRouteConfig | null;
-  rewroteModel: boolean;
 }
 
 /**
@@ -115,7 +132,7 @@ export interface UpstreamResolution {
  */
 export const resolveUpstreamForModel = (
   requestedModel: string | null,
-  parsed: Record<string, unknown>,
+  parsed: ProxyPayload,
   path: string,
   context: AppContext,
   options: { includeXApiKey?: boolean } = {},
@@ -130,17 +147,15 @@ export const resolveUpstreamForModel = (
       : null;
   if (providerRouting) {
     parsed["model"] = providerModel.modelId;
+    const auth: UpstreamAuth = {
+      Authorization: `Bearer ${providerRouting.apiKey}`,
+    };
+    if (options.includeXApiKey) auth["x-api-key"] = providerRouting.apiKey;
     return {
       upstreamUrl: `${providerRouting.baseUrl.replace(/\/+$/, "")}${path}`,
-      auth: {
-        Authorization: `Bearer ${providerRouting.apiKey}`,
-        // The Anthropic dialect authenticates with x-api-key; sending both
-        // lets one configured key reach either kind of upstream.
-        ...(options.includeXApiKey ? { "x-api-key": providerRouting.apiKey } : {}),
-      },
+      auth,
       requestProvider,
       providerRouting,
-      rewroteModel: true,
     };
   }
   const inferenceKey = process.env["INFERENCE_API_KEY"] ?? "";
@@ -149,20 +164,14 @@ export const resolveUpstreamForModel = (
     auth: inferenceKey ? { Authorization: `Bearer ${inferenceKey}` } : {},
     requestProvider,
     providerRouting: null,
-    rewroteModel: false,
   };
 };
 
-export const ensureStreamingUsageIncluded = (payload: Record<string, unknown>): boolean => {
-  if (!Boolean(payload["stream"])) return false;
-  const existingStreamOptions =
-    payload["stream_options"] &&
-    typeof payload["stream_options"] === "object" &&
-    !Array.isArray(payload["stream_options"])
-      ? (payload["stream_options"] as Record<string, unknown>)
-      : {};
+export const ensureStreamingUsageIncluded = (payload: ProxyPayload): boolean => {
+  if (!payload.stream) return false;
+  const existingStreamOptions = isProxyObject(payload.stream_options) ? payload.stream_options : {};
   if (existingStreamOptions["include_usage"] === true) return false;
-  payload["stream_options"] = {
+  payload.stream_options = {
     ...existingStreamOptions,
     include_usage: true,
   };

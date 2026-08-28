@@ -1,21 +1,3 @@
-//
-// Subagents: child pi sessions a parent session's model spawns through the
-// `subagent` tool, plus the management half it supervises them with —
-// `subagent_list`, `subagent_status`, `subagent_stop`.
-//
-// Each subagent runs headless in this runtime under the reserved runtime key
-// `subagent:<parent pi session id>:<run id>`, with its own context and its own
-// canonical session file (so the UI can open it like any other session), and
-// reports its final text back as the tool result.
-//
-// The registry below is keyed by parent pi session id, and that is what keeps
-// the two safety properties intact as management grows:
-//   * every lookup goes through the caller's own parent bucket, so a session
-//     can only ever see, inspect, or stop the children it spawned itself;
-//   * a child's runtime key carries the reserved prefix, so when it asks to
-//     spawn, findParentRuntime resolves that key and the spawn is refused.
-//
-
 import { randomUUID } from "node:crypto";
 import { getGlobalSingleton } from "./instances";
 import { piRuntimeManager } from "./pi-runtime";
@@ -53,9 +35,9 @@ export const MAX_CONCURRENT_PER_PARENT = 4;
 const MAX_RESULT_CHARS = 8000;
 const SUBAGENT_SESSION_PREFIX = "subagent:";
 
-/** A run is "running" until exactly one of its terminal states is written:
- *  "done"/"error" by the run itself, "cancelled" by stopSubagent. */
 export type SubagentStatus = "running" | "done" | "error" | "cancelled";
+
+export type SubagentResult = { piSessionId: string | null; result: string };
 
 export type SubagentRun = {
   id: string;
@@ -63,7 +45,6 @@ export type SubagentRun = {
   name: string;
   task: string;
   piSessionId: string | null;
-  /** Reserved runtime key this child owns — also the no-nesting marker. */
   runtimeSessionId: string;
   cwd: string;
   status: SubagentStatus;
@@ -73,11 +54,8 @@ export type SubagentRun = {
 };
 
 type SubagentState = {
-  /** parent pi session id -> runs, newest last */
   byParent: Map<string, SubagentRun[]>;
-  /** pi session ids that ARE subagents — they may not spawn their own */
   childPiSessionIds: Set<string>;
-  /** parents whose durable children have been folded in this process. */
   rehydratedParents: Set<string>;
 };
 
@@ -89,16 +67,6 @@ function state(): SubagentState {
   }));
 }
 
-/**
- * Fold this parent's persisted children back into the in-memory registry.
- *
- * The registry dies with the process, but the parent link is durable — without
- * this, an app relaunch made subagent_list swear the session never spawned
- * anything while the sidebar still showed the children. A rehydrated run is
- * terminal by construction (the runtime that was driving it is gone), so it
- * comes back as "done" with its report still readable from the child's
- * transcript.
- */
 function rehydrateParent(parentPiSessionId: string): void {
   const registry = state();
   if (registry.rehydratedParents.has(parentPiSessionId)) return;
@@ -122,7 +90,6 @@ function rehydrateParent(parentPiSessionId: string): void {
       finishedAt: child.updatedAt,
     });
   }
-  // Oldest first, matching insertion order for live runs.
   live.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   registry.byParent.set(parentPiSessionId, live);
 }
@@ -132,7 +99,6 @@ export function listSubagents(parentPiSessionId: string): SubagentRun[] {
   return state().byParent.get(parentPiSessionId) ?? [];
 }
 
-/** Scoped lookup: a run is only reachable through the parent that spawned it. */
 export function findSubagent(parentPiSessionId: string, runId: string): SubagentRun | null {
   const target = runId.trim();
   return listSubagents(parentPiSessionId).find((run) => run.id === target) ?? null;
@@ -144,7 +110,6 @@ function findParentRuntime(parentPiSessionId: string) {
     .find(({ session }) => session.status.piSessionId === parentPiSessionId);
 }
 
-/** The child's live runtime entry, if this runtime still holds one. */
 function findChildRuntime(run: SubagentRun) {
   return piRuntimeManager.findSessionForLookup(run.runtimeSessionId, run.piSessionId);
 }
@@ -159,31 +124,25 @@ function taskPrompt(name: string, task: string): string {
   ].join("\n");
 }
 
-/** Cap the report the parent sees, but say so rather than cutting silently —
- *  the full text stays readable in the subagent's own session. */
 function clampReport(text: string): string {
   if (text.length <= MAX_RESULT_CHARS) return text;
   const dropped = text.length - MAX_RESULT_CHARS;
   return `${text.slice(0, MAX_RESULT_CHARS)}\n\n[truncated — ${dropped} more characters; open the subagent's session for the rest]`;
 }
 
-/** Whatever the child has written to its transcript so far. Readable mid-run,
- *  so a still-working subagent can be inspected rather than only awaited. */
 export function subagentReport(run: SubagentRun): LastAssistantResult {
   if (!run.piSessionId) return { text: "", error: null };
   const result = lastAssistantResult(run.cwd, run.piSessionId);
-  // Aborting the child writes "Request was aborted" into its transcript as an
-  // assistant error; adopting it would paint a deliberate stop as a failure.
-  return { text: clampReport(result.text), error: run.status === "cancelled" ? null : result.error };
+  return {
+    text: clampReport(result.text),
+    error: run.status === "cancelled" ? null : result.error,
+  };
 }
 
-/** True while this runtime still has the child streaming. */
 export function subagentIsActive(run: SubagentRun): boolean {
   return findChildRuntime(run)?.session.status.active === true;
 }
 
-/** Terminal states are write-once: the first writer wins, so a prompt that
- *  unblocks because stopSubagent aborted it cannot re-report itself as done. */
 function settle(run: SubagentRun, status: SubagentStatus, error?: string): void {
   if (run.status !== "running") return;
   run.status = status;
@@ -191,9 +150,6 @@ function settle(run: SubagentRun, status: SubagentStatus, error?: string): void 
   run.finishedAt = new Date().toISOString();
 }
 
-/** Record the child's pi session id as soon as it exists — before the prompt,
- *  not after it returns. That is what makes a running child reachable: the UI
- *  can open it, and the no-nesting guard sees it in childPiSessionIds. */
 async function adoptChildSession(run: SubagentRun, piSessionId: string | null): Promise<void> {
   if (!piSessionId || run.piSessionId === piSessionId) return;
   run.piSessionId = piSessionId;
@@ -205,9 +161,6 @@ async function adoptChildSession(run: SubagentRun, piSessionId: string | null): 
   }).catch(() => undefined);
 }
 
-/** Stop a child this session spawned. Settling the run first frees its slot
- *  against the concurrency cap immediately, so the parent can spawn a
- *  replacement without waiting on the child's teardown. */
 export async function stopSubagent(parentPiSessionId: string, runId: string): Promise<SubagentRun> {
   const run = findSubagent(parentPiSessionId, runId);
   if (!run) throw new Error(`No subagent "${runId}" was spawned by this session.`);
@@ -221,10 +174,7 @@ export async function stopSubagent(parentPiSessionId: string, runId: string): Pr
   return run;
 }
 
-function stoppedResult(
-  run: SubagentRun,
-  text: string,
-): { piSessionId: string | null; result: string } {
+function stoppedResult(run: SubagentRun, text: string): SubagentResult {
   const partial = text ? `\n\nPartial work so far:\n${text}` : "";
   return {
     piSessionId: run.piSessionId,
@@ -234,21 +184,16 @@ function stoppedResult(
 
 type SubagentSession = ReturnType<typeof piRuntimeManager.getSessionForLookup>["session"];
 
-/** Drive an already-started child's prompt to completion and settle its run.
- *  Runs detached from any HTTP response — the spawn call has long since
- *  answered by the time a real task finishes. */
 async function completeSubagent(
   run: SubagentRun,
   session: SubagentSession,
-): Promise<{ piSessionId: string | null; result: string }> {
+): Promise<SubagentResult> {
   try {
     await session.prompt(taskPrompt(run.name, run.task), () => {});
     const status = session.status;
     await adoptChildSession(run, status.piSessionId);
     const report = subagentReport(run);
     void session.stop().catch(() => undefined);
-    // A stop that landed mid-prompt already settled the run; report the partial
-    // work rather than overwriting the cancellation with done/error.
     if (run.status === "cancelled") return stoppedResult(run, report.text);
     const failure = status.lastError ?? report.error;
     if (failure) {
@@ -267,22 +212,15 @@ async function completeSubagent(
   }
 }
 
-/**
- * Vet, register, and start one child, returning as soon as it is prompting.
- *
- * `completion` settles when the child's whole run does. The spawn/await split
- * exists because the HTTP hops between the tool and this module enforce
- * Node's ~5-minute response-header timeout: awaiting completion inside the
- * request made every longer run die with a bogus "runtime unreachable" while
- * the child worked on. Callers either await `completion` (short waits) or
- * respond with the run id and let the tool poll status.
- */
 export async function spawnSubagent(input: {
   parentPiSessionId: string;
   name: string;
   task: string;
   modelId?: string;
-}): Promise<{ run: SubagentRun; completion: Promise<{ piSessionId: string | null; result: string }> }> {
+}): Promise<{
+  run: SubagentRun;
+  completion: Promise<SubagentResult>;
+}> {
   const registry = state();
   const { parentPiSessionId } = input;
 
@@ -344,7 +282,7 @@ export async function runSubagent(input: {
   name: string;
   task: string;
   modelId?: string;
-}): Promise<{ piSessionId: string | null; result: string }> {
+}): Promise<SubagentResult> {
   const { completion } = await spawnSubagent(input);
   return completion;
 }

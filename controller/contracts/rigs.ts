@@ -1,16 +1,20 @@
 import { Schema } from "effect";
 
-export type RigHardwareType =
-  | "dgx-spark"
-  | "gpu-desktop"
-  | "gpu-server"
-  | "mac"
-  | "laptop"
-  | "mini-pc"
-  | "custom";
+const RIG_HARDWARE_TYPE_VALUES = [
+  "dgx-spark",
+  "gpu-desktop",
+  "gpu-server",
+  "mac",
+  "laptop",
+  "mini-pc",
+  "custom",
+] as const;
+const RIG_NODE_ROLE_VALUES = ["head", "worker", "standalone"] as const;
 
-export type RigNodeRole = "head" | "worker" | "standalone";
-
+export type RigHardwareType = (typeof RIG_HARDWARE_TYPE_VALUES)[number];
+export type RigNodeRole = (typeof RIG_NODE_ROLE_VALUES)[number];
+export const RIG_HARDWARE_TYPES: RigHardwareType[] = [...RIG_HARDWARE_TYPE_VALUES];
+export const RIG_NODE_ROLES: RigNodeRole[] = [...RIG_NODE_ROLE_VALUES];
 export type RigNodeSource = "detected" | "manual";
 
 export interface RigAccelerator {
@@ -52,34 +56,6 @@ export interface RigsPayload {
   local_node_id: string;
 }
 
-export const RIG_HARDWARE_TYPES: RigHardwareType[] = [
-  "dgx-spark",
-  "gpu-desktop",
-  "gpu-server",
-  "mac",
-  "laptop",
-  "mini-pc",
-  "custom",
-];
-
-export const RIG_NODE_ROLES: RigNodeRole[] = ["head", "worker", "standalone"];
-
-export const RIG_HARDWARE_TYPE_LABELS: Record<RigHardwareType, string> = {
-  "dgx-spark": "DGX Spark",
-  "gpu-desktop": "GPU Desktop",
-  "gpu-server": "GPU Server",
-  mac: "Mac",
-  laptop: "Laptop",
-  "mini-pc": "Mini PC",
-  custom: "Custom",
-};
-
-export const RIG_NODE_ROLE_LABELS: Record<RigNodeRole, string> = {
-  head: "Head node",
-  worker: "Worker node",
-  standalone: "Standalone",
-};
-
 export const RigAcceleratorInputSchema = Schema.Struct({
   name: Schema.String,
   count: Schema.optional(Schema.Number),
@@ -99,8 +75,7 @@ export const RigUpdateSchema = Schema.Struct({
   description: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-export const RigNodeCreateSchema = Schema.Struct({
-  name: Schema.String,
+const RigNodeFields = {
   hardware_type: Schema.optional(Schema.Literals(RIG_HARDWARE_TYPES)),
   role: Schema.optional(Schema.Literals(RIG_NODE_ROLES)),
   hostname: Schema.optional(Schema.NullOr(Schema.String)),
@@ -110,17 +85,10 @@ export const RigNodeCreateSchema = Schema.Struct({
   memory_gb: Schema.optional(Schema.NullOr(Schema.Number)),
   accelerators: Schema.optional(Schema.Array(RigAcceleratorInputSchema)),
   notes: Schema.optional(Schema.NullOr(Schema.String)),
-});
+};
 
+export const RigNodeCreateSchema = Schema.Struct({ name: Schema.String, ...RigNodeFields });
 export const RigNodeUpdateSchema = Schema.Struct({
   name: Schema.optional(Schema.String),
-  hardware_type: Schema.optional(Schema.Literals(RIG_HARDWARE_TYPES)),
-  role: Schema.optional(Schema.Literals(RIG_NODE_ROLES)),
-  hostname: Schema.optional(Schema.NullOr(Schema.String)),
-  address: Schema.optional(Schema.NullOr(Schema.String)),
-  os: Schema.optional(Schema.NullOr(Schema.String)),
-  cpu_model: Schema.optional(Schema.NullOr(Schema.String)),
-  memory_gb: Schema.optional(Schema.NullOr(Schema.Number)),
-  accelerators: Schema.optional(Schema.Array(RigAcceleratorInputSchema)),
-  notes: Schema.optional(Schema.NullOr(Schema.String)),
+  ...RigNodeFields,
 });

@@ -4,7 +4,7 @@
  * (no loopback / private nets). Local file URLs are intentionally separate so
  * agent/browser-tool and server-side fetch paths cannot accidentally read disk.
  */
-function parseUrl(raw: string): URL | null {
+function parseUrl(raw: string) {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   try {
@@ -18,10 +18,17 @@ function isLocalHostname(host: string): boolean {
   return host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local");
 }
 
-function ipv4Octets(host: string): [number, number, number, number] | null {
+type Ipv4Octets = [number, number, number, number];
+
+function ipv4Octets(host: string): Ipv4Octets | null {
   const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!match) return null;
-  const octets = match.slice(1).map(Number) as [number, number, number, number];
+  const octets: Ipv4Octets = [
+    Number(match[1]),
+    Number(match[2]),
+    Number(match[3]),
+    Number(match[4]),
+  ];
   return octets.every((octet) => octet >= 0 && octet <= 255) ? octets : null;
 }
 
@@ -31,19 +38,24 @@ function ipv4Octets(host: string): [number, number, number, number] | null {
  * link-local. "blocked" is the residue nothing should ever dial: unspecified,
  * benchmarking, multicast/reserved, malformed literals.
  */
-function classifyIpv4([a, b]: [number, number, number, number]): BrowserHostClass {
-  if (a === 127) return "loopback";
-  if (
+function isPrivateIpv4(a: number, b: number): boolean {
+  return (
     a === 10 ||
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168)
-  ) {
-    return "private";
-  }
-  if (a === 0 || (a === 198 && (b === 18 || b === 19)) || a >= 224) return "blocked";
-  return "public";
+  );
+}
+
+function isBlockedIpv4(a: number, b: number): boolean {
+  return a === 0 || (a === 198 && (b === 18 || b === 19)) || a >= 224;
+}
+
+function classifyIpv4([a, b]: Ipv4Octets): BrowserHostClass {
+  if (a === 127) return "loopback";
+  if (isPrivateIpv4(a, b)) return "private";
+  return isBlockedIpv4(a, b) ? "blocked" : "public";
 }
 
 function classifyIpv6(normalized: string): BrowserHostClass {
@@ -58,7 +70,7 @@ function classifyIpv6(normalized: string): BrowserHostClass {
   return "public";
 }
 
-function ipv4FromMappedIpv6(host: string): [number, number, number, number] | null {
+function ipv4FromMappedIpv6(host: string): Ipv4Octets | null {
   const tail = host.startsWith("::ffff:")
     ? host.slice("::ffff:".length)
     : host.startsWith("0:0:0:0:0:ffff:")
@@ -73,7 +85,9 @@ function ipv4FromMappedIpv6(host: string): [number, number, number, number] | nu
   if (words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)) {
     return null;
   }
-  const [high, low] = words as [number, number];
+  const high = words[0];
+  const low = words[1];
+  if (high === undefined || low === undefined) return null;
   return [high >> 8, high & 0xff, low >> 8, low & 0xff];
 }
 
@@ -98,7 +112,10 @@ export type BrowserHostClass = "public" | "loopback" | "private" | "blocked";
  * plain loopback spellings earn the pane's localhost allowance.
  */
 export function classifyBrowserHost(host: string): BrowserHostClass {
-  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const normalized = host
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
   if (normalized === "localhost" || normalized.endsWith(".localhost")) return "loopback";
   // mDNS names live on the local network by definition.
   if (isLocalHostname(normalized)) return "private";
@@ -128,12 +145,4 @@ export function sanitizeBrowserPaneUrl(
   const hostClass = classifyBrowserHost(url.hostname);
   if (hostClass === "public" || hostClass === "loopback") return url.toString();
   return hostClass === "private" && options?.allowPrivate ? url.toString() : null;
-}
-
-export function sanitizeLocalFileUrl(raw: string): string | null {
-  const url = parseUrl(raw);
-  if (!url || url.protocol !== "file:") return null;
-  const host = url.hostname.toLowerCase();
-  if (host && host !== "localhost") return null;
-  return url.toString();
 }

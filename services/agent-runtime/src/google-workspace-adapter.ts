@@ -14,12 +14,6 @@ import {
   type GoogleWorkspaceIdentity,
 } from "./google-workspace-binding";
 
-/**
- * Turns one signed-in Google account into the one connector that exposes its
- * read-only tools. The binding is fixed in code — there is no manifest to read
- * and no bundle on disk to trust — so the (service, account) pair is the whole
- * identity, and the row is regenerated rather than edited.
- */
 function connectorFor(
   identity: GoogleWorkspaceIdentity,
   enabled: boolean,
@@ -58,7 +52,7 @@ export function enableGoogleWorkspaceAdapter(
           closePooledConnection(enabled.id);
           return saved;
         },
-        catch: (error) => new Error(`Google Workspace adapter failed: ${error}`),
+        catch: (error) => new Error(`Google Workspace adapter failed: ${String(error)}`),
       }),
     ),
   );
@@ -82,7 +76,7 @@ export function googleWorkspaceAdapterEnabled(
       ownedGoogleWorkspaceConnectors(await listConnectors(), identity).some(
         (connector) => connector.enabled,
       ),
-    catch: (error) => new Error(`Google Workspace adapter state failed: ${error}`),
+    catch: (error) => new Error(`Google Workspace adapter state failed: ${String(error)}`),
   });
 }
 
@@ -100,7 +94,7 @@ export function restoreGoogleWorkspaceAdapter(
           closePooledConnection(googleWorkspaceConnectorId(identity.service, identity.accountKey));
           return saved;
         },
-        catch: (error) => new Error(`Google Workspace adapter restore failed: ${error}`),
+        catch: (error) => new Error(`Google Workspace adapter restore failed: ${String(error)}`),
       }),
     ),
   );
@@ -118,6 +112,6 @@ export function disableGoogleWorkspaceAdapter(
       owned.forEach((connector) => closePooledConnection(connector.id));
       return saved;
     },
-    catch: (error) => new Error(`Google Workspace disconnect failed: ${error}`),
+    catch: (error) => new Error(`Google Workspace disconnect failed: ${String(error)}`),
   });
 }

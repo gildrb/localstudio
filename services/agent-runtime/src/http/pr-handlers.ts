@@ -1,17 +1,12 @@
-// HTTP surface for GitHub pull-request info, backed by the `gh` CLI. Every
-// call runs `gh` with cwd pinned to the request's validated project workspace
-// (same allowlist as the session/git handlers) and array-form args (no shell),
-// so a project path can never inject flags. Missing gh, an unauthenticated
-// gh, or a non-repo cwd all come back as clean 200s carrying {error} so the
-// panel can render a friendly empty state instead of a 500.
-
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { Option, Schema } from "effect";
 import {
   AGENT_TURN_BODY_LIMIT_BYTES,
   readJsonRequestWithinLimit,
 } from "../../../../shared/agent/agent-turn-body";
+import type { UnparsedValue } from "../../../../shared/agent/guards";
 import { resolveAllowedWorkspace } from "../projects-store";
 import { errorMessage, jsonError } from "./helpers";
 
@@ -39,69 +34,72 @@ const PR_VIEW_FIELDS = [
   "mergeable",
   "statusCheckRollup",
 ].join(",");
-
 const PR_LIST_FIELDS = ["number", "title", "headRefName", "updatedAt", "isDraft"].join(",");
 
-// ─── Pure normalizers (unit-tested; no gh involved) ───────────────────────
+const RecordSchema = Schema.Record(Schema.String, Schema.Unknown);
+const ArraySchema = Schema.Array(Schema.Unknown);
+type DynamicFields = typeof RecordSchema.Type;
+type DynamicArray = typeof ArraySchema.Type;
+const decodeRecord = Schema.decodeUnknownOption(RecordSchema);
+const decodeArray = Schema.decodeUnknownOption(ArraySchema);
+const decodeText = Schema.decodeUnknownOption(Schema.String);
+const decodeNumber = Schema.decodeUnknownOption(Schema.Number);
+
+function fields(value: UnparsedValue): DynamicFields {
+  return Option.getOrElse(decodeRecord(value), () => ({}));
+}
+function array(value: UnparsedValue): DynamicArray {
+  return Option.getOrElse(decodeArray(value), () => []);
+}
+function text(value: UnparsedValue): string | null {
+  return Option.match(decodeText(value), {
+    onNone: () => null,
+    onSome: (decoded) => decoded.trim() || null,
+  });
+}
+function integer(value: UnparsedValue): number {
+  return Option.match(decodeNumber(value), {
+    onNone: () => 0,
+    onSome: (decoded) => (Number.isFinite(decoded) ? Math.trunc(decoded) : 0),
+  });
+}
 
 export type CheckBucket = "pending" | "passing" | "failing";
-
 export type PrCheck = {
   name: string;
   status: string;
   conclusion: string | null;
   bucket: CheckBucket;
 };
-
-export type PrChecksSummary = {
-  pending: number;
-  passing: number;
-  failing: number;
-  total: number;
-};
+export type PrChecksSummary = { pending: number; passing: number; failing: number; total: number };
+type NormalizedChecks = { checks: PrCheck[]; summary: PrChecksSummary };
 
 const PASSING_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 const PASSING_STATES = new Set(["SUCCESS"]);
 const PENDING_STATES = new Set(["PENDING", "EXPECTED"]);
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-/** Classify a single rollup entry into a coarse status bucket. */
-function classifyCheck(entry: Record<string, unknown>): CheckBucket {
-  // Legacy commit status contexts carry `state`; Actions check runs carry a
-  // `status`/`conclusion` pair. Handle whichever is present.
-  const state = asString(entry.state)?.toUpperCase();
+function classifyCheck(entry: DynamicFields): CheckBucket {
+  const state = text(entry.state)?.toUpperCase();
   if (state) {
     if (PASSING_STATES.has(state)) return "passing";
     if (PENDING_STATES.has(state)) return "pending";
     return "failing";
   }
-  const status = asString(entry.status)?.toUpperCase();
+  const status = text(entry.status)?.toUpperCase();
   if (status && status !== "COMPLETED") return "pending";
-  const conclusion = asString(entry.conclusion)?.toUpperCase();
+  const conclusion = text(entry.conclusion)?.toUpperCase();
   if (!conclusion) return "pending";
   return PASSING_CONCLUSIONS.has(conclusion) ? "passing" : "failing";
 }
 
-/** statusCheckRollup → normalized checks plus pending/passing/failing counts. */
-export function normalizeChecks(rollup: unknown): {
-  checks: PrCheck[];
-  summary: PrChecksSummary;
-} {
-  const entries = Array.isArray(rollup) ? rollup : [];
+export function normalizeChecks(rollup: DynamicArray): NormalizedChecks {
   const summary: PrChecksSummary = { pending: 0, passing: 0, failing: 0, total: 0 };
   const checks: PrCheck[] = [];
-  for (const raw of entries) {
-    const entry = asRecord(raw);
-    const name = asString(entry.name) ?? asString(entry.context) ?? "check";
-    const status = asString(entry.status) ?? asString(entry.state) ?? "UNKNOWN";
-    const conclusion = asString(entry.conclusion);
+  for (const raw of rollup) {
+    const entry = fields(raw);
+    const name = text(entry.name) ?? text(entry.context) ?? "check";
+    const status = text(entry.status) ?? text(entry.state) ?? "UNKNOWN";
+    const conclusion = text(entry.conclusion);
     const bucket = classifyCheck(entry);
     summary[bucket] += 1;
     summary.total += 1;
@@ -110,12 +108,11 @@ export function normalizeChecks(rollup: unknown): {
   return { checks, summary };
 }
 
-function normalizeReviewers(reviewRequests: unknown): string[] {
-  const entries = Array.isArray(reviewRequests) ? reviewRequests : [];
+function normalizeReviewers(reviewRequests: DynamicArray): string[] {
   const names: string[] = [];
-  for (const raw of entries) {
-    const entry = asRecord(raw);
-    const name = asString(entry.login) ?? asString(entry.name) ?? asString(entry.slug);
+  for (const raw of reviewRequests) {
+    const entry = fields(raw);
+    const name = text(entry.login) ?? text(entry.name) ?? text(entry.slug);
     if (name) names.push(name);
   }
   return names;
@@ -139,32 +136,22 @@ export type NormalizedPr = {
   checksSummary: PrChecksSummary;
 };
 
-function asInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 0;
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-/** `gh pr view --json …` payload → the shape the panel consumes. */
-export function normalizePrView(raw: unknown): NormalizedPr {
-  const pr = asRecord(raw);
-  const { checks, summary } = normalizeChecks(pr.statusCheckRollup);
+export function normalizePrView(pr: DynamicFields): NormalizedPr {
+  const { checks, summary } = normalizeChecks(array(pr.statusCheckRollup));
   return {
-    number: asInt(pr.number),
-    title: asString(pr.title) ?? "",
-    url: asString(pr.url) ?? "",
-    state: asString(pr.state) ?? "UNKNOWN",
+    number: integer(pr.number),
+    title: text(pr.title) ?? "",
+    url: text(pr.url) ?? "",
+    state: text(pr.state) ?? "UNKNOWN",
     isDraft: pr.isDraft === true,
-    headRefName: asString(pr.headRefName) ?? "",
-    baseRefName: asString(pr.baseRefName) ?? "",
-    additions: asInt(pr.additions),
-    deletions: asInt(pr.deletions),
-    reviewers: normalizeReviewers(pr.reviewRequests),
-    commentsCount: asArray(pr.comments).length,
-    body: typeof pr.body === "string" ? pr.body : "",
-    mergeable: asString(pr.mergeable) ?? "UNKNOWN",
+    headRefName: text(pr.headRefName) ?? "",
+    baseRefName: text(pr.baseRefName) ?? "",
+    additions: integer(pr.additions),
+    deletions: integer(pr.deletions),
+    reviewers: normalizeReviewers(array(pr.reviewRequests)),
+    commentsCount: array(pr.comments).length,
+    body: text(pr.body) ?? "",
+    mergeable: text(pr.mergeable) ?? "UNKNOWN",
     checks,
     checksSummary: summary,
   };
@@ -178,28 +165,25 @@ export type PrListItem = {
   isDraft: boolean;
 };
 
-export function normalizePrList(raw: unknown): PrListItem[] {
-  return asArray(raw).map((item) => {
-    const entry = asRecord(item);
+export function normalizePrList(entries: DynamicArray): PrListItem[] {
+  return entries.map((item) => {
+    const entry = fields(item);
     return {
-      number: asInt(entry.number),
-      title: asString(entry.title) ?? "",
-      headRefName: asString(entry.headRefName) ?? "",
-      updatedAt: asString(entry.updatedAt) ?? "",
+      number: integer(entry.number),
+      title: text(entry.title) ?? "",
+      headRefName: text(entry.headRefName) ?? "",
+      updatedAt: text(entry.updatedAt) ?? "",
       isDraft: entry.isDraft === true,
     };
   });
 }
 
-// ─── gh execution ─────────────────────────────────────────────────────────
-
 type GhFailure = { code: string | null; stderr: string; message: string };
-
-function ghFailure(error: unknown): GhFailure {
-  const err = asRecord(error);
+function parseGhFailure(error: UnparsedValue): GhFailure {
+  const value = fields(error);
   return {
-    code: typeof err.code === "string" ? err.code : null,
-    stderr: typeof err.stderr === "string" ? err.stderr : "",
+    code: text(value.code),
+    stderr: text(value.stderr) ?? "",
     message: error instanceof Error ? error.message : "gh command failed",
   };
 }
@@ -214,9 +198,8 @@ async function runGh(args: string[], cwd: string): Promise<{ stdout: string }> {
 }
 
 function friendlyGhError(failure: GhFailure): string {
-  if (failure.code === "ENOENT") {
+  if (failure.code === "ENOENT")
     return "GitHub CLI (gh) is not installed. Install it to view pull requests.";
-  }
   const stderr = failure.stderr.trim();
   if (/gh auth login/i.test(stderr) || /not logged into/i.test(stderr)) {
     return "GitHub CLI is not authenticated. Run `gh auth login` in a terminal.";
@@ -240,61 +223,47 @@ function validateCwd(rawCwd: string | null): string | Response {
   }
 }
 
-// ─── GET /api/agent/pr ─────────────────────────────────────────────────────
-
-export async function handlePrGet(request: Request): Promise<Response> {
+export async function get(request: Request): Promise<Response> {
   const cwd = validateCwd(new URL(request.url).searchParams.get("cwd"));
   if (cwd instanceof Response) return cwd;
-
   try {
     const { stdout } = await runGh(["pr", "view", "--json", PR_VIEW_FIELDS], cwd);
-    const parsed = JSON.parse(stdout) as unknown;
-    return Response.json({ pr: normalizePrView(parsed) });
+    const pr = fields(JSON.parse(stdout));
+    return Response.json({ pr: normalizePrView(pr) });
   } catch (error) {
-    const failure = ghFailure(error);
-    if (failure.code === "ENOENT") {
-      return Response.json({ error: friendlyGhError(failure) });
-    }
-    if (isNoPullRequest(failure.stderr)) {
-      return listPullRequests(cwd);
-    }
+    const failure = parseGhFailure(error);
+    if (failure.code === "ENOENT") return Response.json({ error: friendlyGhError(failure) });
+    if (isNoPullRequest(failure.stderr)) return listPullRequests(cwd);
     return Response.json({ error: friendlyGhError(failure) });
   }
 }
 
 async function listPullRequests(cwd: string): Promise<Response> {
   try {
-    const { stdout } = await runGh(
-      ["pr", "list", "--json", PR_LIST_FIELDS, "--limit", "20"],
-      cwd,
-    );
-    const parsed = JSON.parse(stdout) as unknown;
-    return Response.json({ prs: normalizePrList(parsed) });
+    const { stdout } = await runGh(["pr", "list", "--json", PR_LIST_FIELDS, "--limit", "20"], cwd);
+    const prs = array(JSON.parse(stdout));
+    return Response.json({ prs: normalizePrList(prs) });
   } catch (error) {
-    return Response.json({ error: friendlyGhError(ghFailure(error)) });
+    const failure = parseGhFailure(error);
+    return Response.json({ error: friendlyGhError(failure) });
   }
 }
 
-// ─── POST /api/agent/pr/merge ──────────────────────────────────────────────
-
-export async function handlePrMerge(request: Request): Promise<Response> {
+export async function merge(request: Request): Promise<Response> {
   const body = await readJsonRequestWithinLimit(request, PR_MERGE_BODY_LIMIT_BYTES);
   if (!body.ok) return jsonError(body.error, body.status);
-  const payload = asRecord(body.value);
-
-  const cwd = validateCwd(typeof payload.cwd === "string" ? payload.cwd : null);
+  const payload = fields(body.value);
+  const cwd = validateCwd(text(payload.cwd));
   if (cwd instanceof Response) return cwd;
-
-  const number = asInt(payload.number);
+  const number = integer(payload.number);
   if (number <= 0) return jsonError("number must be a positive integer");
-
-  const method = typeof payload.method === "string" ? payload.method : "merge";
+  const method = text(payload.method) ?? "merge";
   if (!MERGE_METHODS.has(method)) return jsonError("method must be merge, squash, or rebase");
-
   try {
     await runGh(["pr", "merge", String(number), `--${method}`], cwd);
     return Response.json({ ok: true });
   } catch (error) {
-    return Response.json({ ok: false, error: friendlyGhError(ghFailure(error)) });
+    const failure = parseGhFailure(error);
+    return Response.json({ ok: false, error: friendlyGhError(failure) });
   }
 }

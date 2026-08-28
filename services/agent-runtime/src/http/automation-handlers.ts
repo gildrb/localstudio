@@ -1,8 +1,8 @@
-//
-// HTTP surface for automations (Scheduled) and thread goals. Proxied through
-// the Next server like the other runtime handlers.
-//
-
+import { Option, Schema } from "effect";
+import { AutomationScheduleSchema } from "../../../../shared/agent/automation";
+import { GoalStatusSchema } from "../../../../shared/agent/session-goal";
+import type { UnparsedValue } from "../../../../shared/agent/guards";
+import { runAutomationNow } from "../automation-scheduler";
 import {
   createAutomation,
   deleteAutomation,
@@ -10,12 +10,13 @@ import {
   listAutomations,
   patchAutomation,
 } from "../automations-store";
-import { runAutomationNow } from "../automation-scheduler";
-import { clearGoal, readGoal, writeGoal, type GoalStatus } from "../goals-store";
-import { GOAL_STATUSES } from "../../../../shared/agent/session-goal";
+import { clearGoal, readGoal, writeGoal } from "../goals-store";
 import { errorMessage, jsonError, readJsonBody } from "./helpers";
 
-export async function handleAutomationsList(): Promise<Response> {
+const decodeString = Schema.decodeUnknownOption(Schema.String);
+const decodeBoolean = Schema.decodeUnknownOption(Schema.Boolean);
+
+export async function list(): Promise<Response> {
   try {
     return Response.json({ automations: await listAutomations() });
   } catch (error) {
@@ -23,57 +24,64 @@ export async function handleAutomationsList(): Promise<Response> {
   }
 }
 
-/** `targetSessionId` accepts a session id, or null/"" to mean "fresh session
- *  every run"; anything else leaves the stored value alone. */
-function targetSessionPatch(value: unknown): { targetSessionId: string | null } | null {
+function targetSessionPatch(value: UnparsedValue): { targetSessionId: string | null } | null {
   if (value === null) return { targetSessionId: null };
-  if (typeof value !== "string") return null;
-  return { targetSessionId: value.trim() || null };
+  const decoded = Option.getOrUndefined(decodeString(value));
+  return decoded === undefined ? null : { targetSessionId: decoded.trim() || null };
 }
 
-export async function handleAutomationCreate(request: Request): Promise<Response> {
+export async function create(request: Request): Promise<Response> {
   const body = await readJsonBody(request);
-  const name = typeof body?.name === "string" ? body.name : "";
-  const prompt = typeof body?.prompt === "string" ? body.prompt : "";
-  const modelId = typeof body?.modelId === "string" ? body.modelId : "";
-  const cwd = typeof body?.cwd === "string" ? body.cwd : "";
+  const name = Option.getOrElse(decodeString(body?.name), () => "");
+  const prompt = Option.getOrElse(decodeString(body?.prompt), () => "");
+  const modelId = Option.getOrElse(decodeString(body?.modelId), () => "");
+  const cwd = Option.getOrElse(decodeString(body?.cwd), () => "");
+  const schedule = Option.getOrElse(
+    Schema.decodeUnknownOption(AutomationScheduleSchema)(body?.schedule),
+    () => ({ kind: "daily", time: "08:00" }),
+  );
   if (!prompt.trim() || !modelId.trim()) {
     return jsonError("Body must include prompt and modelId.");
   }
   try {
-    const automation = await createAutomation({
-      name,
-      prompt,
-      modelId,
-      cwd,
-      schedule: body?.schedule,
-      ...(targetSessionPatch(body?.targetSessionId) ?? {}),
-    });
+    const input: Parameters<typeof createAutomation>[0] = { name, prompt, modelId, cwd, schedule };
+    const targetSession = targetSessionPatch(body?.targetSessionId);
+    if (targetSession) input.targetSessionId = targetSession.targetSessionId;
+    const automation = await createAutomation(input);
     return Response.json({ automation });
   } catch (error) {
     return jsonError(errorMessage(error, "Failed to create automation."), 500);
   }
 }
 
-export async function handleAutomationPatch(request: Request, id: string): Promise<Response> {
+export async function patch(request: Request, id: string): Promise<Response> {
   const body = await readJsonBody(request);
   if (!body) return jsonError("Body must be a JSON object.");
+  let patch: Parameters<typeof patchAutomation>[1] = {};
+  for (const field of ["name", "prompt", "modelId", "cwd"] as const) {
+    const value = Option.getOrUndefined(decodeString(body[field]));
+    if (value !== undefined) patch = { ...patch, [field]: value };
+  }
+  const status = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.Literals(["active", "paused"]))(body.status),
+  );
+  if (status !== undefined) patch = { ...patch, status };
+  const unread = Option.getOrUndefined(decodeBoolean(body.unread));
+  if (unread !== undefined) patch = { ...patch, unread };
+  if ("schedule" in body) {
+    const schedule = Option.getOrElse(
+      Schema.decodeUnknownOption(AutomationScheduleSchema)(body.schedule),
+      () => ({ kind: "daily", time: "08:00" }),
+    );
+    patch = { ...patch, schedule };
+  }
+  const targetSession = targetSessionPatch(body.targetSessionId);
+  if (targetSession) patch = { ...patch, ...targetSession };
+  if (body.clearRuns === true) {
+    patch = { ...patch, runs: [], lastRun: null, unread: false };
+  }
   try {
-    const automation = await patchAutomation(id, {
-      ...(typeof body.name === "string" ? { name: body.name } : {}),
-      ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
-      ...(typeof body.modelId === "string" ? { modelId: body.modelId } : {}),
-      ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
-      ...(body.status === "active" || body.status === "paused" ? { status: body.status } : {}),
-      ...(typeof body.unread === "boolean" ? { unread: body.unread } : {}),
-      ...(body.schedule !== undefined ? { schedule: body.schedule } : {}),
-      ...(targetSessionPatch(body.targetSessionId) ?? {}),
-      // Forgetting the recorded runs is a write like any other, so it rides the
-      // same PATCH instead of a second endpoint. `lastRun` has to go with them:
-      // it is the same record, and leaving it would repopulate the history on
-      // the next read.
-      ...(body.clearRuns === true ? { runs: [], lastRun: null, unread: false } : {}),
-    });
+    const automation = await patchAutomation(id, patch);
     if (!automation) return jsonError(`Unknown automation '${id}'.`, 404);
     return Response.json({ automation });
   } catch (error) {
@@ -81,76 +89,57 @@ export async function handleAutomationPatch(request: Request, id: string): Promi
   }
 }
 
-export async function handleAutomationDelete(id: string): Promise<Response> {
-  try {
-    const removed = await deleteAutomation(id);
-    if (!removed) return jsonError(`Unknown automation '${id}'.`, 404);
-    return Response.json({ ok: true });
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to delete automation."), 500);
-  }
+export async function remove(id: string): Promise<Response> {
+  const removed = await deleteAutomation(id);
+  if (!removed) return jsonError(`Unknown automation '${id}'.`, 404);
+  return Response.json({ ok: true });
 }
 
-export async function handleAutomationRun(id: string): Promise<Response> {
+export async function run(id: string): Promise<Response> {
   const automation = await getAutomation(id);
   if (!automation) return jsonError(`Unknown automation '${id}'.`, 404);
-  // Awaits the whole run: the automation exists, so a null result can only mean
-  // the scheduler is already running it. `automation` carries the recorded run
-  // back so a caller does not have to re-list to learn how it went (the tab
-  // ignores the extra field and reloads its own list).
   const completed = await runAutomationNow(id);
   return Response.json({ ok: true, started: completed !== null, automation: completed });
 }
-
-// ─── Goals ────────────────────────────────────────────────────────────────
 
 function goalSessionId(request: Request): string | null {
   const id = new URL(request.url).searchParams.get("piSessionId")?.trim();
   return id || null;
 }
 
-export async function handleGoalGet(request: Request): Promise<Response> {
+export async function getGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
-  try {
-    return Response.json({ goal: await readGoal(piSessionId) });
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to read goal."), 500);
-  }
+  return Response.json({ goal: await readGoal(piSessionId) });
 }
 
-export async function handleGoalPut(request: Request): Promise<Response> {
+export async function putGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
   const body = await readJsonBody(request);
   if (!body) return jsonError("Body must be a JSON object.");
+  const objective = Option.getOrUndefined(decodeString(body.objective));
+  const status = Option.getOrUndefined(Schema.decodeUnknownOption(GoalStatusSchema)(body.status));
+  const turnBudget = Option.getOrUndefined(
+    Schema.decodeUnknownOption(Schema.NullOr(Schema.Number))(body.turnBudget),
+  );
+  const resetTurns = Option.getOrUndefined(decodeBoolean(body.resetTurns));
+  let patch: Parameters<typeof writeGoal>[1] = {};
+  if (objective !== undefined) patch = { ...patch, objective };
+  if (status !== undefined) patch = { ...patch, status };
+  if (turnBudget !== undefined) patch = { ...patch, turnBudget };
+  if (resetTurns === true) patch = { ...patch, resetProgress: true };
   try {
-    const goal = await writeGoal(piSessionId, {
-      ...(typeof body.objective === "string" ? { objective: body.objective } : {}),
-      ...(GOAL_STATUSES.includes(body.status as GoalStatus)
-        ? { status: body.status as GoalStatus }
-        : {}),
-      ...(typeof body.turnBudget === "number" || body.turnBudget === null
-        ? { turnBudget: body.turnBudget as number | null }
-        : {}),
-      // `resetTurns` restarts the whole pursuit — turns, banked time and
-      // `createdAt`. Keeping `createdAt` across a re-set objective is what made
-      // a goal set a minute ago report itself as days old.
-      ...(body.resetTurns === true ? { resetProgress: true } : {}),
-    });
+    const goal = await writeGoal(piSessionId, patch);
     return Response.json({ goal: goal.objective ? goal : null });
   } catch (error) {
     return jsonError(errorMessage(error, "Failed to update goal."), 500);
   }
 }
 
-export async function handleGoalDelete(request: Request): Promise<Response> {
+export async function deleteGoal(request: Request): Promise<Response> {
   const piSessionId = goalSessionId(request);
   if (!piSessionId) return jsonError("piSessionId is required.");
-  try {
-    await clearGoal(piSessionId);
-    return Response.json({ ok: true });
-  } catch (error) {
-    return jsonError(errorMessage(error, "Failed to clear goal."), 500);
-  }
+  await clearGoal(piSessionId);
+  return Response.json({ ok: true });
 }

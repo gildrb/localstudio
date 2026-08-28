@@ -5,24 +5,12 @@ import type { RuntimeRocmInfo, RuntimeRocmSmiTool } from "../../models/types";
 import { runCommandAsyncEffect } from "../../../core/command";
 import { resolveAmdSmiBinary, resolveForcedRocmTool, resolveRocmSmiBinary } from "./smi-tools";
 
-const parseHipccVersion = (output: string): string | null => {
-  const match = output.match(/HIP version\s*:\s*([0-9.]+)/i);
-  if (match) return match[1] ?? null;
-  return null;
-};
+const parseHipccVersion = (output: string): string | null =>
+  output.match(/HIP version\s*:\s*([0-9.]+)/i)?.[1] ?? null;
 
-export const resolveRocmSmiTool = (): RuntimeRocmSmiTool | null => {
-  const forced = resolveForcedRocmTool();
-  if (forced) return forced;
-
-  const amdSmi = resolveAmdSmiBinary();
-  if (amdSmi) return "amd-smi";
-
-  const rocmSmi = resolveRocmSmiBinary();
-  if (rocmSmi) return "rocm-smi";
-
-  return null;
-};
+export const resolveRocmSmiTool = (): RuntimeRocmSmiTool | null =>
+  resolveForcedRocmTool() ??
+  (resolveAmdSmiBinary() ? "amd-smi" : resolveRocmSmiBinary() ? "rocm-smi" : null);
 
 const readRocmVersion = (): string | null => {
   const overridden = (process.env["LOCAL_STUDIO_ROCM_VERSION_FILE"] ?? "").trim();
@@ -73,14 +61,12 @@ export const getRocmInfo = (smiTool: RuntimeRocmSmiTool | null): Effect.Effect<R
         parseHipccVersion(hipccResult.stdout) ?? parseHipccVersion(hipccResult.stderr) ?? null;
     }
 
-    const gpuArch = new Set<string>();
     const rocminfoResult = yield* runCommandAsyncEffect("rocminfo", [], { timeoutMs: 3_000 });
-    if (rocminfoResult.status === 0 && rocminfoResult.stdout) {
-      const matches = rocminfoResult.stdout.match(/gfx[0-9a-f]+/gi) ?? [];
-      for (const value of matches) {
-        gpuArch.add(value.toLowerCase());
-      }
-    }
+    const gpuArch = new Set(
+      rocminfoResult.status === 0
+        ? (rocminfoResult.stdout.match(/gfx[0-9a-f]+/gi) ?? []).map((value) => value.toLowerCase())
+        : [],
+    );
 
     return {
       rocm_version: rocmVersion,

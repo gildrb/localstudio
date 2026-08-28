@@ -14,39 +14,22 @@ import {
 import { toProxyNextResponse } from "./proxy-response";
 import { resolveProxyTarget } from "./proxy-target";
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> },
-) {
-  const { path } = await params;
-  return handleRequest(request, "GET", path);
-}
+type ProxyMethod = "GET" | "POST" | "PUT" | "DELETE";
+type RouteContext = { params: Promise<{ path: string[] }> };
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> },
-) {
-  const { path } = await params;
-  return handleRequest(request, "POST", path);
-}
+const route =
+  (method: ProxyMethod) =>
+  async (request: NextRequest, { params }: RouteContext) => {
+    const { path } = await params;
+    return handleRequest(request, method, path);
+  };
 
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> },
-) {
-  const { path } = await params;
-  return handleRequest(request, "PUT", path);
-}
+export const GET = route("GET");
+export const POST = route("POST");
+export const PUT = route("PUT");
+export const DELETE = route("DELETE");
 
-export async function DELETE(
-  request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> },
-) {
-  const { path } = await params;
-  return handleRequest(request, "DELETE", path);
-}
-
-async function handleRequest(request: NextRequest, method: string, path: string[]) {
+async function handleRequest(request: NextRequest, method: ProxyMethod, path: string[]) {
   const startTime = Date.now();
   const client = getClientInfo(request);
 

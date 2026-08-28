@@ -2,7 +2,7 @@ import { Effect, Schema } from "effect";
 import { badRequest, HttpStatus, notFound, serviceUnavailable } from "../../core/errors";
 import { readBoundedRequestBody } from "../../http/bounded-body";
 import { defineRoutes, effectRoute, mergeRoutes } from "../../http/route-registrar";
-import { ENGINE_IDS, type EngineId, type ServingOptions } from "./contracts";
+import { ENGINE_IDS, type ServingOptions } from "./contracts";
 import { availableEngines } from "./engines/registry";
 import { toHttp } from "./failures";
 import { formatLaunchFailureBudgetMessage } from "./launch-failure-budget";
@@ -25,7 +25,7 @@ const OptionsSchema = Schema.Struct({
 
 const LaunchRequestSchema = Schema.Struct({
   name: Schema.String,
-  engine: Schema.Literals(ENGINE_IDS as unknown as [EngineId, ...EngineId[]]),
+  engine: Schema.Literals(ENGINE_IDS),
   modelPath: Schema.String,
   recipeId: Schema.optional(Schema.String),
   deviceCount: Schema.optional(Schema.Number),
@@ -38,15 +38,31 @@ const LaunchRequestSchema = Schema.Struct({
 
 /** Optional-schema fields decode as `key: undefined`; spreading those over the defaults
  *  would erase them, so undefined entries are dropped before the merge. */
-const mergeOptions = (
-  overrides: Partial<Record<keyof ServingOptions, ServingOptions[keyof ServingOptions] | undefined>>,
-): ServingOptions => {
-  const merged: Record<string, unknown> = { ...defaultOptions };
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value !== undefined) merged[key] = value;
-  }
-  return merged as unknown as ServingOptions;
+type ServingOptionOverrides = {
+  [Key in keyof ServingOptions]?: ServingOptions[Key] | undefined;
 };
+
+const mergeOptions = (overrides: ServingOptionOverrides): ServingOptions => ({
+  tensorParallel: overrides.tensorParallel ?? defaultOptions.tensorParallel,
+  pipelineParallel: overrides.pipelineParallel ?? defaultOptions.pipelineParallel,
+  maxContextLength: overrides.maxContextLength ?? defaultOptions.maxContextLength,
+  memoryFraction: overrides.memoryFraction ?? defaultOptions.memoryFraction,
+  maxConcurrentRequests: overrides.maxConcurrentRequests ?? defaultOptions.maxConcurrentRequests,
+  kvCacheDtype:
+    overrides.kvCacheDtype === undefined ? defaultOptions.kvCacheDtype : overrides.kvCacheDtype,
+  dtype: overrides.dtype === undefined ? defaultOptions.dtype : overrides.dtype,
+  quantization:
+    overrides.quantization === undefined ? defaultOptions.quantization : overrides.quantization,
+  trustRemoteCode: overrides.trustRemoteCode ?? defaultOptions.trustRemoteCode,
+  toolCallParser:
+    overrides.toolCallParser === undefined
+      ? defaultOptions.toolCallParser
+      : overrides.toolCallParser,
+  reasoningParser:
+    overrides.reasoningParser === undefined
+      ? defaultOptions.reasoningParser
+      : overrides.reasoningParser,
+});
 
 const defaultOptions: ServingOptions = {
   tensorParallel: 1,

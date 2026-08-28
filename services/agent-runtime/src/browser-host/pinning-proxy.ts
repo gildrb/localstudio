@@ -1,25 +1,12 @@
-// Loopback HTTP proxy that pins every browser connection to a policy-vetted
-// address.
-//
-// The embedded Chromium is launched with this proxy as its only route to the
-// network (loopback included — the implicit bypass is disabled), so every
-// request the page makes — first navigation, redirect hop, subresource,
-// websocket, CONNECT tunnel — passes through `resolvePinnedDestination`. The
-// proxy then dials the exact address that was vetted rather than letting
-// anything re-resolve the name, which is what actually closes the DNS
-// rebinding window. TLS stays end-to-end: CONNECT is a plain tunnel to the
-// pinned address, and certificate validation still happens in Chromium
-// against the original hostname.
-
 import {
   createServer,
   request as httpRequest,
   type IncomingHttpHeaders,
   type IncomingMessage,
-  type RequestOptions,
   type ServerResponse,
 } from "node:http";
-import { connect, type Socket } from "node:net";
+import { connect, type LookupFunction, type Socket } from "node:net";
+import { Schema } from "effect";
 import type { Duplex } from "node:stream";
 import {
   resolvePinnedDestination,
@@ -31,6 +18,7 @@ import {
 export type PinningProxy = { url: string; close: () => Promise<void> };
 
 const DIAL_TIMEOUT_MS = 8_000;
+const isProxyAddress = Schema.is(Schema.Struct({ port: Schema.Number }));
 
 function tracked(socket: Socket, sockets: Set<Socket>): Socket {
   sockets.add(socket);
@@ -39,11 +27,6 @@ function tracked(socket: Socket, sockets: Set<Socket>): Socket {
   return socket;
 }
 
-/**
- * Connect to the first reachable vetted address. Falling back across the list
- * is safe — every address in it passed the same policy check — and matters on
- * loopback, where the resolver may order ::1 ahead of an IPv4-only dev server.
- */
 function dialPinned(destination: PinnedDestination, sockets: Set<Socket>): Promise<Socket> {
   const attempt = (queue: PinnedAddress[]): Promise<Socket> =>
     new Promise((resolve, reject) => {
@@ -97,23 +80,14 @@ function forwardHttp(
 ): void {
   const url = new URL(destination.url);
   if (url.protocol !== "http:") {
-    // https reaches the proxy as CONNECT, never as an absolute-form request.
     reject(response);
     return;
   }
-  // Pinning happens through a lookup override (the same shape reader.ts uses):
-  // the request carries the original hostname for the Host header, but name
-  // resolution is answered from the vetted address list and nothing else.
-  const pinnedLookup: RequestOptions["lookup"] = ((
-    _hostname: string,
-    lookupOptions: unknown,
-    callback: (...args: unknown[]) => void,
-  ) => {
-    const wantsAll = Boolean((lookupOptions as { all?: boolean } | undefined)?.all);
+  const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
     const first = destination.addresses[0];
-    if (wantsAll) callback(null, destination.addresses);
-    else callback(null, first?.address, first?.family);
-  }) as RequestOptions["lookup"];
+    if (lookupOptions.all) callback(null, destination.addresses);
+    else callback(null, first?.address ?? "", first?.family);
+  };
   const outgoing = httpRequest(
     {
       hostname: url.hostname.replace(/^\[|\]$/g, ""),
@@ -128,7 +102,7 @@ function forwardHttp(
       origin.pipe(response);
     },
   );
-  outgoing.once("socket", (socket) => tracked(socket as Socket, sockets));
+  outgoing.once("socket", (socket: Socket) => tracked(socket, sockets));
   outgoing.once("error", () => response.destroy());
   response.once("close", () => outgoing.destroy());
   request.pipe(outgoing);
@@ -137,7 +111,9 @@ function forwardHttp(
 function serializeUpgrade(request: IncomingMessage, url: URL): string {
   const serialized = Object.entries(forwardHeaders(request.headers, url.host))
     .flatMap(([name, value]) =>
-      Array.isArray(value) ? value.map((entry) => `${name}: ${entry}`) : [`${name}: ${value ?? ""}`],
+      Array.isArray(value)
+        ? value.map((entry) => `${name}: ${entry}`)
+        : [`${name}: ${value ?? ""}`],
     )
     .join("\r\n");
   return `${request.method ?? "GET"} ${url.pathname}${url.search} HTTP/${request.httpVersion}\r\n${serialized}\r\n\r\n`;
@@ -211,7 +187,7 @@ export async function startPinningProxy(mode: BrowserNetworkMode): Promise<Pinni
     server.once("error", rejectListen);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (typeof address === "object" && address) resolvePort(address.port);
+      if (isProxyAddress(address)) resolvePort(address.port);
       else rejectListen(new Error("Browser pinning proxy failed to listen"));
     });
   });

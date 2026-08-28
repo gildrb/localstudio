@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, openSync, readSync, statSync } from "node:fs";
 import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -8,11 +7,11 @@ import {
   getAgentDir,
   SessionManager,
   shouldCompact,
-  type AgentSessionEvent,
+  type CompactionResult,
   type AgentSessionRuntime,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import type { AgentImageInput } from "../../../shared/agent/agent-image-input";
 import type { AgentQueueAction } from "../../../shared/agent/agent-turn";
 import {
@@ -22,11 +21,7 @@ import {
   resolveAgentCwdEffect,
   type RuntimeStartOptions,
 } from "./pi-runtime-helpers";
-import {
-  refreshPiModels,
-  resolvePiModelSelection,
-  toPiThinkingLevel,
-} from "./pi-runtime-models";
+import { refreshPiModels, resolvePiModelSelection, toPiThinkingLevel } from "./pi-runtime-models";
 import { getProviderHub } from "./provider-hub";
 import { attachGoalDriver } from "./goal-driver";
 import { createGoalPromptExtension } from "./goal-prompt";
@@ -38,11 +33,47 @@ import type {
   LoggedPiEvent,
   PiAgentSession,
   PiAgentStatus,
-  PiContextUsage,
   PiPromptOptions,
 } from "./pi-runtime-types";
 
 type PiEvent = LoggedPiEvent["event"];
+
+type ExtensionUiResponse = {
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+};
+
+type QueuedMessage = { text: string; images: AgentImageInput[] };
+type QueuedMessages = { steering: QueuedMessage[]; followUp: QueuedMessage[] };
+type QueueMode = keyof QueuedMessages;
+
+const isQueueText = Schema.is(Schema.String);
+
+function queueTexts(value: import("../../../shared/agent/guards").UnparsedValue): string[] {
+  return Array.isArray(value) ? value.filter(isQueueText) : [];
+}
+
+function hydrateQueuedMessages(
+  texts: readonly string[],
+  known: readonly QueuedMessage[],
+): QueuedMessage[] {
+  const available = [...known];
+  const hydrated = Array<QueuedMessage>(texts.length);
+  const shrinking = texts.length < known.length;
+  for (let step = 0; step < texts.length; step += 1) {
+    const index = shrinking ? texts.length - step - 1 : step;
+    const text = texts[index] ?? "";
+    const knownIndex = shrinking
+      ? available.findLastIndex((entry) => entry.text === text)
+      : available.findIndex((entry) => entry.text === text);
+    hydrated[index] =
+      knownIndex < 0
+        ? { text, images: [] }
+        : (available.splice(knownIndex, 1)[0] ?? { text, images: [] });
+  }
+  return hydrated;
+}
 
 function comparableQueuedText(text: string): string {
   const marker = "\n\nUser prompt:\n";
@@ -50,66 +81,34 @@ function comparableQueuedText(text: string): string {
   return (index === -1 ? text : text.slice(index + marker.length)).trim();
 }
 
-function takeQueuedFollowUp(
-  followUp: readonly string[],
-  message: string,
-): { selected: string; before: string[]; after: string[] } | null {
-  const exactIndex = followUp.indexOf(message);
-  const target = comparableQueuedText(message);
-  const index =
-    exactIndex >= 0
-      ? exactIndex
-      : followUp.findIndex((candidate) => comparableQueuedText(candidate) === target);
-  if (index < 0) return null;
-  return {
-    selected: followUp[index]!,
-    before: followUp.slice(0, index),
-    after: followUp.slice(index + 1),
-  };
-}
-
 function planQueuedFollowUpMutation(
-  followUp: readonly string[],
+  followUp: readonly QueuedMessage[],
   message: string,
   action: AgentQueueAction,
-  replacement?: string,
-): { promoted: string | null; followUp: string[] } | null {
-  const selected = takeQueuedFollowUp(followUp, message);
+  replacement?: QueuedMessage,
+): { promoted: QueuedMessage | null; followUp: QueuedMessage[] } | null {
+  const exact = followUp.findIndex(({ text }) => text === message);
+  const target = comparableQueuedText(message);
+  const index =
+    exact >= 0 ? exact : followUp.findIndex(({ text }) => comparableQueuedText(text) === target);
+  const selected = followUp.at(index);
   if (!selected) return null;
-  if (action === "replace" && !replacement) {
+  if (action === "replace" && !replacement?.text) {
     throw new Error("Replacement text is required.");
   }
   return {
-    promoted: action === "promote" ? selected.selected : null,
-    followUp:
-      action === "replace"
-        ? [...selected.before, replacement!, ...selected.after]
-        : [...selected.before, ...selected.after],
+    promoted: action === "promote" ? selected : null,
+    followUp: [
+      ...followUp.slice(0, index),
+      ...(action === "replace" && replacement ? [replacement] : []),
+      ...followUp.slice(index + 1),
+    ],
   };
 }
 
-type QueueTransport = {
-  steer: (message: string, images?: AgentImageInput[]) => Promise<void>;
-  followUp: (message: string, images?: AgentImageInput[]) => Promise<void>;
-};
-
-async function restoreQueuedMessages(
-  session: QueueTransport,
-  cleared: { steering: readonly string[]; followUp: readonly string[] },
-  mutation: { promoted: string | null; followUp: readonly string[] } | null,
-  images: AgentImageInput[] = [],
-): Promise<void> {
-  for (const queued of cleared.steering) await session.steer(queued);
-  if (mutation?.promoted) await session.steer(mutation.promoted, images);
-  for (const queued of mutation?.followUp ?? cleared.followUp) await session.followUp(queued);
-}
-
-
-/** Appended to the system prompt for vision-capable models. Kept as an extra
- *  section rather than a replacement so first-party extensions still apply. */
 const VISION_GUIDANCE =
   "When an image is attached, inspect it carefully before answering. State only details visible in the image. Never invent labels, UI elements, text, or facts. Say when details are too small or uncertain. Give a concise answer. Use available tools to inspect supplied files when helpful.";
-
+const ignoreExtensionUi = () => undefined;
 
 function selectPiRuntimeModel(
   models: Awaited<ReturnType<typeof refreshPiModels>>["models"],
@@ -147,20 +146,12 @@ function runtimeFingerprint(
     piSessionId: piSessionId ?? "",
     options: runtimeOptionsFingerprint(options),
     connectors: connectorsRevisionSync(),
-    // pi snapshots its extension inventory once, when the session starts, so a
-    // plugin the user just wrote is invisible to a session that is already
-    // running. Folding the extensions directory's revision in here rebuilds the
-    // session on the next turn — the same deal connectors get, and the reason
-    // the Plugins tab can promise "save, then send your next message" instead
-    // of "restart the app".
     plugins: userPluginsRevisionSync(),
   });
 }
 
-function shouldRestartAfterPromptError(error: unknown): boolean {
-  return (
-    error instanceof Error && /Cannot continue from message role: assistant/i.test(error.message)
-  );
+export function shouldRestartAfterPromptError(error: Error): boolean {
+  return /Cannot continue from message role: assistant/i.test(error.message);
 }
 
 type PiResourceDiagnostic = {
@@ -197,9 +188,15 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
   private agentDir = "";
   private queueEventBufferDepth = 0;
   private bufferedQueueEvent: PiEvent | null = null;
+  private queueTail = Promise.resolve();
+  private startTail = Promise.resolve();
+  private queued: QueuedMessages = { steering: [], followUp: [] };
   private extensionUiPending = new Map<
     string,
-    { method: "select" | "confirm" | "input" | "editor"; resolve: (value: unknown) => void }
+    {
+      cancel: () => void;
+      respond: (response: ExtensionUiResponse) => void;
+    }
   >();
 
   ensureStarted(
@@ -208,10 +205,17 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     piSessionId?: string | null,
     options?: RuntimeStartOptions,
   ): Promise<void> {
-    const effectiveOptions = structuredClone(
-      options ?? (this.runtime ? this.currentStartOptions : {}),
-    );
-    return Effect.runPromise(this.ensureStartedEffect(modelId, cwd, piSessionId, effectiveOptions));
+    const start = () => {
+      const effectiveOptions = structuredClone(
+        options ?? (this.runtime ? this.currentStartOptions : {}),
+      );
+      return this.withQueueLock(() =>
+        Effect.runPromise(this.ensureStartedEffect(modelId, cwd, piSessionId, effectiveOptions)),
+      );
+    };
+    const result = this.startTail.then(start, start);
+    this.startTail = result.catch(ignoreExtensionUi);
+    return result;
   }
 
   private ensureStartedEffect(
@@ -228,7 +232,6 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
         if (this.runtime && this.currentFingerprint === fingerprint) return;
 
         yield* this.stopEffect();
-        this.eventSeq = 0;
         this.eventLog = [];
         this.activePromptCount = 0;
         this.lastError = null;
@@ -247,8 +250,6 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
         const providerId = selectedModel.providerId ?? resolvedSelection.providerId;
         const backendModelId = selectedModel.rawId ?? resolvedSelection.modelId;
 
-        // One shared ModelRuntime across sessions and the provider hub: a
-        // sign-in completed in settings is live for the next turn.
         const sharedModelRuntime = yield* Effect.tryPromise({
           try: () => getProviderHub(),
           catch: (error) => error,
@@ -256,8 +257,6 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
 
         const sessionOptions = buildAgentSessionOptionsSync({ options, cwd: resolvedCwd });
         applyRuntimeEnvInjections(sessionOptions.envInjections);
-        // Expose the current session's model so the automations extension can
-        // default a scheduled run to the same model the user is talking to.
         applyRuntimeEnvInjections({ LOCAL_STUDIO_MODEL_ID: modelId });
         const sessionDir = configuredPiSessionDir(resolvedCwd);
         const resumeFile = desiredSessionId ? findSessionFile(resolvedCwd, desiredSessionId) : null;
@@ -274,43 +273,29 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
               ({ cwd, agentDir, sessionManager, sessionStartEvent }) =>
                 Effect.runPromise(
                   Effect.gen(function* () {
+                    const resourceLoaderOptions = {
+                      additionalSkillPaths: sessionOptions.skills,
+                      additionalExtensionPaths: sessionOptions.extensionPaths,
+                      additionalPromptTemplatePaths: sessionOptions.promptTemplatePaths,
+                      extensionFactories: [
+                        {
+                          name: "local-studio-goal",
+                          factory: createGoalPromptExtension(() => sessionManager.getSessionId()),
+                        },
+                      ],
+                    };
+                    if (selectedModel.vision) {
+                      Object.assign(resourceLoaderOptions, {
+                        appendSystemPromptOverride: (base: string[]) => [...base, VISION_GUIDANCE],
+                      });
+                    }
                     const services = yield* Effect.tryPromise({
                       try: () =>
                         createAgentSessionServices({
                           cwd,
                           agentDir,
                           modelRuntime: sharedModelRuntime,
-                          resourceLoaderOptions: {
-                            additionalSkillPaths: sessionOptions.skills,
-                            additionalExtensionPaths: sessionOptions.extensionPaths,
-                            additionalPromptTemplatePaths: sessionOptions.promptTemplatePaths,
-                            // In-process: the goal section is injected per turn
-                            // via before_agent_start, keyed by the canonical
-                            // piSessionId this SessionManager owns. Runs here so
-                            // it never depends on the RPC extension's session id
-                            // (which differs and left the goal unread — #284).
-                            extensionFactories: [
-                              {
-                                name: "local-studio-goal",
-                                factory: createGoalPromptExtension(() =>
-                                  sessionManager.getSessionId(),
-                                ),
-                              },
-                            ],
-                            // Vision guidance is APPENDED, not substituted. This branch used to
-                            // set noExtensions/noSkills/noContextFiles and replace the whole
-                            // system prompt, which silently disabled every first-party extension
-                            // (session goal, artifact policy, subagents) on any
-                            // vision-capable model — i.e. on the primary model.
-                            ...(selectedModel.vision
-                              ? {
-                                  appendSystemPromptOverride: (base: string[]) => [
-                                    ...base,
-                                    VISION_GUIDANCE,
-                                  ],
-                                }
-                              : {}),
-                          },
+                          resourceLoaderOptions,
                         }),
                       catch: (error) => error,
                     });
@@ -356,22 +341,21 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
                         }),
                       catch: (error) => error,
                     });
-                    const extensionErrors = services.resourceLoader
-                      .getExtensions()
-                      .errors.map(({ path, error }) => ({
-                        type: "error" as const,
+                    const extensionErrors = services.resourceLoader.getExtensions().errors.map(
+                      ({ path, error }): PiResourceDiagnostic => ({
+                        type: "error",
                         message: `Failed to load extension "${path}": ${error}`,
                         path,
-                      }));
-                    const diagnostics = [...services.diagnostics, ...extensionErrors];
-                    diagnosticsMap().set(
-                      agentDir,
-                      diagnostics.map((d) => ({
-                        type: d.type as PiResourceDiagnostic["type"],
-                        message: d.message,
-                        path: "path" in d ? (d as { path?: string }).path : undefined,
-                      })),
+                      }),
                     );
+                    const diagnostics = [...services.diagnostics, ...extensionErrors];
+                    const resourceDiagnostics: PiResourceDiagnostic[] = services.diagnostics.map(
+                      (diagnostic) => ({
+                        type: diagnostic.type,
+                        message: diagnostic.message,
+                      }),
+                    );
+                    diagnosticsMap().set(agentDir, [...resourceDiagnostics, ...extensionErrors]);
                     return {
                       ...created,
                       services,
@@ -426,7 +410,9 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
       catch: (error) => error,
     }).pipe(
       Effect.catch((error) =>
-        options.restartOnContinuationError !== false && shouldRestartAfterPromptError(error)
+        options.restartOnContinuationError !== false &&
+        error instanceof Error &&
+        shouldRestartAfterPromptError(error)
           ? this.restartPromptEffect(message, options)
           : Effect.fail(error),
       ),
@@ -445,12 +431,24 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
   }
 
   private promptSession(message: string, options: PiPromptOptions): Promise<void> {
-    return this.requireSession().prompt(message, {
-      streamingBehavior: options.streamingBehavior,
-      images: options.images,
-      expandPromptTemplates: options.expandPromptTemplates,
-      source: options.source,
-      preflightResult: options.preflightResult,
+    const session = this.requireSession();
+    const prompt = () =>
+      session.prompt(message, {
+        streamingBehavior: options.streamingBehavior,
+        images: options.images,
+        expandPromptTemplates: options.expandPromptTemplates,
+        source: options.source,
+        preflightResult: options.preflightResult,
+      });
+    const mode = options.streamingBehavior === "steer" ? "steering" : options.streamingBehavior;
+    if (!session.isStreaming || !mode) return prompt();
+    return this.withQueueLock(async () => {
+      await prompt();
+      const texts =
+        mode === "steering" ? session.getSteeringMessages() : session.getFollowUpMessages();
+      this.syncQueuedMessages(mode, texts);
+      const queued = this.queued[mode].at(-1);
+      if (queued) queued.images = structuredClone(options.images ?? []);
     });
   }
 
@@ -474,12 +472,7 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
   }
 
   steer(message: string, images: AgentImageInput[] = []): Promise<void> {
-    return Effect.runPromise(
-      Effect.tryPromise({
-        try: () => this.requireSession().steer(message, images),
-        catch: (error) => error,
-      }),
-    );
+    return this.withQueueLock(() => this.queueMessage("steering", message, images));
   }
 
   mutateQueuedFollowUp(
@@ -488,40 +481,83 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     replacement?: string,
     images: AgentImageInput[] = [],
   ): Promise<void> {
-    return Effect.runPromise(
-      Effect.tryPromise({
-        try: async () => {
-          const session = this.requireSession();
-          this.queueEventBufferDepth += 1;
-          try {
-            const cleared = session.clearQueue();
-            const mutation = planQueuedFollowUpMutation(
-              cleared.followUp,
-              message,
-              action,
-              replacement,
-            );
-            if (!mutation) {
-              await restoreQueuedMessages(session, cleared, null);
-              throw new Error("Queued follow-up is no longer pending.");
-            }
-            await restoreQueuedMessages(session, cleared, mutation, images);
-          } finally {
-            this.flushBufferedQueueEvent();
-          }
-        },
-        catch: (error) => error,
-      }),
-    );
+    return this.withQueueLock(async () => {
+      const session = this.requireSession();
+      if (!session.isStreaming) throw new Error("Cannot mutate a queue after the agent settled.");
+      this.syncQueuedMessages("steering", session.getSteeringMessages());
+      this.syncQueuedMessages("followUp", session.getFollowUpMessages());
+      const known = structuredClone(this.queued);
+
+      this.queueEventBufferDepth += 1;
+      try {
+        const cleared = session.clearQueue();
+        const snapshot: QueuedMessages = {
+          steering: hydrateQueuedMessages(cleared.steering, known.steering),
+          followUp: hydrateQueuedMessages(cleared.followUp, known.followUp),
+        };
+        const mutation = planQueuedFollowUpMutation(
+          snapshot.followUp,
+          message,
+          action,
+          replacement === undefined ? undefined : { text: replacement, images },
+        );
+        if (!mutation) {
+          await this.restoreQueue(snapshot);
+          throw new Error("Queued follow-up is no longer pending.");
+        }
+        try {
+          await this.restoreQueue({
+            steering: [...snapshot.steering, ...(mutation.promoted ? [mutation.promoted] : [])],
+            followUp: mutation.followUp,
+          });
+        } catch (error) {
+          session.clearQueue();
+          await this.restoreQueue(snapshot);
+          throw error;
+        }
+      } finally {
+        this.flushBufferedQueueEvent();
+      }
+    });
+  }
+
+  private async restoreQueue(queue: QueuedMessages): Promise<void> {
+    for (const queued of queue.steering) {
+      await this.queueMessage("steering", queued.text, queued.images);
+    }
+    for (const queued of queue.followUp) {
+      await this.queueMessage("followUp", queued.text, queued.images);
+    }
   }
 
   followUp(message: string, images: AgentImageInput[] = []): Promise<void> {
-    return Effect.runPromise(
-      Effect.tryPromise({
-        try: () => this.requireSession().followUp(message, images),
-        catch: (error) => error,
-      }),
-    );
+    return this.withQueueLock(() => this.queueMessage("followUp", message, images));
+  }
+
+  private async queueMessage(
+    mode: QueueMode,
+    message: string,
+    images: AgentImageInput[],
+  ): Promise<void> {
+    const session = this.requireSession();
+    await (mode === "steering"
+      ? session.steer(message, images)
+      : session.followUp(message, images));
+    const messages =
+      mode === "steering" ? session.getSteeringMessages() : session.getFollowUpMessages();
+    this.syncQueuedMessages(mode, messages);
+    const queued = this.queued[mode].at(-1);
+    if (queued) queued.images = structuredClone(images);
+  }
+
+  private withQueueLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queueTail.then(operation, operation);
+    this.queueTail = result.then(ignoreExtensionUi, ignoreExtensionUi);
+    return result;
+  }
+
+  private syncQueuedMessages(mode: QueueMode, texts: readonly string[]): void {
+    this.queued[mode] = hydrateQueuedMessages(texts, this.queued[mode]);
   }
 
   adoptPiSessionId(piSessionId: string | null | undefined): void {
@@ -529,42 +565,24 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     if (next && !this.currentPiSessionId) this.currentPiSessionId = next;
   }
 
-  compact(customInstructions?: string): Promise<unknown> {
-    return Effect.runPromise(this.compactEffect(customInstructions));
+  async compact(customInstructions?: string): Promise<CompactionResult> {
+    if (this.activePromptCount > 0) throw new Error("Cannot compact while the agent is running.");
+    return this.requireSession().compact(customInstructions);
   }
 
-  private compactEffect(customInstructions?: string): Effect.Effect<unknown, unknown> {
-    if (this.activePromptCount > 0) {
-      return Effect.fail(new Error("Cannot compact while the agent is running."));
-    }
-    return Effect.tryPromise({
-      try: () => this.requireSession().compact(customInstructions),
-      catch: (error) => error,
-    });
-  }
-
-  /** Stop the current run and hand back whatever was still queued.
-   *
-   *  clearQueue() returns the texts precisely so they are not lost — pi's own
-   *  TUI puts them back in the editor. Discarding them meant a stop silently
-   *  destroyed every message the user had lined up. */
   abort(): Promise<{ steering: string[]; followUp: string[] }> {
-    return Effect.runPromise(
-      Effect.tryPromise({
-        try: async () => {
-          const session = this.runtime?.session;
-          if (!session) return { steering: [], followUp: [] };
-          const cleared = session.clearQueue();
-          await session.abort();
-          await session.waitForIdle();
-          return {
-            steering: [...(cleared?.steering ?? [])],
-            followUp: [...(cleared?.followUp ?? [])],
-          };
-        },
-        catch: () => undefined,
-      }).pipe(Effect.catch(() => Effect.succeed({ steering: [], followUp: [] }))),
-    );
+    return this.withQueueLock(async () => {
+      try {
+        const session = this.runtime?.session;
+        if (!session) return { steering: [], followUp: [] };
+        const cleared = session.clearQueue();
+        this.queued = { steering: [], followUp: [] };
+        await session.abort();
+        return { steering: [...cleared.steering], followUp: [...cleared.followUp] };
+      } catch {
+        return { steering: [], followUp: [] };
+      }
+    });
   }
 
   respondExtensionUi(
@@ -573,17 +591,16 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
   ): boolean {
     const pending = this.extensionUiPending.get(requestId);
     if (!pending) return false;
-    this.extensionUiPending.delete(requestId);
-    if (response.cancelled) {
-      pending.resolve(pending.method === "confirm" ? false : undefined);
-      return true;
-    }
-    pending.resolve(pending.method === "confirm" ? response.confirmed === true : response.value);
+    if (response.cancelled) pending.cancel();
+    else pending.respond(response);
     return true;
   }
 
   stop(): Promise<void> {
-    return Effect.runPromise(this.stopEffect());
+    const stop = () => this.withQueueLock(() => Effect.runPromise(this.stopEffect()));
+    const result = this.startTail.then(stop, stop);
+    this.startTail = result.catch(ignoreExtensionUi);
+    return result;
   }
 
   private stopEffect(): Effect.Effect<void> {
@@ -591,9 +608,8 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     this.unsubscribe = null;
     const runtime = this.runtime;
     this.runtime = null;
-    for (const pending of this.extensionUiPending.values()) {
-      pending.resolve(pending.method === "confirm" ? false : undefined);
-    }
+    this.queued = { steering: [], followUp: [] };
+    for (const pending of this.extensionUiPending.values()) pending.cancel();
     this.extensionUiPending.clear();
     if (!runtime) return Effect.void;
     return Effect.tryPromise({
@@ -627,11 +643,11 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     const usage = session.getContextUsage();
     if (!usage) return null;
     const settings = session.settingsManager.getCompactionSettings();
-    const tokens = typeof usage.tokens === "number" ? usage.tokens : null;
+    const tokens = usage.tokens;
     return {
       tokens,
       contextWindow: usage.contextWindow,
-      percent: typeof usage.percent === "number" ? usage.percent : null,
+      percent: usage.percent,
       shouldCompact:
         tokens !== null && usage.contextWindow > 0
           ? shouldCompact(tokens, usage.contextWindow, settings)
@@ -654,72 +670,103 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     return session;
   }
 
-  private extensionUiContext(): ExtensionUIContext {
-    const request = (
-      method: "select" | "confirm" | "input" | "editor",
-      payload: Record<string, unknown>,
-      timeout?: number,
-      signal?: AbortSignal,
-    ) => {
-      const requestId = randomUUID();
-      return new Promise<unknown>((resolve) => {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const finish = (value: unknown) => {
-          if (timer) clearTimeout(timer);
-          signal?.removeEventListener("abort", cancel);
-          this.extensionUiPending.delete(requestId);
-          resolve(value);
-        };
-        const cancel = () => finish(method === "confirm" ? false : undefined);
-        this.extensionUiPending.set(requestId, { method, resolve: finish });
-        this.recordEvent({ type: "extension_ui_request", requestId, method, ...payload });
-        if (timeout && timeout > 0) timer = setTimeout(cancel, timeout);
-        signal?.addEventListener("abort", cancel, { once: true });
-        if (signal?.aborted) cancel();
+  private requestExtensionUi<Result extends string | boolean | undefined>(
+    event: PiEvent,
+    cancelledResult: Result,
+    resolveResponse: (response: ExtensionUiResponse) => Result,
+    timeout?: number,
+    signal?: AbortSignal,
+  ): Promise<Result> {
+    const requestId = randomUUID();
+    return new Promise<Result>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (value: Result) => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", cancel);
+        this.extensionUiPending.delete(requestId);
+        resolve(value);
+      };
+      const cancel = () => finish(cancelledResult);
+      this.extensionUiPending.set(requestId, {
+        cancel,
+        respond: (response) => finish(resolveResponse(response)),
       });
-    };
+      this.recordEvent({ ...event, requestId });
+      if (timeout && timeout > 0) timer = setTimeout(cancel, timeout);
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
+    });
+  }
+
+  private extensionUiContext(): ExtensionUIContext {
     return {
       select: (title, options, opts) =>
-        request("select", { title, options }, opts?.timeout, opts?.signal) as Promise<
-          string | undefined
-        >,
+        this.requestExtensionUi(
+          { type: "extension_ui_request", method: "select", title, options },
+          undefined,
+          (response) => response.value,
+          opts?.timeout,
+          opts?.signal,
+        ),
       confirm: (title, message, opts) =>
-        request("confirm", { title, message }, opts?.timeout, opts?.signal) as Promise<boolean>,
+        this.requestExtensionUi(
+          { type: "extension_ui_request", method: "confirm", title, message },
+          false,
+          (response) => response.confirmed === true,
+          opts?.timeout,
+          opts?.signal,
+        ),
       input: (title, placeholder, opts) =>
-        request("input", { title, placeholder }, opts?.timeout, opts?.signal) as Promise<
-          string | undefined
-        >,
+        this.requestExtensionUi(
+          { type: "extension_ui_request", method: "input", title, placeholder },
+          undefined,
+          (response) => response.value,
+          opts?.timeout,
+          opts?.signal,
+        ),
       editor: (title, prefill) =>
-        request("editor", { title, prefill }) as Promise<string | undefined>,
+        this.requestExtensionUi(
+          { type: "extension_ui_request", method: "editor", title, prefill },
+          undefined,
+          (response) => response.value,
+        ),
       notify: (message, level = "info") => this.recordEvent({ type: "notice", level, message }),
       setStatus: (key, text) =>
         this.recordEvent({ type: "extension_status", key, text: text ?? null }),
       setTitle: (title) => this.recordEvent({ type: "extension_title", title }),
       onTerminalInput: () => () => undefined,
-      setWorkingMessage: () => undefined,
-      setWorkingVisible: () => undefined,
-      setWorkingIndicator: () => undefined,
-      setHiddenThinkingLabel: () => undefined,
-      setWidget: () => undefined,
-      setFooter: () => undefined,
-      setHeader: () => undefined,
-      custom: async () => undefined as never,
-      pasteToEditor: () => undefined,
-      setEditorText: () => undefined,
+      setWorkingMessage: ignoreExtensionUi,
+      setWorkingVisible: ignoreExtensionUi,
+      setWorkingIndicator: ignoreExtensionUi,
+      setHiddenThinkingLabel: ignoreExtensionUi,
+      setWidget: ignoreExtensionUi,
+      setFooter: ignoreExtensionUi,
+      setHeader: ignoreExtensionUi,
+      custom: async () => {
+        throw new Error("Custom extension UI requires the Pi TUI");
+      },
+      pasteToEditor: ignoreExtensionUi,
+      setEditorText: ignoreExtensionUi,
       getEditorText: () => "",
-      addAutocompleteProvider: () => undefined,
-      setEditorComponent: () => undefined,
-      getEditorComponent: () => undefined,
-      theme: undefined as never,
+      addAutocompleteProvider: ignoreExtensionUi,
+      setEditorComponent: ignoreExtensionUi,
+      getEditorComponent: ignoreExtensionUi,
+      get theme(): never {
+        throw new Error("Extension themes require the Pi TUI");
+      },
       getAllThemes: () => [],
-      getTheme: () => undefined,
+      getTheme: ignoreExtensionUi,
       setTheme: () => ({ success: false, error: "Theme changes require the Pi TUI" }),
       getToolsExpanded: () => false,
-      setToolsExpanded: () => undefined,
+      setToolsExpanded: ignoreExtensionUi,
     };
   }
 
   private recordEvent(event: PiEvent) {
+    if (event.type === "queue_update") {
+      this.syncQueuedMessages("steering", queueTexts(event.steering));
+      this.syncQueuedMessages("followUp", queueTexts(event.followUp));
+    }
     if (event.type === "queue_update" && this.queueEventBufferDepth > 0) {
       this.bufferedQueueEvent = event;
       return;
@@ -729,7 +776,7 @@ class PiSdkSession extends EventEmitter implements PiAgentSession {
     }
     const logged: LoggedPiEvent = {
       seq: ++this.eventSeq,
-      event: event as PiEvent,
+      event,
       timestamp: new Date().toISOString(),
     };
     this.eventLog.push(logged);
@@ -807,6 +854,11 @@ function runtimeLookupRank(
 
 const DEFAULT_SESSION_ID = "default";
 
+type RuntimeSessionLookup = {
+  sessionId: string;
+  session: PiAgentSession;
+};
+
 class PiRuntimeManager {
   private sessions = new Map<string, PiAgentSession>();
 
@@ -823,7 +875,7 @@ class PiRuntimeManager {
   getSessionForLookup(
     sessionId = DEFAULT_SESSION_ID,
     piSessionId?: string | null,
-  ): { sessionId: string; session: PiAgentSession } {
+  ): RuntimeSessionLookup {
     const resolved = this.findSessionForLookup(sessionId, piSessionId);
     if (resolved) return resolved;
     const target = piSessionId?.trim();
@@ -840,11 +892,11 @@ class PiRuntimeManager {
   findSessionForLookup(
     sessionId = DEFAULT_SESSION_ID,
     piSessionId?: string | null,
-  ): { sessionId: string; session: PiAgentSession } | null {
+  ): RuntimeSessionLookup | null {
     return findRuntimeSessionForLookup(this.listSessions(), sessionId, piSessionId);
   }
 
-  listSessions(): Array<{ sessionId: string; session: PiAgentSession }> {
+  listSessions(): RuntimeSessionLookup[] {
     return [...this.sessions.entries()].map(([sessionId, session]) => ({ sessionId, session }));
   }
 }

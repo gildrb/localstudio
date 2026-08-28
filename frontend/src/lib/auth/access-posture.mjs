@@ -1,6 +1,6 @@
 const value = (environment, name) => {
-  const candidate = environment[name];
-  return typeof candidate === "string" ? candidate.trim() : "";
+  const candidate = environment[name] ?? "";
+  return String(candidate).trim();
 };
 
 const loopbackHosts = new Set(["127.0.0.1", "::1", "[::1]"]);

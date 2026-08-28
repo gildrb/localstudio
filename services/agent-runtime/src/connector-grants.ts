@@ -3,6 +3,7 @@ import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Schema } from "effect";
+import { createSerialAccess } from "./serial-access";
 import { resolveDataDir } from "./data-dir";
 import { enabledConnectors } from "./connectors-service";
 import {
@@ -18,31 +19,9 @@ export {
   type ConnectorGrantInput,
 } from "./connector-grants-contract";
 
-/**
- * Which models may reach which connector tools.
- *
- * The rule is deny-by-default: a model with no matching grant sees no connector
- * tools at all. Enabling a connector writes its opening grant (`*`, every
- * tool), so turning one on behaves exactly as it did before this file existed;
- * narrowing it to specific models, or to specific tools, is then a subtraction
- * the user makes on purpose.
- *
- * The model id is asserted by the caller, not proven. This governs what the
- * model is offered and what it is allowed to invoke — it is not a sandbox
- * against arbitrary local code, which can reach the same loopback route.
- */
 type GrantsFile = typeof ConnectorGrantsFileSchema.Type;
 
-let grantsAccess = Promise.resolve();
-
-function withGrantsAccess<A>(operation: () => Promise<A>): Promise<A> {
-  const result = grantsAccess.then(operation);
-  grantsAccess = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
+const withGrantsAccess = createSerialAccess();
 
 export function resolveConnectorGrantsFilePath(): string {
   return join(resolveDataDir(), "connector-grants.json");
@@ -73,10 +52,6 @@ async function writeGrantsFile(grants: GrantsFile): Promise<void> {
   await rename(temporary, file);
 }
 
-/**
- * Gives every newly enabled connector its opening `*` grant exactly once, so
- * deny-by-default never silently disarms a connector the user just turned on.
- */
 async function seededGrants(): Promise<GrantsFile> {
   const stored = await readGrantsFile();
   const seeded = new Set(stored.seeded);
@@ -119,8 +94,6 @@ export function setConnectorGrant(input: ConnectorGrantInput): Promise<Connector
     const grants = stored.grants.filter(
       (entry) => entry.modelId !== grant.modelId || entry.connectorId !== grant.connectorId,
     );
-    // An empty tool list is a revocation, not a grant of nothing: storing it
-    // would leave a row that reads as "allowed" in every listing.
     const next = tools === "all" || tools.length ? [...grants, grant] : grants;
     await writeGrantsFile({ ...stored, grants: next });
     return next;
@@ -141,11 +114,6 @@ export function removeConnectorGrant(
   });
 }
 
-/**
- * The tools `modelId` may call on `connectorId`: `"all"`, an explicit list, or
- * an empty list when nothing is granted. A `*` row and a model-specific row are
- * unioned, so a broad grant is never narrowed by adding a second one.
- */
 export function resolveGrantedTools(
   grants: ConnectorGrant[],
   modelId: string,

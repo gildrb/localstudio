@@ -34,53 +34,37 @@ const NVIDIA_SMI_ARGS = [
 const NVIDIA_SMI_TIMEOUT_MS = 5_000;
 
 const parseNvidiaSmiGpuLine = (line: string, index: number): GpuInfo => {
-  const parts = line.split(",").map((value) => value.trim());
-  const [
-    rawUuid,
-    rawPciBusId,
-    rawName,
-    memoryTotal,
-    memoryUsed,
-    memoryFree,
-    utilization,
-    temperature,
-    powerDraw,
-    powerLimit,
-  ] = parts;
-  const name = rawName ?? "Unknown";
-  const identity = (value: string | undefined): string | undefined => {
-    if (!value || /^(?:N\/A|\[Not Supported\])$/i.test(value)) return undefined;
-    return value;
+  const fields = line.split(",").map((value) => value.trim());
+  const name = fields[2] ?? "Unknown";
+  const identity = (field: number): string | undefined => {
+    const value = fields[field];
+    return !value || /^(?:N\/A|\[Not Supported\])$/i.test(value) ? undefined : value;
   };
-  const uuid = identity(rawUuid);
-  const pciBusId = identity(rawPciBusId);
-  const toFiniteNumber = (value: string | undefined): number => {
-    const parsed = Number(value ?? 0);
-    return Number.isFinite(parsed) ? parsed : 0;
+  const number = (field: number): number => {
+    const value = Number(fields[field] ?? 0);
+    return Number.isFinite(value) ? value : 0;
   };
-  const toMb = (megabytes: string | undefined): number =>
-    Math.max(0, Math.round(toFiniteNumber(megabytes)));
-  const reportedTotalMb = toMb(memoryTotal);
-  const isUnifiedMemoryNvidia = reportedTotalMb === 0 && /\b(?:GB10|Grace)\b/i.test(name);
-  const fallbackTotalMb = isUnifiedMemoryNvidia ? Math.round(totalmem() / 1024 / 1024) : 0;
-  const fallbackFreeMb = isUnifiedMemoryNvidia ? Math.round(freemem() / 1024 / 1024) : 0;
-  const fallbackUsedMb = Math.max(0, fallbackTotalMb - fallbackFreeMb);
-  const memoryTotalMb = reportedTotalMb || fallbackTotalMb;
-  const memoryUsedMb = toMb(memoryUsed) || fallbackUsedMb;
-  const memoryFreeMb = toMb(memoryFree) || fallbackFreeMb;
-  return {
-    ...(uuid ? { uuid } : {}),
-    ...(pciBusId ? { pci_bus_id: pciBusId } : {}),
+  const megabytes = (field: number): number => Math.max(0, Math.round(number(field)));
+  const reportedTotalMb = megabytes(3);
+  const unified = reportedTotalMb === 0 && /(?:GB10|Grace)/i.test(name);
+  const fallbackTotalMb = unified ? Math.round(totalmem() / 1024 / 1024) : 0;
+  const fallbackFreeMb = unified ? Math.round(freemem() / 1024 / 1024) : 0;
+  const gpu: GpuInfo = {
     index,
     name,
-    memory_total_mb: memoryTotalMb,
-    memory_used_mb: memoryUsedMb,
-    memory_free_mb: memoryFreeMb,
-    utilization_pct: toFiniteNumber(utilization),
-    temp_c: toFiniteNumber(temperature),
-    power_draw: toFiniteNumber(powerDraw),
-    power_limit: toFiniteNumber(powerLimit),
+    memory_total_mb: reportedTotalMb || fallbackTotalMb,
+    memory_used_mb: megabytes(4) || Math.max(0, fallbackTotalMb - fallbackFreeMb),
+    memory_free_mb: megabytes(5) || fallbackFreeMb,
+    utilization_pct: number(6),
+    temp_c: number(7),
+    power_draw: number(8),
+    power_limit: number(9),
   };
+  const uuid = identity(0);
+  const pciBusId = identity(1);
+  if (uuid) gpu.uuid = uuid;
+  if (pciBusId) gpu.pci_bus_id = pciBusId;
+  return gpu;
 };
 
 const splitSmiLines = (stdout: string): string[] =>
@@ -154,21 +138,17 @@ const warnNoGpuToolingOnce = (): void => {
   console.warn(`No GPUs reported by any monitoring tool; attempted: ${attempted}`);
 };
 
+const collectForcedGpuInfo = (forced: RuntimeGpuMonitoringTool): Effect.Effect<GpuInfo[]> => {
+  if (forced === "nvidia-smi") return getGpuInfoFromNvidiaSmi();
+  if (forced === "amd-smi") return getGpuInfoFromAmdSmi();
+  if (forced === "rocm-smi") return getGpuInfoFromRocmSmi();
+  return getGpuInfoFromIntelSysfs();
+};
+
 const collectGpuInfo = (): Effect.Effect<GpuInfo[]> =>
   Effect.gen(function* () {
     const forced = resolveForcedGpuMonitoringTool();
-    if (forced === "nvidia-smi") {
-      return yield* getGpuInfoFromNvidiaSmi();
-    }
-    if (forced === "amd-smi") {
-      return yield* getGpuInfoFromAmdSmi();
-    }
-    if (forced === "rocm-smi") {
-      return yield* getGpuInfoFromRocmSmi();
-    }
-    if (forced === "intel-sysfs") {
-      return yield* getGpuInfoFromIntelSysfs();
-    }
+    if (forced) return yield* collectForcedGpuInfo(forced);
 
     const nvidia = yield* getGpuInfoFromNvidiaSmi();
     if (nvidia.length > 0) {
@@ -176,15 +156,16 @@ const collectGpuInfo = (): Effect.Effect<GpuInfo[]> =>
     }
 
     const rocmTool = resolveRocmSmiTool();
-    if (rocmTool === "amd-smi") {
-      const amd = yield* getGpuInfoFromAmdSmi();
-      if (amd.length > 0) return amd;
-      return yield* getGpuInfoFromRocmSmi();
-    }
-    if (rocmTool === "rocm-smi") {
-      const rocm = yield* getGpuInfoFromRocmSmi();
-      if (rocm.length > 0) return rocm;
-      return yield* getGpuInfoFromAmdSmi();
+    if (rocmTool) {
+      const collectors =
+        rocmTool === "amd-smi"
+          ? [getGpuInfoFromAmdSmi, getGpuInfoFromRocmSmi]
+          : [getGpuInfoFromRocmSmi, getGpuInfoFromAmdSmi];
+      for (const collect of collectors) {
+        const gpus = yield* collect();
+        if (gpus.length > 0) return gpus;
+      }
+      return [];
     }
 
     const intel = yield* getGpuInfoFromIntelSysfs();

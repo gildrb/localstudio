@@ -228,7 +228,20 @@ export const UsageStatsSchema = Schema.Struct({
 
 const isUsageStats = Schema.is(UsageStatsSchema);
 
-export const validateUsageStats = (value: unknown): typeof UsageStatsSchema.Type => {
+type UsageValidationInput =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | UsageValidationObject
+  | UsageValidationInput[];
+
+interface UsageValidationObject {
+  [key: string]: UsageValidationInput;
+}
+
+export const validateUsageStats = (value: UsageValidationInput): typeof UsageStatsSchema.Type => {
   if (!isUsageStats(value)) throw new TypeError("Invalid normalized usage projection");
   return value;
 };

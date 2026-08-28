@@ -1,17 +1,5 @@
-//
-// HTTP surface for click-to-connect OAuth on catalog connectors. The routes
-// are deliberately generic — the connector id selects a provider definition,
-// the engine picks the flow — so adding a provider is a registry entry, not a
-// new endpoint. Tokens never travel through these responses: status reports
-// who is connected, authorize reports what the user must click, and that is
-// the entire vocabulary.
-//
-
 import { Schema } from "effect";
-import {
-  OAuthClientInputSchema,
-  OAuthConnectorInputSchema,
-} from "../oauth-connector-contract";
+import { OAuthClientInputSchema, OAuthConnectorInputSchema } from "../oauth-connector-contract";
 import {
   beginOAuthConnectorAuthorization,
   cancelOAuthConnectorAuthorization,
@@ -22,12 +10,9 @@ import {
 } from "../oauth-connectors";
 import { closePooledConnection } from "../connector-pool";
 
-function failure(error: unknown, fallback: string): Response {
+function failure(error: Error | null, fallback: string): Response {
   const status = error instanceof OAuthConnectorError ? error.status : 500;
-  return Response.json(
-    { error: error instanceof Error ? error.message : fallback },
-    { status },
-  );
+  return Response.json({ error: error instanceof Error ? error.message : fallback }, { status });
 }
 
 async function connectorIdFromBody(request: Request): Promise<string | null> {
@@ -45,7 +30,7 @@ export async function handleOAuthAuthorizeBegin(request: Request): Promise<Respo
   try {
     return Response.json(await beginOAuthConnectorAuthorization(connectorId));
   } catch (error) {
-    return failure(error, "OAuth sign-in failed");
+    return failure(error instanceof Error ? error : null, "OAuth sign-in failed");
   }
 }
 
@@ -56,7 +41,7 @@ export async function handleOAuthAuthorizeCancel(request: Request): Promise<Resp
     cancelOAuthConnectorAuthorization(connectorId);
     return Response.json({ cancelled: true });
   } catch (error) {
-    return failure(error, "OAuth cancellation failed");
+    return failure(error instanceof Error ? error : null, "OAuth cancellation failed");
   }
 }
 
@@ -66,7 +51,7 @@ export async function handleOAuthStatus(request: Request): Promise<Response> {
   try {
     return Response.json(await getOAuthConnectorStatus(connectorId));
   } catch (error) {
-    return failure(error, "OAuth status failed");
+    return failure(error instanceof Error ? error : null, "OAuth status failed");
   }
 }
 
@@ -81,7 +66,7 @@ export async function handleOAuthClientPut(request: Request): Promise<Response> 
     await saveOAuthConnectorClient(input.connectorId.trim(), input.clientId);
     return Response.json(await getOAuthConnectorStatus(input.connectorId.trim()));
   } catch (error) {
-    return failure(error, "OAuth client could not be saved");
+    return failure(error instanceof Error ? error : null, "OAuth client could not be saved");
   }
 }
 
@@ -90,10 +75,9 @@ export async function handleOAuthDisconnect(request: Request): Promise<Response>
   if (!connectorId) return Response.json({ error: "connectorId is required" }, { status: 400 });
   try {
     const status = await disconnectOAuthConnector(connectorId);
-    // A pooled child spawned with the old token keeps running otherwise.
     closePooledConnection(connectorId);
     return Response.json(status);
   } catch (error) {
-    return failure(error, "OAuth disconnect failed");
+    return failure(error instanceof Error ? error : null, "OAuth disconnect failed");
   }
 }

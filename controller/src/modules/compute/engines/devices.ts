@@ -1,31 +1,26 @@
 import type { Accelerator, DeviceId, LaunchPlan } from "../contracts";
 
-/**
- * The single place device selection becomes a mechanism.
- *
- * Engines declare `plan.devices` abstractly; this translates that list into whatever the
- * accelerator and runtime actually need. Before this existed the same derivation lived in
- * four modules with four different key precedences (gpu-leases, process-utilities,
- * process-manager, backend-builder) — one of which resolved UUIDs against an empty GPU
- * list and so only ever saw the raw selector.
- */
-
-/** Docker flags a launcher must add for this plan. Empty for process launches. */
 export interface DeviceRuntimeFlags {
   readonly args: readonly string[];
   readonly groupAdd: readonly string[];
 }
 
+export interface DeviceEnvironment {
+  readonly CUDA_VISIBLE_DEVICES?: string;
+  readonly HIP_VISIBLE_DEVICES?: string;
+  readonly ROCR_VISIBLE_DEVICES?: string;
+  readonly ONEAPI_DEVICE_SELECTOR?: string;
+}
+
 const joined = (devices: readonly DeviceId[]): string => devices.join(",");
 
-/** Indices for accelerators whose tooling selects by ordinal rather than UUID. */
 const ordinals = (devices: readonly DeviceId[]): string =>
   devices.map((device) => device.slice(device.lastIndexOf(":") + 1)).join(",");
 
 export const deviceEnvironment = (
   accelerator: Accelerator,
   devices: readonly DeviceId[],
-): Readonly<Record<string, string>> => {
+): DeviceEnvironment => {
   if (devices.length === 0) return {};
   switch (accelerator) {
     case "cuda":
@@ -53,7 +48,14 @@ export const dockerFlagsFor = (
       return { args: ["--gpus", `"device=${joined(devices)}"`], groupAdd: [] };
     case "rocm":
       return {
-        args: ["--device", "/dev/kfd", "--device", "/dev/dri", "--security-opt", "seccomp=unconfined"],
+        args: [
+          "--device",
+          "/dev/kfd",
+          "--device",
+          "/dev/dri",
+          "--security-opt",
+          "seccomp=unconfined",
+        ],
         groupAdd: ["video", "render"],
       };
     case "xpu":
@@ -64,11 +66,6 @@ export const dockerFlagsFor = (
   }
 };
 
-/**
- * Fold device selection into a plan's environment. Runtime is taken from the plan: a
- * docker plan still gets the env vars (the container reads them) *plus* the flags the
- * launcher applies separately via `dockerFlagsFor`.
- */
 export const applyDevices = (plan: LaunchPlan, accelerator: Accelerator): LaunchPlan => ({
   ...plan,
   env: { ...plan.env, ...deviceEnvironment(accelerator, plan.devices) },

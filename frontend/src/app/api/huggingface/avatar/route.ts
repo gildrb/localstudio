@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Schema } from "effect";
 import { fetchWithTimeout } from "@/lib/api/http";
 
 export const runtime = "nodejs";
@@ -6,11 +7,10 @@ export const dynamic = "force-dynamic";
 
 const HF = "https://huggingface.co/api";
 const TIMEOUT_MS = 8_000;
+const HuggingFaceAvatarSchema = Schema.Struct({ avatarUrl: Schema.optional(Schema.String) });
+const decodeHuggingFaceAvatar = Schema.decodeUnknownOption(HuggingFaceAvatarSchema);
 
-// In-process avatar cache. Avatars are stable (HF CDN URLs don't change for a
-// given owner), so we cache the resolved URL for CACHE_TTL and remember misses
-// for MISS_TTL so we don't hammer HF with two sequential API calls on every
-// page render for an owner that has no avatar.
+// Cache misses briefly to avoid repeat lookups.
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — avatar URLs are stable
 const MISS_TTL_MS = 30 * 60 * 1000; // 30m — retry misses sooner in case HF was down
 const cache = new Map<string, { url: string | null; expires: number }>();
@@ -29,9 +29,9 @@ async function resolveAvatarUrl(owner: string): Promise<string | null> {
         TIMEOUT_MS,
       );
       if (!response.ok) continue;
-      const data = (await response.json()) as { avatarUrl?: unknown };
-      if (typeof data.avatarUrl === "string" && data.avatarUrl.startsWith("https://")) {
-        url = data.avatarUrl;
+      const data = decodeHuggingFaceAvatar(await response.json());
+      if (data._tag === "Some" && data.value.avatarUrl?.startsWith("https://")) {
+        url = data.value.avatarUrl;
         break;
       }
     } catch {

@@ -1,21 +1,26 @@
+import { Predicate } from "effect";
 import type { ControllerUsageStatsSchema, UsageStatsSchema } from "./usage-schema";
 
-type UnknownRecord = Record<string, unknown>;
+type JsonValue = string | number | boolean | bigint | null | undefined | JsonObject | JsonValue[];
 
-const objectOrEmpty = (value: unknown): UnknownRecord =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as UnknownRecord)
-    : {};
+interface JsonObject {
+  [key: string]: JsonValue;
+}
 
-const nonEmptyObject = (value: unknown): UnknownRecord | undefined => {
+const isJsonObject = (value: JsonValue): value is JsonObject =>
+  value !== null && !Array.isArray(value) && Object(value) === value;
+
+const objectOrEmpty = (value: JsonValue): JsonObject => (isJsonObject(value) ? value : {});
+
+const nonEmptyObject = (value: JsonValue): JsonObject | undefined => {
   const object = objectOrEmpty(value);
   return Object.keys(object).length > 0 ? object : undefined;
 };
 
-const rows = (value: unknown): UnknownRecord[] =>
+const rows = (value: JsonValue): JsonObject[] =>
   Array.isArray(value) ? value.map(objectOrEmpty) : [];
 
-const finiteNumber = (value: unknown, fallback = 0): number => {
+const finiteNumber = (value: JsonValue, fallback = 0): number => {
   try {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
@@ -24,43 +29,45 @@ const finiteNumber = (value: unknown, fallback = 0): number => {
   }
 };
 
-const nullableNumber = (value: unknown): number | null => {
+const nullableNumber = (value: JsonValue): number | null => {
   if (value === null || value === undefined || value === "") return null;
   const number = finiteNumber(value, NaN);
   return Number.isFinite(number) ? number : null;
 };
 
-const stringValue = (value: unknown, fallback = ""): string =>
-  typeof value === "string" && value.length > 0 ? value : fallback;
+const stringValue = (value: JsonValue, fallback = ""): string =>
+  Predicate.isString(value) && value.length > 0 ? value : fallback;
 
-const nullableString = (value: unknown): string | null => stringValue(value) || null;
+const nullableString = (value: JsonValue): string | null => stringValue(value) || null;
 
 const fields = <const Key extends string, Value>(
-  source: UnknownRecord,
+  source: JsonObject,
   keys: readonly Key[],
-  decode: (value: unknown) => Value,
-): Record<Key, Value> =>
-  Object.fromEntries(keys.map((key) => [key, decode(source[key])])) as Record<Key, Value>;
+  decode: (value: JsonValue) => Value,
+): Record<Key, Value> => {
+  const output: Record<Key, Value> = Object.create(null);
+  for (const key of keys) output[key] = decode(source[key]);
+  return output;
+};
 
 const numbers = <const Key extends string>(
-  source: UnknownRecord,
+  source: JsonObject,
   keys: readonly Key[],
 ): Record<Key, number> => fields(source, keys, finiteNumber);
 
 const nullableNumbers = <const Key extends string>(
-  source: UnknownRecord,
+  source: JsonObject,
   keys: readonly Key[],
 ): Record<Key, number | null> => fields(source, keys, nullableNumber);
 
 const strings = <const Key extends string>(
-  source: UnknownRecord,
+  source: JsonObject,
   keys: readonly Key[],
 ): Record<Key, string> => fields(source, keys, stringValue);
 
-const projector = <Output>(decode: (value: unknown) => Output): ((value: unknown) => Output) =>
-  decode;
-
-export const normalizeControllerUsage = projector((value) => {
+export function normalizeControllerUsage(value: JsonObject): ControllerUsageStats;
+export function normalizeControllerUsage(value: JsonValue): ControllerUsageStats | undefined;
+export function normalizeControllerUsage(value: JsonValue): ControllerUsageStats | undefined {
   const controller = nonEmptyObject(value);
   if (!controller) return undefined;
   const totals = objectOrEmpty(controller["totals"]);
@@ -68,7 +75,7 @@ export const normalizeControllerUsage = projector((value) => {
   const recent = objectOrEmpty(controller["recent_activity"]);
   const functionCalls = nonEmptyObject(controller["function_calls"]);
 
-  return {
+  const normalized: ControllerUsageStats = {
     totals: numbers(totals, [
       "total_requests",
       "successful_requests",
@@ -96,40 +103,42 @@ export const normalizeControllerUsage = projector((value) => {
       error_message: nullableString(error["error_message"]),
       created_at: stringValue(error["created_at"]),
     })),
-    ...(functionCalls
-      ? {
-          function_calls: {
-            totals: numbers(objectOrEmpty(functionCalls["totals"]), [
-              "total_calls",
-              "successful_calls",
-              "failed_calls",
-              "success_rate",
-            ]),
-            latency: nullableNumbers(objectOrEmpty(functionCalls["latency"]), ["avg_ms", "max_ms"]),
-            by_function: rows(functionCalls["by_function"]).map((entry) => ({
-              function_name: stringValue(entry["function_name"]),
-              ...numbers(entry, ["calls", "successful", "failed", "success_rate"]),
-              ...nullableNumbers(entry, ["avg_duration_ms", "max_duration_ms"]),
-            })),
-            recent_errors: rows(functionCalls["recent_errors"]).map((error) => ({
-              function_name: stringValue(error["function_name"]),
-              error_class: nullableString(error["error_class"]),
-              error_message: nullableString(error["error_message"]),
-              created_at: stringValue(error["created_at"]),
-            })),
-          },
-        }
-      : {}),
   };
-});
+  if (functionCalls) {
+    return {
+      ...normalized,
+      function_calls: {
+        totals: numbers(objectOrEmpty(functionCalls["totals"]), [
+          "total_calls",
+          "successful_calls",
+          "failed_calls",
+          "success_rate",
+        ]),
+        latency: nullableNumbers(objectOrEmpty(functionCalls["latency"]), ["avg_ms", "max_ms"]),
+        by_function: rows(functionCalls["by_function"]).map((entry) => ({
+          function_name: stringValue(entry["function_name"]),
+          ...numbers(entry, ["calls", "successful", "failed", "success_rate"]),
+          ...nullableNumbers(entry, ["avg_duration_ms", "max_duration_ms"]),
+        })),
+        recent_errors: rows(functionCalls["recent_errors"]).map((error) => ({
+          function_name: stringValue(error["function_name"]),
+          error_class: nullableString(error["error_class"]),
+          error_message: nullableString(error["error_message"]),
+          created_at: stringValue(error["created_at"]),
+        })),
+      },
+    };
+  }
+  return normalized;
+}
 
-export const normalizeUsageStats = projector((input) => {
+export const normalizeUsageStats = (input: JsonValue): UsageStats => {
   const usage = objectOrEmpty(input);
   const weekOverWeek = objectOrEmpty(usage["week_over_week"]);
   const recent = objectOrEmpty(usage["recent_activity"]);
   const controller = normalizeControllerUsage(usage["controller"]);
 
-  return {
+  const normalized: UsageStats = {
     totals: numbers(objectOrEmpty(usage["totals"]), [
       "total_tokens",
       "prompt_tokens",
@@ -242,19 +251,20 @@ export const normalizeUsageStats = projector((input) => {
     hourly_pattern: rows(usage["hourly_pattern"]).map((hour) =>
       numbers(hour, ["hour", "requests", "successful", "tokens"]),
     ),
-    ...(controller ? { controller } : {}),
   };
-});
+  if (controller) return { ...normalized, controller };
+  return normalized;
+};
 
 export type ControllerUsageStats = typeof ControllerUsageStatsSchema.Type;
 export type UsageStats = typeof UsageStatsSchema.Type;
 
-export const usageRate = (successful: unknown, total: unknown): number => {
+export const usageRate = (successful: JsonValue, total: JsonValue): number => {
   const count = finiteNumber(total);
   return count ? (finiteNumber(successful) / count) * 100 : 0;
 };
 
-export const usageAverage = (value: unknown, total: unknown): number => {
+export const usageAverage = (value: JsonValue, total: JsonValue): number => {
   const count = finiteNumber(total);
   return count ? Math.round(finiteNumber(value) / count) : 0;
 };

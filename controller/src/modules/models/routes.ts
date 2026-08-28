@@ -1,9 +1,11 @@
 import { basename, dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { effectRoute, defineRoutes, mergeRoutes } from "../../http/route-registrar";
 import type { Recipe } from "../models/types";
+import type { RecipeExtraArgument } from "@local-studio/contracts/recipes";
+import { recipeExtraArgumentsSchema } from "./recipes/recipe-serializer";
 import { resolveModelVision } from "@local-studio/contracts/model-capabilities";
 
 interface OpenAIModelInfo {
@@ -13,12 +15,7 @@ interface OpenAIModelInfo {
   owned_by: string;
   active: boolean;
   max_model_len?: number | null;
-  metadata: Record<string, unknown>;
-}
-
-interface OpenAIModelList {
-  object: "list";
-  data: OpenAIModelInfo[];
+  metadata: Schema.Schema.Type<typeof recipeExtraArgumentsSchema>;
 }
 
 const ActiveModelsSchema = Schema.Struct({
@@ -27,8 +24,9 @@ const ActiveModelsSchema = Schema.Struct({
   ),
 });
 
-const HuggingFaceModelsSchema = Schema.Array(Schema.Record(Schema.String, Schema.Unknown));
-const HuggingFaceModelSchema = Schema.Record(Schema.String, Schema.Unknown);
+const HuggingFaceModelSchema = recipeExtraArgumentsSchema;
+const HuggingFaceModelsSchema = Schema.Array(HuggingFaceModelSchema);
+type HuggingFaceModel = Schema.Schema.Type<typeof HuggingFaceModelSchema>;
 
 const decodeResponse = <S extends Schema.Constraint>(
   response: Response,
@@ -44,16 +42,14 @@ import { findObservedInferenceProcess } from "../../core/function-observability"
 import { fetchInference } from "../../http/local-fetch";
 import { listProviderModelsCached } from "../../services/provider-routing";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const decodeMetadata = Schema.decodeUnknownOption(recipeExtraArgumentsSchema);
+const decodeString = Schema.decodeUnknownOption(Schema.String);
+
+function recipeMetadata(recipe: Recipe): HuggingFaceModel {
+  return Option.getOrElse(decodeMetadata(recipe.extra_args?.["metadata"]), () => ({}));
 }
 
-function recipeMetadata(recipe: Recipe): Record<string, unknown> {
-  const metadata = recipe.extra_args?.["metadata"];
-  return isRecord(metadata) ? metadata : {};
-}
-
-function resolvedRecipeMetadata(recipe: Recipe, modelId: string): Record<string, unknown> {
+function resolvedRecipeMetadata(recipe: Recipe, modelId: string): HuggingFaceModel {
   const metadata = recipeMetadata(recipe);
   return {
     ...metadata,
@@ -65,56 +61,63 @@ function resolvedRecipeMetadata(recipe: Recipe, modelId: string): Record<string,
   };
 }
 
+const stringValue = (value: RecipeExtraArgument | undefined): string =>
+  Option.getOrElse(decodeString(value), () => "");
+
+const localModelInfo = (
+  recipe: Recipe,
+  active: boolean,
+  maxModelLength: number,
+  created: number,
+): OpenAIModelInfo => {
+  const modelId = recipe.served_model_name ?? recipe.id;
+  return {
+    id: modelId,
+    object: "model",
+    created,
+    owned_by: "local-studio",
+    active,
+    max_model_len: maxModelLength,
+    metadata: resolvedRecipeMetadata(recipe, modelId),
+  };
+};
+
 export const registerModelsRoutes = defineRoutes((app, context) => {
+  const activeMaxModelLength = (): Effect.Effect<number | undefined, unknown> =>
+    fetchInference(context, "/v1/models", { timeoutMs: 5000 }).pipe(
+      Effect.flatMap((response) =>
+        response.ok ? decodeResponse(response, ActiveModelsSchema) : Effect.succeed(null),
+      ),
+      Effect.catch(() => Effect.succeed(null)),
+      Effect.map((data) => data?.data?.[0]?.max_model_len),
+    );
   return mergeRoutes(
     effectRoute(app.get, "/v1/models", (ctx) =>
       Effect.gen(function* () {
         const recipes = yield* context.stores.recipeStore.list();
         const current = yield* findObservedInferenceProcess(context, "models.list");
-        let activeModelData: {
-          readonly data?: readonly { readonly max_model_len?: number | undefined }[] | undefined;
-        } | null = null;
-        if (current) {
-          activeModelData = yield* fetchInference(context, "/v1/models", {
-            timeoutMs: 5000,
-          }).pipe(
-            Effect.flatMap((response) =>
-              response.ok ? decodeResponse(response, ActiveModelsSchema) : Effect.succeed(null),
-            ),
-            Effect.catch(() => Effect.succeed(null)),
-          );
-        }
+        const activeMaxLength = current ? yield* activeMaxModelLength() : undefined;
 
-        const models: OpenAIModelInfo[] = [];
         const now = Math.floor(Date.now() / 1000);
-        // Several recipes can share one model path, and each would match the
-        // single running process — pick the best match once so exactly one
-        // entry is reported active (the rest stay listed, just inactive).
+        // Several recipes can share one model path. Pick one best match so only
+        // one entry is reported active.
         const activeRecipe = current
           ? selectRunningRecipe(recipes, current, { allowEitherPathContains: true })
           : null;
-        for (const recipe of recipes) {
-          const isActive = recipe === activeRecipe;
-          let maxModelLength = recipe.max_model_len;
-          if (isActive && activeModelData?.data?.[0]?.max_model_len) {
-            maxModelLength = activeModelData.data[0].max_model_len;
-          }
-          const modelId = recipe.served_model_name ?? recipe.id;
-          models.push({
-            id: modelId,
-            object: "model",
-            created: now,
-            owned_by: "local-studio",
-            active: isActive,
-            max_model_len: maxModelLength,
-            metadata: resolvedRecipeMetadata(recipe, modelId),
-          });
-        }
+
+        const models = recipes.map((recipe) =>
+          localModelInfo(
+            recipe,
+            recipe === activeRecipe,
+            recipe === activeRecipe && activeMaxLength ? activeMaxLength : recipe.max_model_len,
+            now,
+          ),
+        );
 
         if (models.length === 0 && current) {
           const inferredId =
-            current?.served_model_name ||
-            (current?.model_path ? basename(current.model_path) : "") ||
+            current.served_model_name ||
+            (current.model_path ? basename(current.model_path) : "") ||
             "active-model";
           models.push({
             id: inferredId,
@@ -122,34 +125,34 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
             created: now,
             owned_by: "local-studio",
             active: true,
-            max_model_len: activeModelData?.data?.[0]?.max_model_len ?? 32768,
-            metadata: {
-              vision: resolveModelVision({ identifiers: [inferredId] }),
-            },
+            max_model_len: activeMaxLength ?? 32768,
+            metadata: { vision: resolveModelVision({ identifiers: [inferredId] }) },
           });
         }
 
         const providerCatalogs = yield* listProviderModelsCached(context.config.providers);
-        for (const catalog of providerCatalogs) {
-          for (const model of catalog.models) {
-            const modelId = `${catalog.provider}/${model.id}`;
-            models.push({
-              id: modelId,
-              object: "model",
-              created: now,
-              owned_by: catalog.provider,
-              active: false,
-              max_model_len: null,
-              metadata: {
-                external: true,
-                provider: catalog.provider,
-                vision: resolveModelVision({ identifiers: [model.id, modelId] }),
-              },
-            });
-          }
-        }
+        models.push(
+          ...providerCatalogs.flatMap((catalog) =>
+            catalog.models.map((model): OpenAIModelInfo => {
+              const modelId = `${catalog.provider}/${model.id}`;
+              return {
+                id: modelId,
+                object: "model",
+                created: now,
+                owned_by: catalog.provider,
+                active: false,
+                max_model_len: null,
+                metadata: {
+                  external: true,
+                  provider: catalog.provider,
+                  vision: resolveModelVision({ identifiers: [model.id, modelId] }),
+                },
+              };
+            }),
+          ),
+        );
 
-        const payload: OpenAIModelList = { object: "list", data: models };
+        const payload = { object: "list" as const, data: models };
         return ctx.json(payload);
       }),
     ),
@@ -158,16 +161,9 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
       Effect.gen(function* () {
         const modelId = ctx.req.param("modelId");
         const recipes = yield* context.stores.recipeStore.list();
-        let recipe: Recipe | null = null;
-        for (const entry of recipes) {
-          if (
-            (entry.served_model_name && entry.served_model_name === modelId) ||
-            entry.id === modelId
-          ) {
-            recipe = entry;
-            break;
-          }
-        }
+        const recipe =
+          recipes.find((entry) => entry.served_model_name === modelId || entry.id === modelId) ??
+          null;
         if (!recipe) {
           return yield* Effect.fail(notFound("Model not found"));
         }
@@ -175,34 +171,17 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
         const current = yield* findObservedInferenceProcess(context, "models.detail");
         let isActive = false;
         let maxModelLength = recipe.max_model_len;
-        // Same exclusive selection as the list route: a recipe is active
-        // only when it is THE best match for the running process, so the
-        // detail view can never contradict the list.
         if (
           current &&
           selectRunningRecipe(recipes, current, { allowEitherPathContains: true }) === recipe
         ) {
           isActive = true;
-          const data = yield* fetchInference(context, "/v1/models", { timeoutMs: 5000 }).pipe(
-            Effect.flatMap((response) =>
-              response.ok ? decodeResponse(response, ActiveModelsSchema) : Effect.succeed(null),
-            ),
-            Effect.catch(() => Effect.succeed(null)),
-          );
-          maxModelLength = data?.data?.[0]?.max_model_len ?? recipe.max_model_len;
+          maxModelLength = (yield* activeMaxModelLength()) ?? recipe.max_model_len;
         }
 
-        const payload: OpenAIModelInfo = {
-          id: recipe.served_model_name ?? recipe.id,
-          object: "model",
-          created: Math.floor(Date.now() / 1000),
-          owned_by: "local-studio",
-          active: isActive,
-          max_model_len: maxModelLength,
-          metadata: resolvedRecipeMetadata(recipe, recipe.served_model_name ?? recipe.id),
-        };
-
-        return ctx.json(payload);
+        return ctx.json(
+          localModelInfo(recipe, isActive, maxModelLength, Math.floor(Date.now() / 1000)),
+        );
       }),
     ),
 
@@ -318,35 +297,34 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
         const limit = Math.min(Math.max(Number(ctx.req.query("limit") ?? 50), 1), 100);
         const offset = Math.max(Number(ctx.req.query("offset") ?? 0), 0);
 
-        const sortMapping: Record<string, string> = {
-          createdAt: "createdAt",
-          trending: "trendingScore",
-          downloads: "downloads",
-          likes: "likes",
-          lastModified: "lastModified",
-          modified: "lastModified",
-        };
-        const hfSort = sort ? (sortMapping[sort] ?? "trendingScore") : undefined;
+        const sortMapping = new Map([
+          ["createdAt", "createdAt"],
+          ["trending", "trendingScore"],
+          ["downloads", "downloads"],
+          ["likes", "likes"],
+          ["lastModified", "lastModified"],
+          ["modified", "lastModified"],
+        ]);
+        const hfSort = sort ? (sortMapping.get(sort) ?? "trendingScore") : undefined;
         const requestLimit = Math.min(limit + offset, 500);
         const params = new URLSearchParams({
           limit: String(requestLimit),
           full: "false",
         });
-        if (hfSort) {
-          params.set("sort", hfSort);
-        }
-        if (search) {
-          params.set("search", search);
-        }
-        if (filter) {
-          params.set("filter", filter);
+        const queryEntries: ReadonlyArray<readonly [string, string | undefined]> = [
+          ["sort", hfSort],
+          ["search", search],
+          ["filter", filter],
+        ];
+        for (const [name, value] of queryEntries) {
+          if (value) params.set(name, value);
         }
 
-        const normalize = (model: Record<string, unknown>): Record<string, unknown> => {
-          const modelId = String(model["modelId"] ?? model["id"] ?? "");
+        const normalize = (model: HuggingFaceModel): HuggingFaceModel => {
+          const modelId = stringValue(model["modelId"]) || stringValue(model["id"]);
           return {
             ...model,
-            _id: String(model["_id"] ?? modelId),
+            _id: stringValue(model["_id"]) || modelId,
             modelId,
             downloads: Number(model["downloads"] ?? 0),
             likes: Number(model["likes"] ?? 0),
@@ -385,12 +363,12 @@ export const registerModelsRoutes = defineRoutes((app, context) => {
                 const exact = normalize(
                   yield* decodeResponse(exactResponse, HuggingFaceModelSchema),
                 );
-                const exactId = String(exact["modelId"] ?? "").toLowerCase();
+                const exactId = stringValue(exact["modelId"]).toLowerCase();
                 if (exactId) {
                   results = [
                     exact,
                     ...results.filter(
-                      (entry) => String(entry["modelId"] ?? "").toLowerCase() !== exactId,
+                      (entry) => stringValue(entry["modelId"]).toLowerCase() !== exactId,
                     ),
                   ];
                 }

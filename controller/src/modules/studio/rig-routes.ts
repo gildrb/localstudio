@@ -51,7 +51,8 @@ const positiveOrNull = (
 };
 
 type AcceleratorInput = Schema.Schema.Type<typeof RigNodeCreateSchema>["accelerators"] extends
-  ReadonlyArray<infer A> | undefined
+  | ReadonlyArray<infer A>
+  | undefined
   ? A
   : never;
 

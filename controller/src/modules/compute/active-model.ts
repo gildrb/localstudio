@@ -1,14 +1,12 @@
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import type { Config } from "../../config/env";
-import {
-  isInternalRecipeKey,
-  isJsonStringArgumentKey,
-} from "@local-studio/contracts/engine-args";
+import { isInternalRecipeKey, isJsonStringArgumentKey } from "@local-studio/contracts/engine-args";
 import { getExtraArgument } from "../engines/argument-utilities";
+import type { RecipeExtraArgument } from "@local-studio/contracts/recipes";
 import type { GpuInfo, ProcessInfo, Recipe } from "../models/types";
 import { resolveRecipeGpuUuids } from "../system/gpu-visibility";
 import { getGpuInfo } from "../system/platform/gpu";
-import type { DeviceId, EngineId, InstanceRecord, LaunchFailure } from "./contracts";
+import type { DeviceId, InstanceRecord, LaunchFailure } from "./contracts";
 import {
   getDefaultReasoningParser,
   getDefaultToolCallParser,
@@ -16,13 +14,6 @@ import {
 } from "./recipe-defaults";
 import type { ComputeLaunchInput, ComputeService } from "./lifecycle";
 import type { InstanceStore } from "./instances/store";
-
-/**
- * The one-active-model surface: "what is serving on the inference port", "what is
- * launching", launch, evict, wait-ready — answered from compute instance records.
- * The active model gets a fixed instance name and serves on the inference port, so
- * the proxy, metrics and speech surfaces are unchanged.
- */
 
 export const LLM_INSTANCE = "llm";
 
@@ -43,36 +34,44 @@ export interface ActiveModelDependencies {
   readonly getRecipe: (recipeId: string) => Effect.Effect<Recipe | null, unknown>;
 }
 
-/* ── recipe extra_args -> argv (semantics preserved from the legacy builder) ── */
+const isString = Schema.is(Schema.String);
+const isJsonArray = Schema.is(Schema.Array(Schema.Json));
+const isJsonObject = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 
-const normalizeJsonArgument = (value: unknown): unknown => {
-  if (Array.isArray(value)) return value.map(normalizeJsonArgument);
-  if (value && typeof value === "object") {
+type JsonArgument = Schema.Json;
+
+const normalizeJsonArgument = (value: JsonArgument): RecipeExtraArgument => {
+  if (isJsonArray(value)) return value.map(normalizeJsonArgument);
+  if (isJsonObject(value)) {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      Object.entries(value).map(([key, entry]) => [
         key.replace(/-/g, "_"),
-        normalizeJsonArgument(entry),
+        normalizeJsonArgument(decodeJson(entry)),
       ]),
     );
   }
   return value;
 };
 
-const serializeExtraArgument = (flag: string, key: string, value: unknown): string[] => {
+const serializeExtraArgument = (
+  flag: string,
+  key: string,
+  value: RecipeExtraArgument,
+): string[] => {
   if (value === true) return [flag];
-  if (value === false) return [];
-  if (value === undefined || value === null) return [];
-  if (typeof value === "string" && isJsonStringArgumentKey(key)) {
+  if (value === false || value === null) return [];
+  if (isString(value) && isJsonStringArgumentKey(key)) {
     const trimmed = value.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
-        return [flag, JSON.stringify(normalizeJsonArgument(JSON.parse(trimmed) as unknown))];
+        return [flag, JSON.stringify(normalizeJsonArgument(decodeJson(JSON.parse(trimmed))))];
       } catch {
         return [flag, value];
       }
     }
   }
-  if (Array.isArray(value) || (value && typeof value === "object")) {
+  if (isJsonArray(value) || isJsonObject(value)) {
     return [flag, JSON.stringify(normalizeJsonArgument(value))];
   }
   return [flag, String(value)];
@@ -89,14 +88,15 @@ export const serializeRecipeExtraArguments = (recipe: Recipe): string[] => {
   if (
     recipe.backend === "vllm" &&
     !argv.includes("--enable-expert-parallel") &&
-    shouldEnableExpertParallel(recipe, getExtraArgument(recipe.extra_args, "enable-expert-parallel"))
+    shouldEnableExpertParallel(
+      recipe,
+      getExtraArgument(recipe.extra_args, "enable-expert-parallel"),
+    )
   ) {
     argv.push("--enable-expert-parallel");
   }
   return argv;
 };
-
-/* ── custom launch command (opt-in arbitrary argv, unchanged policy) ───────── */
 
 const splitLaunchCommand = (command: string): string[] => {
   const result: string[] = [];
@@ -140,7 +140,7 @@ const launchCommandOverride = (recipe: Recipe): string[] | null => {
   const override =
     getExtraArgument(recipe.extra_args, "launch_command") ??
     getExtraArgument(recipe.extra_args, "custom_command");
-  if (typeof override !== "string" || !override.trim()) return null;
+  if (!isString(override) || !override.trim()) return null;
   // Arbitrary-binary execution as the controller user; honoured only when the
   // operator opted in, exactly as before.
   if (process.env["LOCAL_STUDIO_ALLOW_CUSTOM_LAUNCH_COMMAND"] !== "true") return null;
@@ -148,7 +148,14 @@ const launchCommandOverride = (recipe: Recipe): string[] | null => {
   return argv.length > 0 ? argv : null;
 };
 
-/* ── recipe -> launch input ────────────────────────────────────────────────── */
+const addLaunchOverrides = (
+  input: ComputeLaunchInput,
+  devices: readonly DeviceId[],
+  commandOverride: readonly string[] | null,
+): ComputeLaunchInput => {
+  const withDevices: ComputeLaunchInput = devices.length > 0 ? { ...input, devices } : input;
+  return commandOverride ? { ...withDevices, commandOverride } : withDevices;
+};
 
 export const recipeToLaunchInput = (
   recipe: Recipe,
@@ -163,37 +170,37 @@ export const recipeToLaunchInput = (
   const runtimeReference = recipe.runtime.kind === "docker" ? recipe.runtime.ref : "";
   const dockerImage =
     runtimeReference.includes("/") || runtimeReference.includes(":") ? runtimeReference : null;
-  return {
-    name: LLM_INSTANCE,
-    engine: recipe.backend as EngineId,
-    recipeId: recipe.id,
-    runtime: "docker",
-    deviceCount: devices.length,
-    ...(devices.length > 0 ? { devices } : {}),
-    portOverride: recipe.port || config.inference_port,
-    modelPath: recipe.model_path,
-    servedModelName: recipe.served_model_name ?? recipe.model_path,
-    options: {
-      tensorParallel: recipe.tensor_parallel_size,
-      pipelineParallel: recipe.pipeline_parallel_size,
-      maxContextLength: recipe.max_model_len,
-      memoryFraction: recipe.gpu_memory_utilization,
-      maxConcurrentRequests: recipe.max_num_seqs,
-      kvCacheDtype: recipe.kv_cache_dtype === "auto" ? null : recipe.kv_cache_dtype,
-      dtype: recipe.dtype ?? null,
-      quantization: recipe.quantization ?? null,
-      trustRemoteCode: recipe.trust_remote_code,
-      toolCallParser,
-      reasoningParser,
+  return addLaunchOverrides(
+    {
+      name: LLM_INSTANCE,
+      engine: recipe.backend,
+      recipeId: recipe.id,
+      runtime: "docker",
+      deviceCount: devices.length,
+      portOverride: recipe.port || config.inference_port,
+      modelPath: recipe.model_path,
+      servedModelName: recipe.served_model_name ?? recipe.model_path,
+      options: {
+        tensorParallel: recipe.tensor_parallel_size,
+        pipelineParallel: recipe.pipeline_parallel_size,
+        maxContextLength: recipe.max_model_len,
+        memoryFraction: recipe.gpu_memory_utilization,
+        maxConcurrentRequests: recipe.max_num_seqs,
+        kvCacheDtype: recipe.kv_cache_dtype === "auto" ? null : recipe.kv_cache_dtype,
+        dtype: recipe.dtype ?? null,
+        quantization: recipe.quantization ?? null,
+        trustRemoteCode: recipe.trust_remote_code,
+        toolCallParser,
+        reasoningParser,
+      },
+      extraArgs: serializeRecipeExtraArguments(recipe),
+      env: recipe.env_vars ?? {},
+      dockerImage,
     },
-    extraArgs: serializeRecipeExtraArguments(recipe),
-    env: recipe.env_vars ?? {},
-    dockerImage,
-    ...(override ? { commandOverride: override } : {}),
-  };
+    devices,
+    override,
+  );
 };
-
-/* ── the surface ───────────────────────────────────────────────────────────── */
 
 const RUNNING_STATES = new Set(["starting", "ready", "unhealthy"]);
 
@@ -235,7 +242,7 @@ export const createActiveModel = (deps: ActiveModelDependencies): ActiveModel =>
 
   const launchRecipe = (recipe: Recipe): Effect.Effect<InstanceRecord, LaunchFailure> =>
     Effect.gen(function* () {
-      const gpus = yield* getGpuInfo().pipe(Effect.catch(() => Effect.succeed([] as GpuInfo[])));
+      const gpus = yield* getGpuInfo().pipe(Effect.catch(() => Effect.succeed<GpuInfo[]>([])));
       const resolution = resolveRecipeGpuUuids(recipe, gpus);
       if (resolution.unresolvedTokens.length > 0) {
         return yield* Effect.fail<LaunchFailure>({
@@ -243,9 +250,7 @@ export const createActiveModel = (deps: ActiveModelDependencies): ActiveModel =>
           detail: `GPU selectors could not be resolved: ${resolution.unresolvedTokens.join(", ")}`,
         });
       }
-      return yield* deps.compute.launch(
-        recipeToLaunchInput(recipe, deps.config, resolution.uuids),
-      );
+      return yield* deps.compute.launch(recipeToLaunchInput(recipe, deps.config, resolution.uuids));
     });
 
   const waitForHealthy = (timeoutMs: number): Effect.Effect<boolean> =>

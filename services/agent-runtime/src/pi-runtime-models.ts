@@ -1,11 +1,12 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { getApiSettings, type ApiSettings } from "./settings-service";
 import { resolveDataDir } from "./data-dir";
 import { listProviderAgentModels, refreshProviderHub } from "./provider-hub";
 import type { OpenAICompletionsCompat } from "@earendil-works/pi-ai";
+import { Schema } from "effect";
+import { JsonSchema as JsonValueSchema, type JsonObject } from "./json";
 import {
   normalizeOpenAIModels,
   inferReasoningSupport,
@@ -25,29 +26,58 @@ function userPiModelsPath(): string {
   );
 }
 
-type PiProviderModel = {
-  id: string;
-  name?: string;
-  active?: boolean;
-  reasoning?: boolean;
-  input?: string[];
-  contextWindow?: number;
-  maxTokens?: number;
-  cost?: Record<string, number>;
-  compat?: Record<string, unknown>;
-  thinkingLevelMap?: Partial<Record<AgentThinkingLevel, string | null>>;
-};
+const thinkingLevelValue = Schema.NullOr(Schema.String);
+const ThinkingLevelMapSchema = Schema.Struct({
+  off: Schema.optional(thinkingLevelValue),
+  minimal: Schema.optional(thinkingLevelValue),
+  low: Schema.optional(thinkingLevelValue),
+  medium: Schema.optional(thinkingLevelValue),
+  high: Schema.optional(thinkingLevelValue),
+  xhigh: Schema.optional(thinkingLevelValue),
+  max: Schema.optional(thinkingLevelValue),
+});
 
-type PiProviderConfig = {
-  baseUrl: string;
-  apiKey?: string;
-  api?: string;
-  authHeader?: boolean;
-  models?: PiProviderModel[];
-  compat?: Record<string, unknown>;
-};
+const PiProviderModelSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.optional(Schema.String),
+  active: Schema.optional(Schema.Boolean),
+  reasoning: Schema.optional(Schema.Boolean),
+  input: Schema.optional(Schema.Array(Schema.String)),
+  contextWindow: Schema.optional(Schema.Number),
+  maxTokens: Schema.optional(Schema.Number),
+  cost: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
+  compat: Schema.optional(Schema.Record(Schema.String, JsonValueSchema)),
+  thinkingLevelMap: Schema.optional(ThinkingLevelMapSchema),
+});
 
-type UserPiProviders = Record<string, PiProviderConfig>;
+type PiProviderModel = typeof PiProviderModelSchema.Type;
+
+const PiProviderConfigSchema = Schema.Struct({
+  baseUrl: Schema.String,
+  apiKey: Schema.optional(Schema.String),
+  api: Schema.optional(Schema.String),
+  authHeader: Schema.optional(Schema.Boolean),
+  models: Schema.optional(Schema.Array(PiProviderModelSchema)),
+  compat: Schema.optional(Schema.Record(Schema.String, JsonValueSchema)),
+});
+
+type PiProviderConfig = typeof PiProviderConfigSchema.Type;
+type UserPiProviders = { [name: string]: PiProviderConfig };
+
+const UserPiProvidersSchema = Schema.Record(Schema.String, PiProviderConfigSchema);
+
+const PersistedControllersSchema = Schema.Array(
+  Schema.Struct({
+    url: Schema.String,
+    apiKey: Schema.optional(Schema.String),
+    name: Schema.optional(Schema.String),
+  }),
+);
+
+const OpenAIModelsResponseSchema = Schema.Struct({
+  object: Schema.optional(Schema.String),
+  data: Schema.optional(Schema.Array(Schema.Record(Schema.String, JsonValueSchema))),
+});
 
 function baseProviderName(name: string): string {
   let base = name;
@@ -56,15 +86,13 @@ function baseProviderName(name: string): string {
 }
 
 async function loadUserPiProviders(): Promise<UserPiProviders> {
-  const modelsPath = userPiModelsPath();
-  if (!existsSync(modelsPath)) return {};
   try {
-    const parsed = JSON.parse(await readFile(modelsPath, "utf-8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const providers = (parsed as { providers?: unknown }).providers;
-    if (!providers || typeof providers !== "object" || Array.isArray(providers)) return {};
+    const modelsPath = userPiModelsPath();
+    const parsed = Schema.decodeUnknownSync(
+      Schema.Struct({ providers: Schema.optional(UserPiProvidersSchema) }),
+    )(JSON.parse(await readFile(modelsPath, "utf-8")));
     const collapsed: UserPiProviders = {};
-    for (const [name, config] of Object.entries(providers as UserPiProviders)) {
+    for (const [name, config] of Object.entries(parsed.providers ?? {})) {
       const base = baseProviderName(name);
       if (!base || base === PROVIDER_ID || base.startsWith(`${PROVIDER_ID}-`)) continue;
       collapsed[base] = config;
@@ -79,12 +107,13 @@ function userPiModelToAgentModel(
   providerName: string,
   qualifiedProviderId: string,
   model: PiProviderModel,
-  providerCompat?: Record<string, unknown>,
+  providerCompat?: JsonObject,
 ): AgentModel {
   const rawId = model.id;
   const name = model.name ?? rawId;
   const inputs = model.input ?? ["text"];
   const reasoning = model.reasoning ?? inferReasoningSupport(rawId);
+  const contextWindow = model.contextWindow ?? 128_000;
   return {
     id: `${qualifiedProviderId}/${rawId}`,
     rawId,
@@ -92,8 +121,8 @@ function userPiModelToAgentModel(
     provider: "local-studio",
     providerId: qualifiedProviderId,
     controllerName: providerName,
-    contextWindow: model.contextWindow ?? 128_000,
-    maxTokens: model.maxTokens ?? 65_536,
+    contextWindow,
+    maxTokens: model.maxTokens ?? Math.min(contextWindow, 65_536),
     reasoning,
     thinkingLevels: supportedPiThinkingLevels(model, reasoning, providerCompat),
     vision: resolveModelVision({ identifiers: [rawId], modalities: [inputs] }),
@@ -104,7 +133,7 @@ function userPiModelToAgentModel(
 function supportedPiThinkingLevels(
   model: PiProviderModel,
   reasoning: boolean,
-  providerCompat?: Record<string, unknown>,
+  providerCompat?: JsonObject,
 ): AgentThinkingLevel[] {
   if (!reasoning) return ["off"];
   const supportsReasoningEffort =
@@ -209,11 +238,9 @@ function normalizeControllerInput(input: PiControllerModelsRequest): PiControlle
   if (!url) return null;
   const apiKey = input.apiKey?.trim() ?? "";
   const name = input.name?.trim();
-  return {
-    url,
-    apiKey,
-    ...(name ? { name } : {}),
-  };
+  const controller: PiControllerConfig = { url, apiKey };
+  if (name) controller.name = name;
+  return controller;
 }
 
 function mergeControllers(
@@ -229,11 +256,6 @@ function mergeControllers(
     .map(normalizeControllerInput)
     .filter((controller): controller is PiControllerConfig => controller !== null);
   if (requestedControllers.length > 0) {
-    // A request that names the primary without its key means "that one", not
-    // "that one, unauthenticated" — backfill the saved credential (compared
-    // by URL identity, so localhost and 127.0.0.1 are the same controller)
-    // so a keyless mention can't silently disconnect a controller that needs
-    // auth.
     const merged = requestedControllers.map((controller) =>
       !controller.apiKey &&
       primary?.apiKey &&
@@ -247,27 +269,13 @@ function mergeControllers(
 }
 
 async function loadPersistedControllers(agentDir: string): Promise<PiControllerModelsRequest[]> {
-  const file = controllersPath(agentDir);
-  if (!existsSync(file)) return [];
   try {
-    const parsed = JSON.parse(await readFile(file, "utf-8")) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((entry): entry is PiControllerModelsRequest =>
-        Boolean(entry && typeof entry === "object" && !Array.isArray(entry)),
-      )
-      .flatMap((entry) => {
-        const record = entry as Record<string, unknown>;
-        return typeof record.url === "string"
-          ? [
-              {
-                url: record.url,
-                ...(typeof record.apiKey === "string" ? { apiKey: record.apiKey } : {}),
-                ...(typeof record.name === "string" ? { name: record.name } : {}),
-              },
-            ]
-          : [];
-      });
+    const file = controllersPath(agentDir);
+    return [
+      ...Schema.decodeUnknownSync(PersistedControllersSchema)(
+        JSON.parse(await readFile(file, "utf-8")),
+      ),
+    ];
   } catch {
     return [];
   }
@@ -287,22 +295,10 @@ async function savePersistedControllers(
   await chmod(controllersPath(agentDir), 0o600).catch(() => undefined);
 }
 
-/** How long a single controller gets to answer /v1/models before it is
- *  treated as down. A healthy tailnet peer answers in well under 150ms
- *  (measured 21-82ms), so 2.5s is already generous headroom for a slow LAN or
- *  a controller busy loading a model. */
 const CONTROLLER_MODELS_TIMEOUT_MS = 2_500;
 
-/** How long a controller that timed out or refused a connection is skipped
- *  before it is probed again. Within this window it is served as an empty
- *  model list immediately, so one dead saved controller cannot make every
- *  /api/agent/models call pay the full connect timeout (measured: a 4s flat
- *  median on the desktop app while a saved peer was off). */
 const CONTROLLER_UNREACHABLE_BACKOFF_MS = 60_000;
 
-/** In-memory negative cache of unreachable controllers, keyed by normalized
- *  controller URL identity. A successful fetch (or any HTTP response at all —
- *  even an error status proves the host is reachable) clears the entry. */
 const unreachableControllers = new Map<string, { failedAt: number }>();
 
 function isControllerBackedOff(identity: string): boolean {
@@ -323,9 +319,6 @@ async function fetchModelsFromController(
   const backendUrl = normalizeBackendUrl(controller.url);
   const identity = controllerUrlIdentity(backendUrl);
   if (isControllerBackedOff(identity)) {
-    // Recently unreachable: answer instantly with no models rather than
-    // paying the connect timeout again. The entry expires after the backoff
-    // window, so a controller that comes back is picked up within a minute.
     return {
       controller: { ...controller, url: backendUrl },
       models: [],
@@ -339,16 +332,9 @@ async function fetchModelsFromController(
     response = await fetch(`${backendUrl}/v1/models`, {
       headers,
       cache: "no-store",
-      // Every saved controller is listed before the composer can show a single
-      // model, and Promise.allSettled below waits for all of them. Without a
-      // deadline one unreachable host holds the whole model picker hostage for
-      // however long its network stack takes to give up — measured at 10.5s for
-      // a tailnet peer that is simply off. A controller slower than the
-      // deadline is reported as failed and the rest of the list still loads.
       signal: AbortSignal.timeout(CONTROLLER_MODELS_TIMEOUT_MS),
     });
   } catch (error) {
-    // Timed out or refused: remember it so the next calls skip this host.
     unreachableControllers.set(identity, { failedAt: Date.now() });
     throw error;
   }
@@ -356,22 +342,24 @@ async function fetchModelsFromController(
   if (!response.ok) {
     throw new Error(`${backendUrl}/v1/models failed with HTTP ${response.status}`);
   }
-  const payload = (await response.json()) as unknown;
+  const payload = Schema.decodeUnknownSync(OpenAIModelsResponseSchema)(await response.json());
+  const data = payload.data?.flatMap((row) => {
+    const id = row["id"];
+    return Schema.is(Schema.String)(id) ? [{ ...row, id }] : [];
+  });
   const providerId = providerIdForController(controller, index);
   const label = controllerLabel(controller, index);
-  const models = normalizeOpenAIModels(payload && typeof payload === "object" ? payload : {}).map(
-    (model) => ({
-      ...model,
-      reasoning: model.reasoning,
-      id: qualifyModelId(providerId, model.id),
-      rawId: model.id,
-      providerId,
-      controllerUrl: backendUrl,
-      controllerName: label,
-      thinkingLevels: controllerModelThinkingLevels(model.reasoning, model.rawId ?? model.id),
-      name: multipleControllers ? `${model.name} · ${label}` : model.name,
-    }),
-  );
+  const models = normalizeOpenAIModels({ object: payload.object, data }).map((model) => ({
+    ...model,
+    reasoning: model.reasoning,
+    id: qualifyModelId(providerId, model.id),
+    rawId: model.id,
+    providerId,
+    controllerUrl: backendUrl,
+    controllerName: label,
+    thinkingLevels: controllerModelThinkingLevels(model.reasoning, model.rawId ?? model.id),
+    name: multipleControllers ? `${model.name} · ${label}` : model.name,
+  }));
   return { controller: { ...controller, url: backendUrl }, models, providerId };
 }
 
@@ -435,14 +423,15 @@ async function writePiModelsConfig(
     ]),
   );
 
-  const providers: Record<string, unknown> = { ...vllmProviders };
+  const providers: UserPiProviders = {};
+  Object.assign(providers, vllmProviders);
   for (const [name, config] of Object.entries(userPiProviders)) {
     providers[`${USER_PI_PREFIX}${name}`] = {
       baseUrl: config.baseUrl,
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.api ? { api: config.api } : {}),
-      ...(config.authHeader !== undefined ? { authHeader: config.authHeader } : {}),
-      ...(config.compat ? { compat: config.compat } : {}),
+      apiKey: config.apiKey,
+      api: config.api,
+      authHeader: config.authHeader,
+      compat: config.compat,
       models: config.models ?? [],
     };
   }
@@ -453,7 +442,9 @@ async function writePiModelsConfig(
   return agentDir;
 }
 
-export function resolvePiModelSelection(modelId: string): { providerId: string; modelId: string } {
+export type PiModelSelection = { providerId: string; modelId: string };
+
+export function resolvePiModelSelection(modelId: string): PiModelSelection {
   const separator = modelId.indexOf("/");
   if (separator > 0) {
     const maybeProvider = modelId.slice(0, separator);
@@ -480,11 +471,11 @@ export async function refreshPiModels(
   await savePersistedControllers(agentDir, persisted);
   let models: AgentModel[] = [];
   let controllerModels: ControllerModels[] = [];
-  let controllerError: unknown = null;
+  let controllerError: Error | null = null;
   try {
     ({ models, controllerModels } = await fetchModelsFromControllers(controllers));
   } catch (error) {
-    controllerError = error;
+    controllerError = error instanceof Error ? error : new Error("No controllers returned models.");
   }
 
   const userPiProviders = await loadUserPiProviders();
@@ -495,28 +486,18 @@ export async function refreshPiModels(
     );
   });
   const writtenAgentDir = await writePiModelsConfig(controllerModels, userPiProviders);
-  const providerModels = await collectProviderAgentModels();
+  await refreshProviderHub().catch(() => undefined);
+  const providerModels = await listProviderAgentModels();
 
   const allModels = [...models, ...userPiModels, ...providerModels];
   if (allModels.length === 0 && controllerError) {
-    throw controllerError instanceof Error
-      ? controllerError
-      : new Error("No controllers returned models.");
+    throw controllerError;
   }
   return { models: allModels, agentDir: writtenAgentDir };
 }
-async function collectProviderAgentModels(): Promise<AgentModel[]> {
-  await refreshProviderHub().catch(() => undefined);
-  return listProviderAgentModels();
-}
-
 function isDeepSeekReasoningModel(model: AgentModel): boolean {
   const id = `${model.id} ${model.rawId ?? ""} ${model.name}`.toLowerCase();
   return model.reasoning && id.includes("deepseek");
-}
-
-function isControllerBackedModel(model: AgentModel): boolean {
-  return typeof model.controllerUrl === "string" && model.controllerUrl.length > 0;
 }
 
 function isInklingReasoningModel(model: AgentModel): boolean {
@@ -545,8 +526,15 @@ const CONTROLLER_THINKING_LEVEL_MAP = {
 
 export function modelsToPiModels(models: AgentModel[]) {
   return models.map((model) => {
-    const deepSeekReasoning = isDeepSeekReasoningModel(model) && !isControllerBackedModel(model);
+    const deepSeekReasoning = isDeepSeekReasoningModel(model) && !model.controllerUrl;
     const inklingReasoning = isInklingReasoningModel(model);
+    const compat: OpenAICompletionsCompat = deepSeekReasoning
+      ? {
+          ...VLLM_OPENAI_COMPAT,
+          thinkingFormat: "deepseek",
+          requiresReasoningContentOnAssistantMessages: true,
+        }
+      : VLLM_OPENAI_COMPAT;
     return {
       id: model.rawId ?? model.id,
       name: model.name,
@@ -583,15 +571,7 @@ export function modelsToPiModels(models: AgentModel[]) {
                 },
               }
             : {}),
-      compat: {
-        ...VLLM_OPENAI_COMPAT,
-        ...(deepSeekReasoning
-          ? {
-              thinkingFormat: "deepseek",
-              requiresReasoningContentOnAssistantMessages: true,
-            }
-          : {}),
-      },
+      compat,
     };
   });
 }

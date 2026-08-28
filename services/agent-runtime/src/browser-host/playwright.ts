@@ -8,18 +8,6 @@ import {
 import { startPinningProxy, type PinningProxy } from "./pinning-proxy";
 
 const LAUNCH_TIMEOUT_MS = 15_000;
-
-// One Chromium process, one BrowserContext per agent session. Contexts are
-// ephemeral (no user-data directory), which is what the browser tool has
-// always promised — "a throwaway profile: no saved logins, no cookies" — and
-// what keeps one session's cookies and storage out of another's.
-//
-// All traffic is forced through the pinning proxy (pinning-proxy.ts): the
-// bypass "<-loopback>" removes Chromium's implicit localhost bypass so even
-// loopback goes through policy, --disable-quic keeps HTTP/3 from skipping the
-// proxy, and the WebRTC policy flag stops pages opening raw UDP paths around
-// it. Service workers are blocked because they can outlive a page and issue
-// fetches with less oversight; nothing in the tool surface needs them.
 class PlaywrightManager {
   private browser: Browser | null = null;
   private launching: Promise<Browser> | null = null;
@@ -27,27 +15,20 @@ class PlaywrightManager {
   private contexts = new Map<string, BrowserContext>();
   private creating = new Map<string, Promise<BrowserContext>>();
   private active: ResolvedBrowserEngine | null = null;
-  // Bumped by stop(); a launch that completes under a stale generation closes
-  // its browser instead of adopting it, so an engine swap or shutdown during
-  // launch cannot leak a live Chromium the manager no longer tracks.
   private generation = 0;
 
   isAvailable(): boolean {
     return tryResolveBrowserEngine() !== null;
   }
 
-  /** The engine backing the live browser, or the one the next launch will use. */
   activeEngine(): ResolvedBrowserEngine | null {
     return this.active ?? tryResolveBrowserEngine();
   }
 
-  /** The isolated BrowserContext for one session scope, launching on demand. */
   context(scope: string): Promise<BrowserContext> {
     const existing = this.contexts.get(scope);
     if (existing && existing.browser()?.isConnected()) return Promise.resolve(existing);
     if (existing) this.contexts.delete(scope);
-    // Concurrent verbs on one scope must share the same context, not race two
-    // into existence and leak the loser.
     const pending = this.creating.get(scope);
     if (pending) return pending;
     const creation = this.createContext(scope).finally(() => {
@@ -72,7 +53,6 @@ class PlaywrightManager {
     return context;
   }
 
-  /** Close one scope's context (cookies, storage, and pages go with it). */
   async releaseContext(scope: string): Promise<void> {
     const context = this.contexts.get(scope);
     this.contexts.delete(scope);
@@ -84,8 +64,6 @@ class PlaywrightManager {
     if (this.launching) return this.launching;
     const generation = this.generation;
     this.launching = (async () => {
-      // Throws a message naming the exact problem (missing override path, no
-      // browser installed); browser-handlers surfaces it verbatim.
       const engine = resolveBrowserEngine();
       const proxy = this.proxy ?? (await startPinningProxy("pane"));
       if (generation !== this.generation) {
@@ -148,8 +126,6 @@ export const playwrightManager = getGlobalSingleton(
 );
 
 getGlobalSingleton("playwrightExitHook", () => {
-  if (typeof process !== "undefined") {
-    process.on("exit", () => playwrightManager.stop());
-  }
+  process.on("exit", () => playwrightManager.stop());
   return true;
 });

@@ -94,9 +94,7 @@ export class ControllerRequestStore {
 
   private prune(db: Database = this.db): void {
     for (const table of ["controller_requests", "controller_function_calls"]) {
-      db.run(
-        `DELETE FROM ${table} WHERE created_at < datetime('now', '-${RETENTION_DAYS} days')`,
-      );
+      db.run(`DELETE FROM ${table} WHERE created_at < datetime('now', '-${RETENTION_DAYS} days')`);
     }
   }
 
@@ -107,55 +105,49 @@ export class ControllerRequestStore {
     this.prune();
   }
 
-  public record(record: ControllerRequestRecord): void {
-    const durationMs = Math.max(0, Math.round(record.duration_ms));
-    this.db
-      .query(
-        `INSERT INTO controller_requests (
+  public recordEffect(record: ControllerRequestRecord): Effect.Effect<void, RepositoryError> {
+    return repositoryEffect("controller-requests.record", () => {
+      const durationMs = Math.max(0, Math.round(record.duration_ms));
+      this.db
+        .query(
+          `INSERT INTO controller_requests (
            method, path, status, duration_ms, success, error_class, error_message, user_agent
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.method.toUpperCase(),
-        record.path,
-        Math.round(record.status),
-        durationMs,
-        record.success ? 1 : 0,
-        record.error_class ?? null,
-        record.error_message ?? null,
-        record.user_agent ?? null,
-      );
-    this.maybePrune();
-  }
-
-  public recordEffect(record: ControllerRequestRecord): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("controller-requests.record", () => this.record(record));
-  }
-
-  public recordFunctionCall(record: ControllerFunctionCallRecord): void {
-    const durationMs = Math.max(0, Math.round(record.duration_ms));
-    this.db
-      .query(
-        `INSERT INTO controller_function_calls (
-           function_name, duration_ms, success, error_class, error_message
-         ) VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.function_name,
-        durationMs,
-        record.success ? 1 : 0,
-        record.error_class ?? null,
-        record.error_message ?? null,
-      );
-    this.maybePrune();
+        )
+        .run(
+          record.method.toUpperCase(),
+          record.path,
+          Math.round(record.status),
+          durationMs,
+          record.success ? 1 : 0,
+          record.error_class ?? null,
+          record.error_message ?? null,
+          record.user_agent ?? null,
+        );
+      this.maybePrune();
+    });
   }
 
   public recordFunctionCallEffect(
     record: ControllerFunctionCallRecord,
   ): Effect.Effect<void, RepositoryError> {
-    return repositoryEffect("controller-function-calls.record", () =>
-      this.recordFunctionCall(record),
-    );
+    return repositoryEffect("controller-function-calls.record", () => {
+      const durationMs = Math.max(0, Math.round(record.duration_ms));
+      this.db
+        .query(
+          `INSERT INTO controller_function_calls (
+           function_name, duration_ms, success, error_class, error_message
+         ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          record.function_name,
+          durationMs,
+          record.success ? 1 : 0,
+          record.error_class ?? null,
+          record.error_message ?? null,
+        );
+      this.maybePrune();
+    });
   }
 
   public aggregate(): ControllerUsageStats {
@@ -169,7 +161,7 @@ export class ControllerRequestStore {
            MAX(duration_ms) as max_duration_ms
          FROM controller_requests`,
       )
-      .get() as NumberRow | null;
+      .get();
 
     const byPath = this.db
       .query<NumberRow, []>(
@@ -186,7 +178,7 @@ export class ControllerRequestStore {
          ORDER BY requests DESC, path ASC
          LIMIT 50`,
       )
-      .all() as NumberRow[];
+      .all();
 
     const byStatus = this.db
       .query<NumberRow, []>(
@@ -197,7 +189,7 @@ export class ControllerRequestStore {
          GROUP BY status
          ORDER BY requests DESC, status ASC`,
       )
-      .all() as NumberRow[];
+      .all();
 
     const errors = this.db
       .query<NumberRow, []>(
@@ -213,7 +205,7 @@ export class ControllerRequestStore {
          ORDER BY created_at DESC
          LIMIT 25`,
       )
-      .all() as NumberRow[];
+      .all();
 
     const recent = this.db
       .query<NumberRow, []>(
@@ -223,7 +215,7 @@ export class ControllerRequestStore {
            SUM(CASE WHEN datetime(created_at) >= datetime('now', '-24 hours') AND success = 0 THEN 1 ELSE 0 END) as last_24h_failed
          FROM controller_requests`,
       )
-      .get() as NumberRow | null;
+      .get();
 
     const functionTotals = this.db
       .query<NumberRow, []>(
@@ -235,7 +227,7 @@ export class ControllerRequestStore {
            MAX(duration_ms) as max_duration_ms
          FROM controller_function_calls`,
       )
-      .get() as NumberRow | null;
+      .get();
 
     const byFunction = this.db
       .query<NumberRow, []>(
@@ -251,7 +243,7 @@ export class ControllerRequestStore {
          ORDER BY calls DESC, function_name ASC
          LIMIT 50`,
       )
-      .all() as NumberRow[];
+      .all();
 
     const functionErrors = this.db
       .query<NumberRow, []>(
@@ -265,7 +257,7 @@ export class ControllerRequestStore {
          ORDER BY created_at DESC
          LIMIT 25`,
       )
-      .all() as NumberRow[];
+      .all();
 
     return normalizeControllerUsage({
       totals: {
@@ -305,7 +297,7 @@ export class ControllerRequestStore {
         })),
         recent_errors: functionErrors,
       },
-    }) as ControllerUsageStats;
+    });
   }
 
   public aggregateEffect(): Effect.Effect<ControllerUsageStats, RepositoryError> {

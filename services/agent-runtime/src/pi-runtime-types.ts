@@ -1,14 +1,10 @@
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSessionEvent, CompactionResult } from "@earendil-works/pi-coding-agent";
+import type { UnknownRecord } from "../../../shared/agent/guards";
 import type { AgentImageInput } from "../../../shared/agent/agent-image-input";
 import type { AgentQueueAction } from "../../../shared/agent/agent-turn";
 import type { RuntimeStartOptions } from "./pi-runtime-helpers";
 
-// Pi event surface seen by the rest of the app. Upstream consumers
-// (`sessions/engine.ts`, `pane-controller.ts`, etc.) duck-type on string event
-// names, so we keep the loose index signature for back-compat while widening
-// the type to include the SDK's typed union so newer call sites get
-// autocompletion and discriminated narrowing where they ask for it.
-type PiEvent = (Record<string, unknown> & { type?: string }) | AgentSessionEvent;
+type PiEvent = (UnknownRecord & { type?: string }) | AgentSessionEvent;
 
 export type { AgentSessionEvent };
 
@@ -27,8 +23,6 @@ export type PiPromptOptions = {
   restartOnContinuationError?: boolean;
 };
 
-// Re-exported from the canonical Effect-schema-derived type in runtime-schema.ts
-// so all context-usage shapes resolve to one source of truth.
 export type { RuntimeContextUsage as PiContextUsage } from "../../../shared/agent/context-usage";
 
 export type PiAgentStatus = {
@@ -63,10 +57,8 @@ export interface PiAgentSession {
     images?: AgentImageInput[],
   ): Promise<void>;
   followUp(message: string, images?: AgentImageInput[]): Promise<void>;
-  /** Resolves with the messages that were still queued, so the caller can
-   *  restore them rather than losing them to the stop. */
   abort(): Promise<{ steering: string[]; followUp: string[] }>;
-  compact(customInstructions?: string): Promise<unknown>;
+  compact(customInstructions?: string): Promise<CompactionResult>;
   stop(): Promise<void>;
   readonly status: PiAgentStatus;
   getEventsAfter(seq: number): LoggedPiEvent[];

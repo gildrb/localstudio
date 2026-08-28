@@ -20,8 +20,8 @@ import {
   getPersistedConfigPath,
   loadPersistedConfig,
   savePersistedConfig,
-  type PersistedConfig,
 } from "../../config/persisted-config";
+import { toPublicSystemConfig } from "../../config/public-config";
 
 const SettingsUpdateSchema = Schema.Struct({
   models_dir: Schema.optional(Schema.NullOr(Schema.String)),
@@ -30,6 +30,8 @@ const SettingsUpdateSchema = Schema.Struct({
 
 const ModelDeleteSchema = Schema.Struct({ path: Schema.String });
 const ModelMoveSchema = Schema.Struct({ source_path: Schema.String, target_root: Schema.String });
+const ErrorCodeSchema = Schema.Struct({ code: Schema.String });
+const decodeErrorCode = Schema.decodeUnknownOption(ErrorCodeSchema);
 
 class StudioOperationError extends Schema.TaggedErrorClass<StudioOperationError>()(
   "StudioOperationError",
@@ -104,16 +106,10 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
           source,
         }),
     });
-    const legacyUiPreferences = (
-      persisted as PersistedConfig & { ui_preferences?: Record<string, string> }
-    ).ui_preferences;
+    const legacyUiPreferences = persisted.ui_preferences;
     const dbUiPreferences = yield* context.stores.controllerSettingsStore.getUiPreferencesEffect();
     const uiPreferences =
-      Object.keys(dbUiPreferences).length > 0
-        ? dbUiPreferences
-        : legacyUiPreferences && typeof legacyUiPreferences === "object"
-          ? legacyUiPreferences
-          : {};
+      Object.keys(dbUiPreferences).length > 0 ? dbUiPreferences : (legacyUiPreferences ?? {});
     if (Object.keys(dbUiPreferences).length === 0 && Object.keys(uiPreferences).length > 0) {
       yield* context.stores.controllerSettingsStore.saveUiPreferencesEffect(uiPreferences);
     }
@@ -165,12 +161,10 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
         const cpuList = cpus();
         const [gpus, runtime, disks] = yield* Effect.all([
           getGpuInfo(),
-          context.compute
-            .host()
-            .pipe(
-              Effect.flatMap((host) => getDefaultRuntimeTarget(host, "vllm")),
-              Effect.map(runtimeTargetToBackendInfo),
-            ),
+          context.compute.host().pipe(
+            Effect.flatMap((host) => getDefaultRuntimeTarget(host, "vllm")),
+            Effect.map(runtimeTargetToBackendInfo),
+          ),
           Effect.all([diskInfo(context.config.data_dir), diskInfo(context.config.models_dir)]),
         ]);
         return ctx.json({
@@ -191,15 +185,7 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
             vllm_bin: null,
           },
           disks,
-          config: {
-            host: context.config.host,
-            port: context.config.port,
-            inference_port: context.config.inference_port,
-            api_key_configured: Boolean(context.config.api_key),
-            models_dir: context.config.models_dir,
-            data_dir: context.config.data_dir,
-            db_path: context.config.db_path,
-          },
+          config: toPublicSystemConfig(context.config),
         });
       }),
     ),
@@ -297,8 +283,9 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
             try: () => rename(source, target),
             catch: (sourceError) => sourceError,
           }).pipe(
-            Effect.catch((sourceError) =>
-              (sourceError as NodeJS.ErrnoException).code === "EXDEV"
+            Effect.catch((sourceError) => {
+              const decodedError = decodeErrorCode(sourceError);
+              return decodedError._tag === "Some" && decodedError.value.code === "EXDEV"
                 ? Effect.tryPromise({
                     try: () =>
                       cp(source, target, { recursive: true, force: false, errorOnExist: true }),
@@ -311,8 +298,8 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
                       }),
                     ),
                   )
-                : Effect.fail(sourceError),
-            ),
+                : Effect.fail(sourceError);
+            }),
             Effect.mapError(
               (sourceError) =>
                 new StudioOperationError({

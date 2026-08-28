@@ -87,33 +87,18 @@ function migrationMarkerName(sourceRoot: string): string {
   return `${MIGRATION_MARKER_PREFIX}-${sourceKey || "source"}.json`;
 }
 
-function copyMissingPath(sourcePath: string, targetPath: string): boolean {
-  if (existsSync(targetPath)) {
-    const sourceStat = statSync(sourcePath);
-    const targetStat = statSync(targetPath);
-    if (!sourceStat.isDirectory() || !targetStat.isDirectory()) return false;
-
-    let copied = false;
-    for (const entry of readdirSync(sourcePath)) {
-      copied =
-        copyMissingPath(path.join(sourcePath, entry), path.join(targetPath, entry)) || copied;
-    }
-    return copied;
-  }
-
-  const stat = statSync(sourcePath);
-  if (!stat.isDirectory()) {
-    mkdirSync(path.dirname(targetPath), { recursive: true });
-    cpSync(sourcePath, targetPath, { force: false });
+function copyMissingPath(source: string, target: string): boolean {
+  if (!existsSync(target)) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    cpSync(source, target, { recursive: statSync(source).isDirectory(), force: false });
     return true;
   }
-
-  mkdirSync(targetPath, { recursive: true });
-  let copied = true;
-  for (const entry of readdirSync(sourcePath)) {
-    copied = copyMissingPath(path.join(sourcePath, entry), path.join(targetPath, entry)) || copied;
-  }
-  return copied;
+  if (!statSync(source).isDirectory() || !statSync(target).isDirectory()) return false;
+  return readdirSync(source).reduce(
+    (copied, entry) =>
+      copyMissingPath(path.join(source, entry), path.join(target, entry)) || copied,
+    false,
+  );
 }
 
 function writeMigrationMarker(

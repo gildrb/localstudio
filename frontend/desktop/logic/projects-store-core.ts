@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { Option, Schema } from "effect";
 import { writeJsonAtomic } from "../helpers/fs-json";
 
 export interface ProjectRecord {
@@ -20,12 +21,19 @@ interface ProjectsDocument {
   readonly projects: ProjectRecord[];
 }
 
+const ProjectRecordSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  path: Schema.String,
+  addedAt: Schema.String,
+});
+const ProjectsFileSchema = Schema.Struct({ projects: Schema.Array(Schema.Unknown) });
+const decodeProjectsFile = Schema.decodeUnknownSync(Schema.fromJsonString(ProjectsFileSchema));
+const decodeProjectRecord = Schema.decodeUnknownOption(ProjectRecordSchema);
+
 export interface ProjectsStoreOptions {
-  /** Resolved on every operation so env/Electron path changes keep applying. */
   projectsFilePath: () => string;
-  /** Id of the synthetic "Chats" project pinned to the top of the list. */
   chatsProjectId: string;
-  /** Error message thrown when addProject receives a blank path. */
   emptyPathMessage: string;
 }
 
@@ -38,23 +46,11 @@ export interface ProjectsStore {
 function readDocument(filePath: string): ProjectsDocument {
   try {
     if (!existsSync(filePath)) return { projects: [] };
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      !Array.isArray((parsed as { projects?: unknown }).projects)
-    ) {
-      return { projects: [] };
-    }
-    const projects = (parsed as { projects: unknown[] }).projects.filter(
-      (entry): entry is ProjectRecord =>
-        !!entry &&
-        typeof entry === "object" &&
-        typeof (entry as ProjectRecord).id === "string" &&
-        typeof (entry as ProjectRecord).path === "string" &&
-        typeof (entry as ProjectRecord).name === "string" &&
-        typeof (entry as ProjectRecord).addedAt === "string",
-    );
+    const parsed = decodeProjectsFile(readFileSync(filePath, "utf8"));
+    const projects = parsed.projects.flatMap((entry) => {
+      const decoded = decodeProjectRecord(entry);
+      return Option.isSome(decoded) ? [decoded.value] : [];
+    });
     return { projects };
   } catch {
     return { projects: [] };
@@ -106,12 +102,6 @@ function withMeta(record: ProjectRecord): ProjectEntry {
   };
 }
 
-/**
- * Shared projects.json store used by both the web app (src/features/agent/
- * projects-store.ts) and the Electron main process (desktop/logic/
- * projects-store.ts). Hosted under desktop/ because the desktop build
- * (tsc rootDir = desktop/) cannot import from src/.
- */
 export function createProjectsStore(options: ProjectsStoreOptions): ProjectsStore {
   const { projectsFilePath, chatsProjectId, emptyPathMessage } = options;
 

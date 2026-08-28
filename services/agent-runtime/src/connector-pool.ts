@@ -1,4 +1,11 @@
-import { connectMcp, type McpConnection, type McpTarget, type McpToolInfo } from "./mcp-client";
+import {
+  connectMcp,
+  type McpCallToolResult,
+  type McpConnection,
+  type McpTarget,
+  type McpToolArguments,
+  type McpToolInfo,
+} from "./mcp-client";
 import { connectorAuthorizationHeaders, googleWorkspaceConnectorAuth } from "./connector-auth";
 import { listConnectors, type ConnectorConfig } from "./connectors-service";
 import { googleWorkspaceConnection } from "./google-account";
@@ -16,29 +23,29 @@ export class ConnectorPool {
     oauthDependencies?: OAuthConnectorDependencies,
   ): Promise<McpTarget> {
     if (connector.transport === "stdio") {
-      return {
-        transport: "stdio" as const,
+      const target: McpTarget = {
+        transport: "stdio",
         command: connector.command ?? "",
         args: [...(connector.args ?? [])],
         env: {
-          ...(connector.env ?? {}),
+          ...connector.env,
           ...(await oauthConnectorSpawnEnv(connector, oauthDependencies)),
         },
-        ...(connector.cwd ? { cwd: connector.cwd } : {}),
       };
+      if (connector.cwd) target.cwd = connector.cwd;
+      return target;
     }
-    return {
-      transport: "http" as const,
+    const target: McpTarget = {
+      transport: "http",
       url: connector.url ?? "",
       headers: connector.headers ?? {},
-      ...(connector.auth
-        ? {
-            authorize: (forceRefresh: boolean) =>
-              connectorAuthorizationHeaders(connector, forceRefresh),
-          }
-        : {}),
-      ...(signal ? { signal } : {}),
     };
+    if (connector.auth) {
+      target.authorize = (forceRefresh: boolean) =>
+        connectorAuthorizationHeaders(connector, forceRefresh);
+    }
+    if (signal) target.signal = signal;
+    return target;
   }
 
   private async openConnection(
@@ -47,12 +54,14 @@ export class ConnectorPool {
   ): Promise<McpConnection> {
     const identity = googleWorkspaceConnectorAuth(connector);
     if (identity) {
-      return googleWorkspaceConnection({
+      const input = {
         service: identity.service,
         transport: googleWorkspaceEndpointTransport(identity.service, connector.url ?? ""),
-        authorize: (forceRefresh: boolean) => connectorAuthorizationHeaders(connector, forceRefresh),
-        ...(signal ? { signal } : {}),
-      });
+        authorize: (forceRefresh: boolean) =>
+          connectorAuthorizationHeaders(connector, forceRefresh),
+        signal,
+      };
+      return googleWorkspaceConnection(input);
     }
     return connectMcp(await this.resolveConnectorTarget(connector, signal));
   }
@@ -107,8 +116,8 @@ export class ConnectorPool {
   async callConnectorTool(
     connectorId: string,
     tool: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown> {
+    args: McpToolArguments,
+  ): Promise<McpCallToolResult> {
     const connector = await this.enabledConnector(connectorId);
     this.assertToolAllowed(connector, tool);
     try {
@@ -129,7 +138,11 @@ export class ConnectorPool {
       const tools = await connection.listTools();
       return { ok: true, tools };
     } catch (error) {
-      return { ok: false, tools: [], error: error instanceof Error ? error.message : String(error) };
+      return {
+        ok: false,
+        tools: [],
+        error: error instanceof Error ? error.message : String(error),
+      };
     } finally {
       connection?.close();
     }
