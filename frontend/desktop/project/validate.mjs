@@ -3,6 +3,15 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { git, repoRoot } from "./lib.mjs";
 
+const walkFiles = (dir, inspect) => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) walkFiles(fullPath, inspect);
+    else if (entry.isFile()) inspect(fullPath);
+  }
+};
+
 export function validateContracts() {
   const contractNames = `
     Backend ServeRuntimeKind ServeRuntime Serve ServePayload RecipeBase RecipePayload DownloadStatus DownloadFileStatus DownloadFileInfo ModelDownload StorageInfo ModelInfo ServiceInfo SystemConfig EnvironmentInfo Environment EnvironmentEngineId RuntimeBackendInfo EngineBackend RuntimeKind RuntimeTarget EngineJob RuntimePlatformKind RuntimeRocmSmiTool RuntimeGpuMonitoringTool RuntimeCudaInfo RuntimeRocmInfo RuntimeTorchBuildInfo RuntimePlatformInfo RuntimeGpuMonitoringInfo RuntimeGpuInfoSummary CompatibilitySeverity CompatibilityCheck SystemRuntimeInfo CompatibilityReport ConfigData RuntimeUpgradeResult ControllerEventType ControllerStreamEventType ControllerEventDomain ControllerBrowserEventChannel GPU Metrics VRAMCalculation PeakMetrics ProcessInfo LogSession StudioSettings StudioDiagnostics ControllerUsageStats UsageStats RigHardwareType RigNodeRole RigNodeSource RigAccelerator RigNode Rig RigsPayload
@@ -44,15 +53,11 @@ export function validateContracts() {
     }
   };
 
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && /\.(ts|tsx)$/.test(entry.name)) inspect(full);
-    }
-  };
-  for (const scanRoot of scanRoots) walk(path.join(repoRoot, scanRoot));
+  for (const scanRoot of scanRoots) {
+    walkFiles(path.join(repoRoot, scanRoot), (filePath) => {
+      if (/\.(ts|tsx)$/.test(filePath)) inspect(filePath);
+    });
+  }
 
   if (findings.length > 0) {
     console.error("Shared contract check failed. Move these declarations to controller/contracts:");
@@ -268,15 +273,6 @@ export function validateUi() {
     }
   };
 
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(fullPath);
-      else if (entry.isFile()) inspectFile(fullPath);
-    }
-  };
-
   const evaluateSharedLayerConsumers = () => {
     for (const [rel, importers] of [...sharedModuleImporters.entries()].sort(([a], [b]) =>
       a.localeCompare(b),
@@ -308,7 +304,7 @@ export function validateUi() {
   };
 
   if (statSync(srcRoot, { throwIfNoEntry: false })) {
-    walk(srcRoot);
+    walkFiles(srcRoot, inspectFile);
     evaluateSharedLayerConsumers();
   }
   if (findings.length > 0) {

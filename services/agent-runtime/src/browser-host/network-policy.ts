@@ -19,7 +19,7 @@ export type PinnedDestination = {
 
 const RESOLVE_TIMEOUT_MS = 5_000;
 
-function allowPrivateBrowsing(): boolean {
+export function allowPrivateBrowsing(): boolean {
   return process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE === "1";
 }
 

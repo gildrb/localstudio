@@ -21,6 +21,7 @@ import {
   loadPersistedConfig,
   savePersistedConfig,
 } from "../../config/persisted-config";
+import { toPublicSystemConfig } from "../../config/public-config";
 
 const SettingsUpdateSchema = Schema.Struct({
   models_dir: Schema.optional(Schema.NullOr(Schema.String)),
@@ -184,15 +185,7 @@ export const registerStudioRoutes = defineRoutes((app, context) => {
             vllm_bin: null,
           },
           disks,
-          config: {
-            host: context.config.host,
-            port: context.config.port,
-            inference_port: context.config.inference_port,
-            api_key_configured: Boolean(context.config.api_key),
-            models_dir: context.config.models_dir,
-            data_dir: context.config.data_dir,
-            db_path: context.config.db_path,
-          },
+          config: toPublicSystemConfig(context.config),
         });
       }),
     ),

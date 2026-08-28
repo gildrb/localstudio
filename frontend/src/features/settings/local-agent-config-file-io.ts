@@ -88,17 +88,21 @@ export async function backupExistingFile(file: string): Promise<string> {
   return backupPath;
 }
 
+async function writeTextAtomic(file: string, mode: number, serialize: () => string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
+  await writeFile(tmp, serialize(), { encoding: "utf-8", mode });
+  // writeFile's mode is subject to the process umask; chmod makes it exact.
+  await chmod(tmp, mode);
+  await rename(tmp, file);
+}
+
 export async function writeJsonAtomic(
   file: string,
   config: JsonRecord,
   mode: number,
 ): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
-  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf-8", mode });
-  // writeFile's mode is subject to the process umask; chmod makes it exact.
-  await chmod(tmp, mode);
-  await rename(tmp, file);
+  await writeTextAtomic(file, mode, () => `${JSON.stringify(config, null, 2)}\n`);
 }
 
 export async function writeYamlAtomic(
@@ -106,12 +110,7 @@ export async function writeYamlAtomic(
   config: JsonRecord,
   mode: number,
 ): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${randomBytes(6).toString("hex")}`;
-  const yamlText = YAML.stringify(config, { indent: 2, lineWidth: 0 });
-  await writeFile(tmp, yamlText, { encoding: "utf-8", mode });
-  await chmod(tmp, mode);
-  await rename(tmp, file);
+  await writeTextAtomic(file, mode, () => YAML.stringify(config, { indent: 2, lineWidth: 0 }));
 }
 
 export async function existingFileMode(file: string): Promise<number | null> {

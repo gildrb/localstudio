@@ -15,6 +15,7 @@ import { buildCompatibilityReport } from "./platform/compatibility-report";
 import { registerMonitoringRoutes } from "./metrics-routes";
 import { registerLogsRoutes } from "./logs-routes";
 import { registerUsageRoutes } from "./usage-routes";
+import { toPublicSystemConfig } from "../../config/public-config";
 const SYSTEM_SERVICE_CHECK_HOST = "127.0.0.1";
 const SYSTEM_COMPAT_SERVICE_CHECK_TIMEOUT_MS = 500;
 const SYSTEM_DEFAULT_SERVICE_CHECK_TIMEOUT_MS = 1_000;
@@ -294,15 +295,7 @@ export const registerSystemRoutes = defineRoutes((app, context) => {
         const runtime = yield* context.compute.host().pipe(Effect.flatMap(getSystemRuntimeInfo));
 
         const payload: SystemConfigResponse = {
-          config: {
-            host: context.config.host,
-            port: context.config.port,
-            inference_port: context.config.inference_port,
-            api_key_configured: Boolean(context.config.api_key),
-            models_dir: context.config.models_dir,
-            data_dir: context.config.data_dir,
-            db_path: context.config.db_path,
-          },
+          config: toPublicSystemConfig(context.config),
           services,
           environment: {
             controller_url: `http://${hostname()}:${context.config.port}`,

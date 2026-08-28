@@ -12,13 +12,12 @@ import {
   writeEnginePreference,
 } from "../browser-host/browser-engines";
 import { browserHistory } from "../browser-host/browser-history";
+import { allowPrivateBrowsing } from "../browser-host/network-policy";
 import { playwrightManager } from "../browser-host/playwright";
 import { fetchReadable } from "../browser-host/reader";
 import { decodeJsonBody, errorMessage } from "./helpers";
 
-const paneUrlOptions = () => ({
-  allowPrivate: process.env.LOCAL_STUDIO_BROWSER_ALLOW_PRIVATE === "1",
-});
+const paneUrlOptions = () => ({ allowPrivate: allowPrivateBrowsing() });
 
 const ALLOWED_VERBS = new Set([
   "navigate",

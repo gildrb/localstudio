@@ -5,6 +5,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Schema } from "effect";
 import { createSerialAccess } from "./serial-access";
+import { listenOnLoopback } from "./oauth-loopback-listener";
 import { resolveDataDir } from "./data-dir";
 import {
   listConnectors,
@@ -445,21 +446,6 @@ function respondHtml(response: ServerResponse, success: boolean, providerName: s
   response.end(callbackPage(success, providerName));
 }
 
-function listen(server: Server): Promise<number> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      const address = server.address();
-      if (!address || !(address instanceof Object)) {
-        reject(new Error("Loopback listener failed"));
-        return;
-      }
-      resolve(address.port);
-    });
-  });
-}
-
 async function beginPkceAuthorization(
   provider: OAuthConnectorProvider,
   definition: OAuthConnectorAuthDefinition,
@@ -514,7 +500,7 @@ async function beginPkceAuthorization(
       }
     })();
   });
-  const port = await listen(server).catch(() => {
+  const port = await listenOnLoopback(server).catch(() => {
     throw new OAuthConnectorError(500, "Could not start the private OAuth callback");
   });
   redirectUri = `http://127.0.0.1:${port}/callback`;

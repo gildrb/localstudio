@@ -1,5 +1,5 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { Effect, Fiber, Schema } from "effect";
+import { Effect, Fiber } from "effect";
 import {
   beginGoogleAuthorization,
   cancelGoogleAuthorization,
@@ -14,6 +14,7 @@ import {
 } from "./google-workspace-adapter";
 import type { GoogleWorkspacePluginId } from "./google-workspace-binding";
 import { createOAuthLoopbackLifecycle } from "./oauth-loopback-lifecycle";
+import { listenOnLoopback } from "./oauth-loopback-listener";
 
 type ActiveFlow = {
   id: string;
@@ -115,23 +116,6 @@ async function handleCallback(
   }
 }
 
-function listen(server: Server): Promise<number> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.removeListener("error", reject);
-      const address = Schema.decodeUnknownOption(Schema.Struct({ port: Schema.Number }))(
-        server.address(),
-      );
-      if (address._tag === "None") {
-        reject(new Error("Loopback listener failed"));
-        return;
-      }
-      resolve(address.value.port);
-    });
-  });
-}
-
 export function beginGoogleLoopbackAuthorization(
   account: GoogleWorkspacePluginId,
 ): Effect.Effect<{ authorizationUrl: string }, GoogleAccountError> {
@@ -143,7 +127,7 @@ export function beginGoogleLoopbackAuthorization(
         void handleCallback(account, flowId, request.url ?? "/", response);
       });
       const port = yield* Effect.tryPromise({
-        try: () => listen(server),
+        try: () => listenOnLoopback(server),
         catch: () => new GoogleAccountError(500, "Could not start the private OAuth callback"),
       });
       server.on("error", () => closeFlow(account, flowId));
