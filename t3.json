@@ -1,0 +1,12 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "iconPath": "apps/web/public/local-studio.png",
+  "scripts": [
+    {
+      "name": "Setup Worktree",
+      "command": "node scripts/setup-worktree.ts",
+      "icon": "configure",
+      "runOnWorktreeCreate": true
+    }
+  ]
+}
