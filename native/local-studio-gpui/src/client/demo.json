@@ -1,0 +1,1913 @@
+{
+ "anchor": "2026-10-24T14:32:10.000Z",
+ "controllers": [
+  {
+   "url": "http://100.64.0.3:18091",
+   "error": null,
+   "snapshot": {
+    "controller": {
+     "id": "rtx-6000-pod-a1b2c3",
+     "name": "rtx-6000-pod",
+     "url": "http://100.64.0.3:18091",
+     "version": "2.4.1"
+    },
+    "generatedAt": "2026-10-24T14:32:10.000Z",
+    "hardware": {
+     "cpus": 64,
+     "memTotalBytes": 515000000000,
+     "memFreeBytes": 171666666666,
+     "gpus": [
+      {
+       "index": 0,
+       "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+       "card": null,
+       "memoryUsedMib": 89359,
+       "memoryTotalMib": 91553,
+       "busy": true
+      },
+      {
+       "index": 1,
+       "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+       "card": null,
+       "memoryUsedMib": 89169,
+       "memoryTotalMib": 91553,
+       "busy": true
+      },
+      {
+       "index": 2,
+       "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+       "card": null,
+       "memoryUsedMib": 90313,
+       "memoryTotalMib": 91553,
+       "busy": true
+      },
+      {
+       "index": 3,
+       "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+       "card": null,
+       "memoryUsedMib": 90313,
+       "memoryTotalMib": 91553,
+       "busy": true
+      }
+     ]
+    },
+    "auto": null,
+    "endpoints": [
+     {
+      "id": "ep-8000",
+      "controllerId": "rtx-6000-pod-a1b2c3",
+      "port": 8000,
+      "pid": 4242,
+      "models": [
+       "DeepSeek-V4.1-Flash"
+      ],
+      "live": true,
+      "lastSeenAt": "2026-10-24T14:32:10.000Z",
+      "jobId": "job-1"
+     }
+    ],
+    "models": [],
+    "controllers": [
+     {
+      "id": "rtx-6000-pod-a1b2c3",
+      "name": "rtx-6000-pod",
+      "url": "http://100.64.0.3:18091",
+      "self": true,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": "rtx-4090-box-d4e5f6",
+      "name": "rtx-4090-box",
+      "url": "http://100.64.0.5:18091",
+      "self": false,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": null,
+      "name": "dgx-spark",
+      "url": "http://100.64.0.9:18091",
+      "self": false,
+      "reachable": false,
+      "error": "connection refused"
+     }
+    ],
+    "jobs": [
+     {
+      "id": "job-1",
+      "recipeId": "deepseek-v4.1-flash-vllm-4x",
+      "gpus": [
+       0,
+       1,
+       2,
+       3
+      ],
+      "port": 8000,
+      "container": "ls-job-1",
+      "phase": "ready",
+      "progress": 1,
+      "message": null,
+      "startedAt": "2026-10-23T12:32:10.000Z",
+      "updatedAt": "2026-10-23T14:32:10.000Z"
+     }
+    ],
+    "usage": []
+   },
+   "live": {
+    "engines": [
+     {
+      "port": 8000,
+      "engine": "vLLM",
+      "decodeTps": 391.6,
+      "prefillTps": 30847.8,
+      "running": 4,
+      "queued": 0,
+      "ttftMs": 346,
+      "kvFraction": 0.04,
+      "startedAt": "2026-10-23T14:32:10.000Z"
+     }
+    ],
+    "gpus": [
+     {
+      "index": 0,
+      "utilPct": 100,
+      "tempC": 65,
+      "powerW": 275,
+      "powerLimitW": 275
+     },
+     {
+      "index": 1,
+      "utilPct": 100,
+      "tempC": 48,
+      "powerW": 276,
+      "powerLimitW": 275
+     },
+     {
+      "index": 2,
+      "utilPct": 100,
+      "tempC": 57,
+      "powerW": 275,
+      "powerLimitW": 275
+     },
+     {
+      "index": 3,
+      "utilPct": 100,
+      "tempC": 73,
+      "powerW": 275,
+      "powerLimitW": 275
+     }
+    ],
+    "series": [
+     {
+      "at": "2026-10-23T15:02:10.000Z",
+      "decodeTps": 68.2,
+      "prefillTps": 11730.4
+     },
+     {
+      "at": "2026-10-23T15:32:10.000Z",
+      "decodeTps": 108.5,
+      "prefillTps": 19022.0
+     },
+     {
+      "at": "2026-10-23T16:02:10.000Z",
+      "decodeTps": 124.0,
+      "prefillTps": 22048.0
+     },
+     {
+      "at": "2026-10-23T16:32:10.000Z",
+      "decodeTps": 77.5,
+      "prefillTps": 13420.0
+     },
+     {
+      "at": "2026-10-23T17:02:10.000Z",
+      "decodeTps": 77.5,
+      "prefillTps": 13780.0
+     },
+     {
+      "at": "2026-10-23T17:32:10.000Z",
+      "decodeTps": 186.0,
+      "prefillTps": 32802.0
+     },
+     {
+      "at": "2026-10-23T18:02:10.000Z",
+      "decodeTps": 77.5,
+      "prefillTps": 13510.0
+     },
+     {
+      "at": "2026-10-23T18:32:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 3206.0
+     },
+     {
+      "at": "2026-10-23T19:02:10.000Z",
+      "decodeTps": 558.0,
+      "prefillTps": 218052.9
+     },
+     {
+      "at": "2026-10-23T19:32:10.000Z",
+      "decodeTps": 124.0,
+      "prefillTps": 21598.0
+     },
+     {
+      "at": "2026-10-23T20:02:10.000Z",
+      "decodeTps": 263.5,
+      "prefillTps": 45952.0
+     },
+     {
+      "at": "2026-10-23T20:32:10.000Z",
+      "decodeTps": 155.0,
+      "prefillTps": 26660.0
+     },
+     {
+      "at": "2026-10-23T21:02:10.000Z",
+      "decodeTps": 31.0,
+      "prefillTps": 5692.0
+     },
+     {
+      "at": "2026-10-23T21:32:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 3386.0
+     },
+     {
+      "at": "2026-10-23T22:02:10.000Z",
+      "decodeTps": 77.5,
+      "prefillTps": 13420.0
+     },
+     {
+      "at": "2026-10-23T22:32:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 3116.0
+     },
+     {
+      "at": "2026-10-23T23:02:10.000Z",
+      "decodeTps": 31.0,
+      "prefillTps": 6142.0
+     },
+     {
+      "at": "2026-10-23T23:32:10.000Z",
+      "decodeTps": 372.0,
+      "prefillTps": 64164.0
+     },
+     {
+      "at": "2026-10-24T00:02:10.000Z",
+      "decodeTps": 217.0,
+      "prefillTps": 37864.0
+     },
+     {
+      "at": "2026-10-24T00:32:10.000Z",
+      "decodeTps": 310.0,
+      "prefillTps": 54220.0
+     },
+     {
+      "at": "2026-10-24T01:02:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 2936.0
+     },
+     {
+      "at": "2026-10-24T01:32:10.000Z",
+      "decodeTps": 465.0,
+      "prefillTps": 80610.0
+     },
+     {
+      "at": "2026-10-24T02:02:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 2666.0
+     },
+     {
+      "at": "2026-10-24T02:32:10.000Z",
+      "decodeTps": 46.5,
+      "prefillTps": 8358.0
+     },
+     {
+      "at": "2026-10-24T03:02:10.000Z",
+      "decodeTps": 12.4,
+      "prefillTps": 2852.8
+     },
+     {
+      "at": "2026-10-24T03:32:10.000Z",
+      "decodeTps": 9.3,
+      "prefillTps": 1689.6
+     },
+     {
+      "at": "2026-10-24T04:02:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 3116.0
+     },
+     {
+      "at": "2026-10-24T04:32:10.000Z",
+      "decodeTps": 18.6,
+      "prefillTps": 4009.2
+     },
+     {
+      "at": "2026-10-24T05:02:10.000Z",
+      "decodeTps": 12.4,
+      "prefillTps": 2312.8
+     },
+     {
+      "at": "2026-10-24T05:32:10.000Z",
+      "decodeTps": 527.0,
+      "prefillTps": 91184.0
+     },
+     {
+      "at": "2026-10-24T06:02:10.000Z",
+      "decodeTps": 93.0,
+      "prefillTps": 16896.0
+     },
+     {
+      "at": "2026-10-24T06:32:10.000Z",
+      "decodeTps": 93.0,
+      "prefillTps": 16266.0
+     },
+     {
+      "at": "2026-10-24T07:02:10.000Z",
+      "decodeTps": 99.2,
+      "prefillTps": 17692.4
+     },
+     {
+      "at": "2026-10-24T07:32:10.000Z",
+      "decodeTps": 108.5,
+      "prefillTps": 18662.0
+     },
+     {
+      "at": "2026-10-24T08:02:10.000Z",
+      "decodeTps": 217.0,
+      "prefillTps": 37684.0
+     },
+     {
+      "at": "2026-10-24T08:32:10.000Z",
+      "decodeTps": 192.2,
+      "prefillTps": 33778.4
+     },
+     {
+      "at": "2026-10-24T09:02:10.000Z",
+      "decodeTps": 31.0,
+      "prefillTps": 5422.0
+     },
+     {
+      "at": "2026-10-24T09:32:10.000Z",
+      "decodeTps": 403.0,
+      "prefillTps": 69766.0
+     },
+     {
+      "at": "2026-10-24T10:02:10.000Z",
+      "decodeTps": 24.8,
+      "prefillTps": 5075.6
+     },
+     {
+      "at": "2026-10-24T10:32:10.000Z",
+      "decodeTps": 15.5,
+      "prefillTps": 2846.0
+     },
+     {
+      "at": "2026-10-24T11:02:10.000Z",
+      "decodeTps": 155.0,
+      "prefillTps": 27200.0
+     },
+     {
+      "at": "2026-10-24T11:32:10.000Z",
+      "decodeTps": 31.0,
+      "prefillTps": 6232.0
+     },
+     {
+      "at": "2026-10-24T12:02:10.000Z",
+      "decodeTps": 18.6,
+      "prefillTps": 3469.2
+     },
+     {
+      "at": "2026-10-24T12:32:10.000Z",
+      "decodeTps": 93.0,
+      "prefillTps": 16626.0
+     },
+     {
+      "at": "2026-10-24T13:02:10.000Z",
+      "decodeTps": 93.0,
+      "prefillTps": 15996.0
+     },
+     {
+      "at": "2026-10-24T13:32:10.000Z",
+      "decodeTps": 93.0,
+      "prefillTps": 16356.0
+     },
+     {
+      "at": "2026-10-24T14:02:10.000Z",
+      "decodeTps": 217.0,
+      "prefillTps": 38044.0
+     },
+     {
+      "at": "2026-10-24T14:32:10.000Z",
+      "decodeTps": 391.6,
+      "prefillTps": 30847.8
+     }
+    ],
+    "log": {
+     "cursor": 120,
+     "lines": [
+      {
+       "id": 120,
+       "at": "2026-10-24T14:32:08.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 119,
+       "at": "2026-10-24T14:32:03.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 118,
+       "at": "2026-10-24T14:32:00.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 117,
+       "at": "2026-10-24T14:31:54.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 116,
+       "at": "2026-10-24T14:31:50.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 115,
+       "at": "2026-10-24T14:31:48.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 114,
+       "at": "2026-10-24T14:31:43.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 113,
+       "at": "2026-10-24T14:31:40.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 112,
+       "at": "2026-10-24T14:31:34.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 111,
+       "at": "2026-10-24T14:31:30.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 110,
+       "at": "2026-10-24T14:31:28.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 109,
+       "at": "2026-10-24T14:31:23.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 108,
+       "at": "2026-10-24T14:31:20.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 107,
+       "at": "2026-10-24T14:31:14.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 106,
+       "at": "2026-10-24T14:31:10.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 105,
+       "at": "2026-10-24T14:31:08.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 104,
+       "at": "2026-10-24T14:31:03.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 103,
+       "at": "2026-10-24T14:31:00.000Z",
+       "kind": "health",
+       "status": 400,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 102,
+       "at": "2026-10-24T14:30:54.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 101,
+       "at": "2026-10-24T14:30:50.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 100,
+       "at": "2026-10-24T14:30:48.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 99,
+       "at": "2026-10-24T14:30:43.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 98,
+       "at": "2026-10-24T14:30:40.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 97,
+       "at": "2026-10-24T14:30:34.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 96,
+       "at": "2026-10-24T14:30:30.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 95,
+       "at": "2026-10-24T14:30:28.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 94,
+       "at": "2026-10-24T14:30:23.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 93,
+       "at": "2026-10-24T14:30:20.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 92,
+       "at": "2026-10-24T14:30:14.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 91,
+       "at": "2026-10-24T14:30:10.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 90,
+       "at": "2026-10-24T14:30:08.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 89,
+       "at": "2026-10-24T14:30:03.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 88,
+       "at": "2026-10-24T14:30:00.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 87,
+       "at": "2026-10-24T14:29:54.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 86,
+       "at": "2026-10-24T14:29:50.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 85,
+       "at": "2026-10-24T14:29:48.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 84,
+       "at": "2026-10-24T14:29:43.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 83,
+       "at": "2026-10-24T14:29:40.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 82,
+       "at": "2026-10-24T14:29:34.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 81,
+       "at": "2026-10-24T14:29:30.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 80,
+       "at": "2026-10-24T14:29:28.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 79,
+       "at": "2026-10-24T14:29:23.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 78,
+       "at": "2026-10-24T14:29:20.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 77,
+       "at": "2026-10-24T14:29:14.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 76,
+       "at": "2026-10-24T14:29:10.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 75,
+       "at": "2026-10-24T14:29:08.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 74,
+       "at": "2026-10-24T14:29:03.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 73,
+       "at": "2026-10-24T14:29:00.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 72,
+       "at": "2026-10-24T14:28:54.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 71,
+       "at": "2026-10-24T14:28:50.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 70,
+       "at": "2026-10-24T14:28:48.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 69,
+       "at": "2026-10-24T14:28:43.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 68,
+       "at": "2026-10-24T14:28:40.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 67,
+       "at": "2026-10-24T14:28:34.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 66,
+       "at": "2026-10-24T14:28:30.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 65,
+       "at": "2026-10-24T14:28:28.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 64,
+       "at": "2026-10-24T14:28:23.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 63,
+       "at": "2026-10-24T14:28:20.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 62,
+       "at": "2026-10-24T14:28:14.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 61,
+       "at": "2026-10-24T14:28:10.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 60,
+       "at": "2026-10-24T14:28:08.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 59,
+       "at": "2026-10-24T14:28:03.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 58,
+       "at": "2026-10-24T14:28:00.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 57,
+       "at": "2026-10-24T14:27:54.000Z",
+       "kind": "metrics",
+       "status": 499,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 56,
+       "at": "2026-10-24T14:27:50.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 55,
+       "at": "2026-10-24T14:27:48.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 54,
+       "at": "2026-10-24T14:27:43.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 53,
+       "at": "2026-10-24T14:27:40.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 52,
+       "at": "2026-10-24T14:27:34.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 51,
+       "at": "2026-10-24T14:27:30.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 50,
+       "at": "2026-10-24T14:27:28.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 49,
+       "at": "2026-10-24T14:27:23.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 48,
+       "at": "2026-10-24T14:27:20.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 47,
+       "at": "2026-10-24T14:27:14.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 46,
+       "at": "2026-10-24T14:27:10.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 45,
+       "at": "2026-10-24T14:27:08.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 44,
+       "at": "2026-10-24T14:27:03.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 43,
+       "at": "2026-10-24T14:27:00.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 42,
+       "at": "2026-10-24T14:26:54.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 41,
+       "at": "2026-10-24T14:26:50.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 40,
+       "at": "2026-10-24T14:26:48.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 39,
+       "at": "2026-10-24T14:26:43.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 38,
+       "at": "2026-10-24T14:26:40.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 37,
+       "at": "2026-10-24T14:26:34.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 36,
+       "at": "2026-10-24T14:26:30.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 35,
+       "at": "2026-10-24T14:26:28.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 34,
+       "at": "2026-10-24T14:26:23.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 33,
+       "at": "2026-10-24T14:26:20.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 32,
+       "at": "2026-10-24T14:26:14.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 31,
+       "at": "2026-10-24T14:26:10.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 30,
+       "at": "2026-10-24T14:26:08.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 29,
+       "at": "2026-10-24T14:26:03.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 28,
+       "at": "2026-10-24T14:26:00.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 27,
+       "at": "2026-10-24T14:25:54.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 26,
+       "at": "2026-10-24T14:25:50.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 25,
+       "at": "2026-10-24T14:25:48.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 24,
+       "at": "2026-10-24T14:25:43.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 23,
+       "at": "2026-10-24T14:25:40.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 22,
+       "at": "2026-10-24T14:25:34.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 21,
+       "at": "2026-10-24T14:25:30.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 20,
+       "at": "2026-10-24T14:25:28.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 19,
+       "at": "2026-10-24T14:25:23.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 18,
+       "at": "2026-10-24T14:25:20.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 17,
+       "at": "2026-10-24T14:25:14.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 16,
+       "at": "2026-10-24T14:25:10.000Z",
+       "kind": "metrics",
+       "status": 200,
+       "method": "GET",
+       "path": "/metrics",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 15,
+       "at": "2026-10-24T14:25:08.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 14,
+       "at": "2026-10-24T14:25:03.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 13,
+       "at": "2026-10-24T14:25:00.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 12,
+       "at": "2026-10-24T14:24:54.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 11,
+       "at": "2026-10-24T14:24:50.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 10,
+       "at": "2026-10-24T14:24:48.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 9,
+       "at": "2026-10-24T14:24:43.000Z",
+       "kind": "chat",
+       "status": 200,
+       "method": "POST",
+       "path": "/v1/chat/completions",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 8,
+       "at": "2026-10-24T14:24:40.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 7,
+       "at": "2026-10-24T14:24:34.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 6,
+       "at": "2026-10-24T14:24:30.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 5,
+       "at": "2026-10-24T14:24:28.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      },
+      {
+       "id": 4,
+       "at": "2026-10-24T14:24:23.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:52488"
+      },
+      {
+       "id": 3,
+       "at": "2026-10-24T14:24:20.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46080"
+      },
+      {
+       "id": 2,
+       "at": "2026-10-24T14:24:14.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:46064"
+      },
+      {
+       "id": 1,
+       "at": "2026-10-24T14:24:10.000Z",
+       "kind": "health",
+       "status": 200,
+       "method": "GET",
+       "path": "/health",
+       "client": "172.17.0.1:58064"
+      }
+     ]
+    }
+   },
+   "recipes": {
+    "recipes": [
+     {
+      "id": "deepseek-v4.1-flash-vllm-4x",
+      "model": "DeepSeek-V4.1-Flash",
+      "card": "rtx-pro-6000",
+      "engine": "vllm",
+      "cards": 4,
+      "ctx": 131072,
+      "tps": 390,
+      "fits": true,
+      "blocked": null
+     },
+     {
+      "id": "qwen3.6-32b-sglang-1x",
+      "model": "Qwen3.6-32B",
+      "card": "rtx-pro-6000",
+      "engine": "sglang",
+      "cards": 1,
+      "ctx": 65536,
+      "tps": 120,
+      "fits": true,
+      "blocked": null
+     },
+     {
+      "id": "kimi-k3-vllm-8x",
+      "model": "Kimi-K3",
+      "card": "rtx-pro-6000",
+      "engine": "vllm",
+      "cards": 8,
+      "ctx": 262144,
+      "tps": null,
+      "fits": false,
+      "blocked": "needs 8 cards, this controller has 4"
+     }
+    ]
+   }
+  },
+  {
+   "url": "http://100.64.0.5:18091",
+   "error": null,
+   "snapshot": {
+    "controller": {
+     "id": "rtx-4090-box-d4e5f6",
+     "name": "rtx-4090-box",
+     "url": "http://100.64.0.5:18091",
+     "version": "2.4.1"
+    },
+    "generatedAt": "2026-10-24T14:32:10.000Z",
+    "hardware": {
+     "cpus": 64,
+     "memTotalBytes": 128000000000,
+     "memFreeBytes": 42666666666,
+     "gpus": [
+      {
+       "index": 0,
+       "name": "NVIDIA GeForce RTX 4090",
+       "card": null,
+       "memoryUsedMib": 477,
+       "memoryTotalMib": 22888,
+       "busy": false
+      }
+     ]
+    },
+    "auto": null,
+    "endpoints": [],
+    "models": [],
+    "controllers": [
+     {
+      "id": "rtx-6000-pod-a1b2c3",
+      "name": "rtx-6000-pod",
+      "url": "http://100.64.0.3:18091",
+      "self": true,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": "rtx-4090-box-d4e5f6",
+      "name": "rtx-4090-box",
+      "url": "http://100.64.0.5:18091",
+      "self": false,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": null,
+      "name": "dgx-spark",
+      "url": "http://100.64.0.9:18091",
+      "self": false,
+      "reachable": false,
+      "error": "connection refused"
+     }
+    ],
+    "jobs": [],
+    "usage": []
+   },
+   "live": {
+    "engines": [],
+    "gpus": [
+     {
+      "index": 0,
+      "utilPct": 0,
+      "tempC": 34,
+      "powerW": 21,
+      "powerLimitW": 450
+     }
+    ],
+    "series": [
+     {
+      "at": "2026-10-23T15:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T15:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T16:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T16:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T17:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T17:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T18:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T18:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T19:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T19:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T20:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T20:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T21:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T21:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T22:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T22:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T23:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-23T23:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T00:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T00:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T01:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T01:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T02:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T02:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T03:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T03:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T04:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T04:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T05:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T05:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T06:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T06:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T07:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T07:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T08:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T08:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T09:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T09:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T10:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T10:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T11:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T11:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T12:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T12:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T13:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T13:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T14:02:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     },
+     {
+      "at": "2026-10-24T14:32:10.000Z",
+      "decodeTps": 0,
+      "prefillTps": 0
+     }
+    ],
+    "log": {
+     "cursor": 0,
+     "lines": []
+    }
+   },
+   "recipes": {
+    "recipes": []
+   }
+  },
+  {
+   "url": "http://100.64.0.9:18091",
+   "error": "connection refused",
+   "snapshot": {
+    "controller": {
+     "id": "dgx-spark-0a0b0c",
+     "name": "dgx-spark",
+     "url": "http://100.64.0.9:18091",
+     "version": "2.4.1"
+    },
+    "generatedAt": "2026-10-24T14:32:10.000Z",
+    "hardware": {
+     "cpus": 64,
+     "memTotalBytes": 128000000000,
+     "memFreeBytes": 42666666666,
+     "gpus": []
+    },
+    "auto": null,
+    "endpoints": [
+     {
+      "id": "ep-30000",
+      "controllerId": "dgx-spark-0a0b0c",
+      "port": 30000,
+      "pid": null,
+      "models": [
+       "GLM-5.3-Flash"
+      ],
+      "live": true,
+      "lastSeenAt": "2026-10-24T14:02:10.000Z",
+      "jobId": null
+     }
+    ],
+    "models": [],
+    "controllers": [
+     {
+      "id": "rtx-6000-pod-a1b2c3",
+      "name": "rtx-6000-pod",
+      "url": "http://100.64.0.3:18091",
+      "self": true,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": "rtx-4090-box-d4e5f6",
+      "name": "rtx-4090-box",
+      "url": "http://100.64.0.5:18091",
+      "self": false,
+      "reachable": true,
+      "error": null
+     },
+     {
+      "id": null,
+      "name": "dgx-spark",
+      "url": "http://100.64.0.9:18091",
+      "self": false,
+      "reachable": false,
+      "error": "connection refused"
+     }
+    ],
+    "jobs": [],
+    "usage": []
+   },
+   "live": null,
+   "recipes": null
+  }
+ ]
+}

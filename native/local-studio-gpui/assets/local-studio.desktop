@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Local Studio
+Comment=Controller and engine dashboard
+Exec=local-studio-gpui
+Icon=dev.sybil.LocalStudio
+Terminal=false
+Categories=Development;Monitor;
+StartupWMClass=dev.sybil.LocalStudio

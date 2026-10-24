@@ -1,0 +1,81 @@
+name: GPUI
+on:
+  pull_request:
+    paths:
+      - native/local-studio-gpui/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/gpui.yml
+  push:
+    branches: [dev, main]
+    paths:
+      - native/local-studio-gpui/**
+      - flake.nix
+      - flake.lock
+      - .github/workflows/gpui.yml
+permissions:
+  contents: read
+concurrency:
+  group: gpui-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  nix-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check --all-systems --no-build
+  nix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check -L
+      - run: nix build -L .#default
+      - run: test -x result/bin/local-studio-gpui
+  cargo-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: native/local-studio-gpui
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y --no-install-recommends gcc g++ clang cmake pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libvulkan-dev libssl-dev libzstd-dev libvulkan1 mesa-vulkan-drivers xvfb weston
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/local-studio-gpui
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      - name: Smoke on X11
+        run: WAYLAND_DISPLAY= xvfb-run -a -s "-screen 0 1280x800x24" ./target/release/local-studio-gpui --smoke
+      - name: Smoke on Wayland
+        run: |
+          export XDG_RUNTIME_DIR=$(mktemp -d)
+          weston --backend=headless --renderer=pixman --socket=wl-smoke --idle-time=0 &
+          timeout 30 sh -c 'until [ -S "$XDG_RUNTIME_DIR/wl-smoke" ]; do sleep 0.1; done'
+          WAYLAND_DISPLAY=wl-smoke DISPLAY= ./target/release/local-studio-gpui --smoke
+  cargo-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: native/local-studio-gpui
+    steps:
+      - uses: actions/checkout@v7
+      - name: Metal toolchain
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/local-studio-gpui
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      - run: ./target/release/local-studio-gpui --smoke
