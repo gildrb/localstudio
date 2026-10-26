@@ -1518,6 +1518,19 @@ export function createStagePatchedDependencies(
     ),
   );
 }
+export function pinPatchedStageDependencies(
+  dependencies: Record<string, string>,
+  patchedDependencies: Record<string, string>,
+): Record<string, string> {
+  const pinned = { ...dependencies };
+  for (const patchKey of Object.keys(patchedDependencies)) {
+    const versionSeparator = patchKey.lastIndexOf("@");
+    if (versionSeparator > 0 && Object.hasOwn(pinned, getPatchedDependencyPackageName(patchKey))) {
+      pinned[getPatchedDependencyPackageName(patchKey)] = patchKey.slice(versionSeparator + 1);
+    }
+  }
+  return pinned;
+}
 
 function getPatchedDependencyPackageName(patchKey: string): string {
   const versionSeparator = patchKey.lastIndexOf("@");
@@ -2966,10 +2979,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
-  const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
-    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
-  };
+  const sidecarDependencies = pinPatchedStageDependencies(
+    {
+      ...input.runtimeExternalDependencies,
+      ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    },
+    input.patchedDependencies,
+  );
   const sidecarPatchedDependencies = createStagePatchedDependencies(
     input.patchedDependencies,
     sidecarDependencies,
@@ -3699,7 +3715,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // desktop main-process externals, while the server bundle's externals live
   // in the server.asar sidecar (see stageWindowsServerSidecar). macOS and
   // Linux merge both sets into one app.asar.
-  const stageDependencies =
+  const stageDependencies = pinPatchedStageDependencies(
     options.platform === "win"
       ? { ...resolvedDesktopRuntimeDependencies }
       : resolveMergedStageDependencies({
@@ -3708,7 +3724,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
           desktopDependencies: resolvedDesktopRuntimeDependencies,
           arch: options.arch,
           fffNodeVersion: serverPackageJson.dependencies["@ff-labs/fff-node"],
-        });
+        }),
+    workspacePatchedDependencies,
+  );
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,
